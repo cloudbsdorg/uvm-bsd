@@ -1,0 +1,4 @@
+case wrong ioctl number: compile failed
+case extra 4-byte field: members rejected
+case wide rmStatus: compile failed
+PASS: UVM_INITIALIZE is 0x30000001. UVM_INITIALIZE_PARAMS is 16 bytes, alignment 8, flags at 0, rmStatus is 4 bytes at 8. headers tag 595.99.02 commit e394a404108a9ce5bba988c1dddf694dabbd4a43.

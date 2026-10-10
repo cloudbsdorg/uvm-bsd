@@ -1,0 +1,15 @@
+# Unmodified files from NVIDIA/open-gpu-kernel-modules tag 595.99.02.
+# commit e394a404108a9ce5bba988c1dddf694dabbd4a43
+# Do not edit these headers. Replace the pin when the driver version changes.
+tag 595.99.02
+commit e394a404108a9ce5bba988c1dddf694dabbd4a43
+0ffb5cf3679fb5e150745e54b72fab861e319823e419f36376468a60862c2748  kernel-open/nvidia-uvm/uvm_linux_ioctl.h
+9cc909360f2d19135852390fb66a12fe4d22ca39c19e2609b2ff5e925df4bdf4  kernel-open/nvidia-uvm/uvm_ioctl.h
+94d4124ee87678f45148fe679bf249e19a89c987815aaff6dc72b45ebf606b14  kernel-open/nvidia-uvm/uvm_types.h
+a5aca75935337c79b364b0a3c6c95f576148d0f828cca4e93b752161f85406b2  kernel-open/common/inc/cpuopsys.h
+a228c1ac5b26b9e4d7d1efa7dd69bf111bd0bbadddd65bb016e610e13871a234  kernel-open/common/inc/nvCpuUuid.h
+fffd902620642d566fe06619343a151795c7d0e4540c904a41baea24aae03d8c  kernel-open/common/inc/nv_uvm_user_types.h
+7c7bf27c5360464b459f6069d2e72f6070bb3fdd0862baccf6c7aa71da67c593  kernel-open/common/inc/nvlimits.h
+e8267172a1f7a56420d612c6734b3554b9ff6a3d33fdda21b1371ff4ce4b8675  kernel-open/common/inc/nvstatus.h
+5cbecddb80d43ece59fd33d778e02d38d9fda17413cad64137d2cdf344d78153  kernel-open/common/inc/nvstatuscodes.h
+d1a66ddfa18987eb09f61804586de432dadacbede19315386167536c8b0c0acc  kernel-open/common/inc/nvtypes.h
