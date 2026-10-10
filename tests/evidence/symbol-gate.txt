@@ -1,0 +1,30 @@
+case dropped blob symbol: rejected
+case blob grew nvUvmInterface: rejected
+case interface grew a call: rejected
+case blob grew an uncalled symbol: rejected
+case blob grew a global data symbol: rejected
+case called symbol changed from text to data: rejected
+case undefined nvUvmInterface reference: accepted
+case export patch dropped a kthread symbol: rejected
+case export patch named an rm_gpu_ops symbol: rejected
+case export patch hid a name in empty quotes: rejected
+case export patch used a make expansion: rejected
+case export patch split a name across a continuation: rejected
+case export patch dropped the assignment: rejected
+case export patch mentions EXPORT_SYMS without assigning it: rejected
+case export patch used a shell assignment: rejected
+case export patch includes another makefile: rejected
+case export patch continues onto a context line: rejected
+case export patch lengthened a kthread name: rejected
+case export patch hid the kthread names in a comment: rejected
+case upstream makefile split EXPORT_SYMS: rejected
+case upstream makefile included an unread file: rejected
+case upstream makefile included a relative file: rejected
+case included makefile was absent: rejected
+case nvidia-sources.mk set EXPORT_SYMS: rejected
+case optional-cflags.mk included another makefile: rejected
+case kmod PATCHDIR overridden: rejected
+case kmod patch name only in a comment: rejected
+case kmod patch recipe removed: rejected
+case kmod makefile used a shell assignment: rejected
+PASS: nv-kernel.o sha256 b64589a3760bd2acea31ca104181ad98c1af3fdc588d251c2d1bdb55a8ccdc54 has 76 global text rm_gpu_ops_ symbols and no defined nvUvmInterface. Those calls are in the NV_UVM_ENABLE arm. src/nvidia/Makefile sha256 6377487037ce79c8369bbc7e45fae6595003eced40a750c0d3bf97b9ebf5c939 sets no EXPORT_SYMS. nvidia-sources.mk sha256 29e058f616b0c0db861e6ace15a5bb55403a30da6f114db1b4ba17938e892da9 and optional-cflags.mk sha256 c398b57b1de33cb76d870560e2a2b8079cba3485dbc6149e65989275bbb52795 set no EXPORT_SYMS. extra-patch-src-Makefile-2.in sha256 cade8991717382e96c1b6f95151cd4f487f29f119927e32f159fee0f63775b13 assigns only the eight nv_kthread names. x11/nvidia-kmod applies that patch from nvidia-driver/files. Link plan: compile nv_uvm_interface.c with NV_UVM_ENABLE into nvidia-uvm.ko and add those 76 names to that patch.

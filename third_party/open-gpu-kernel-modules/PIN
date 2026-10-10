@@ -13,3 +13,4 @@ fffd902620642d566fe06619343a151795c7d0e4540c904a41baea24aae03d8c  kernel-open/co
 e8267172a1f7a56420d612c6734b3554b9ff6a3d33fdda21b1371ff4ce4b8675  kernel-open/common/inc/nvstatus.h
 5cbecddb80d43ece59fd33d778e02d38d9fda17413cad64137d2cdf344d78153  kernel-open/common/inc/nvstatuscodes.h
 d1a66ddfa18987eb09f61804586de432dadacbede19315386167536c8b0c0acc  kernel-open/common/inc/nvtypes.h
+ca600c4265bc549bfac7a1225b98fe691e1825660ed510665c95f146af775179  kernel-open/nvidia/nv_uvm_interface.c
