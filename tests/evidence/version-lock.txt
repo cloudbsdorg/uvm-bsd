@@ -1,0 +1,109 @@
+version-lock self-test
+text only; make was not run
+
+case commented missing-file .error: exit=1
+FAIL: missing .error under !exists(${PORTSDIR}/x11/nvidia-driver/Makefile.version)
+case commented empty-version .error: exit=1
+FAIL: missing .error under empty(NVIDIA_DISTVERSION)
+case only an unrelated .error: exit=1
+FAIL: missing .error under !exists(${PORTSDIR}/x11/nvidia-driver/Makefile.version)
+case second DISTVERSION: exit=1
+FAIL: the port Makefile has 2 DISTVERSION assignments. Leave one: DISTVERSION=${NVIDIA_DISTVERSION}
+case DISTVERSION suffix: exit=1
+FAIL: DISTVERSION must use operator = and value ${NVIDIA_DISTVERSION} at top level, found = [${NVIDIA_DISTVERSION}.1] at depth 0
+case DISTVERSION ?=: exit=1
+FAIL: DISTVERSION must use operator = and value ${NVIDIA_DISTVERSION} at top level, found ?= [${NVIDIA_DISTVERSION}] at depth 0
+case .if 0 around include: exit=1
+FAIL: conditional not allowed: [0]
+case .if defined(UNUSED): exit=1
+FAIL: conditional not allowed: [defined(UNUSED)]
+case include inside !defined(PORTSDIR): exit=1
+FAIL: driver version .include is inside a conditional
+case other include: exit=1
+FAIL: include is not allowed: ["${OTHER_MK}"]
+case .for: exit=1
+FAIL: remove .for from the port Makefile
+case dotted number in a trailing comment: exit=1
+FAIL: literal version number [470.86] in the port Makefile. Delete it and use ${NVIDIA_DISTVERSION}
+case continued dotted number: exit=1
+FAIL: literal version number [470.86] in the port Makefile. Delete it and use ${NVIDIA_DISTVERSION}
+case port assigns NVIDIA_DISTVERSION: exit=1
+FAIL: port Makefile assigns NVIDIA_DISTVERSION
+case continued legal include: exit=0
+PASS: fixture paths. text only, make was not run. driver NVIDIA_DISTVERSION=595.99.02 from /tmp/tmp.ks9RlLcgBe/work/ports/x11/nvidia-driver/Makefile.version. port sets one top-level DISTVERSION=${NVIDIA_DISTVERSION}, .errors when the version file is missing and when NVIDIA_DISTVERSION is empty.
+case extra top-level .error: exit=0
+PASS: fixture paths. text only, make was not run. driver NVIDIA_DISTVERSION=595.99.02 from /tmp/tmp.ks9RlLcgBe/work/ports/x11/nvidia-driver/Makefile.version. port sets one top-level DISTVERSION=${NVIDIA_DISTVERSION}, .errors when the version file is missing and when NVIDIA_DISTVERSION is empty.
+case defined-empty then ?=: exit=1
+FAIL: NVIDIA_DISTVERSION is empty in /tmp/tmp.ks9RlLcgBe/work/ports/x11/nvidia-driver/Makefile.version. Set NVIDIA_DISTVERSION in that file. Do not copy a number into the port.
+case later = wins: exit=0
+PASS: fixture paths. text only, make was not run. driver NVIDIA_DISTVERSION=2.2.2 from /tmp/tmp.ks9RlLcgBe/work/ports/x11/nvidia-driver/Makefile.version. port sets one top-level DISTVERSION=${NVIDIA_DISTVERSION}, .errors when the version file is missing and when NVIDIA_DISTVERSION is empty.
+case later ?= does not win: exit=0
+PASS: fixture paths. text only, make was not run. driver NVIDIA_DISTVERSION=2.2.2 from /tmp/tmp.ks9RlLcgBe/work/ports/x11/nvidia-driver/Makefile.version. port sets one top-level DISTVERSION=${NVIDIA_DISTVERSION}, .errors when the version file is missing and when NVIDIA_DISTVERSION is empty.
+case spaces around =: exit=0
+PASS: fixture paths. text only, make was not run. driver NVIDIA_DISTVERSION=7.7.7 from /tmp/tmp.ks9RlLcgBe/work/ports/x11/nvidia-driver/Makefile.version. port sets one top-level DISTVERSION=${NVIDIA_DISTVERSION}, .errors when the version file is missing and when NVIDIA_DISTVERSION is empty.
+case := literal: exit=0
+PASS: fixture paths. text only, make was not run. driver NVIDIA_DISTVERSION=6.6.6 from /tmp/tmp.ks9RlLcgBe/work/ports/x11/nvidia-driver/Makefile.version. port sets one top-level DISTVERSION=${NVIDIA_DISTVERSION}, .errors when the version file is missing and when NVIDIA_DISTVERSION is empty.
+case +=: exit=1
+FAIL: cannot evaluate +=
+case !=: exit=1
+FAIL: cannot expand !=
+case continued version value: exit=0
+PASS: fixture paths. text only, make was not run. driver NVIDIA_DISTVERSION=3.3.3 from /tmp/tmp.ks9RlLcgBe/work/ports/x11/nvidia-driver/Makefile.version. port sets one top-level DISTVERSION=${NVIDIA_DISTVERSION}, .errors when the version file is missing and when NVIDIA_DISTVERSION is empty.
+case nested required guard: exit=1
+FAIL: required guard must be at top level: [empty(NVIDIA_DISTVERSION)]
+case version file .if: exit=1
+FAIL: version file directive is not evaluated: .if 0
+case conditional ?= with a dollar: exit=1
+FAIL: cannot expand ?=
+case PORTVERSION: exit=1
+FAIL: assignment not allowed: [PORTVERSION]
+case DISTVERSIONSUFFIX: exit=1
+FAIL: assignment not allowed: [DISTVERSIONSUFFIX]
+case version file shell assignment: exit=1
+FAIL: version file line is not an NVIDIA_DISTVERSION assignment: FOO!=echo hi
+case PORTNAME shell assignment: exit=1
+FAIL: only = is allowed on [PORTNAME], found !=
+case skeleton value expansion: exit=1
+FAIL: value of [COMMENT] contains a make expansion
+case top-level PORTSDIR: exit=1
+FAIL: PORTSDIR may only be set to /usr/ports inside !defined(PORTSDIR)
+case recipe line: exit=1
+FAIL: line is not allowed in the port Makefile: echo hi
+case even backslash hides an include: exit=1
+FAIL: include is not allowed: ["/tmp/evil.mk"]
+case even backslashes in a value: exit=1
+FAIL: value of [PORTNAME] contains a backslash
+case version comment hides a shell line: exit=1
+FAIL: version file line is not an NVIDIA_DISTVERSION assignment: FOO!=echo hi
+case escaped hash hides a shell: exit=1
+FAIL: value of [COMMENT] contains a make expansion
+case bracket hash hides a shell: exit=1
+FAIL: value of [COMMENT] contains a make expansion
+case backslash in a skeleton value: exit=1
+FAIL: value of [COMMENT] contains a backslash
+case error message runs a shell: exit=1
+FAIL: value of .error contains a make expansion
+case error message :sh: exit=1
+FAIL: value of .error contains a make expansion
+case backslash in .error: exit=1
+FAIL: value of .error contains a backslash
+case error may name PORTSDIR: exit=0
+PASS: fixture paths. text only, make was not run. driver NVIDIA_DISTVERSION=595.99.02 from /tmp/tmp.ks9RlLcgBe/work/ports/x11/nvidia-driver/Makefile.version. port sets one top-level DISTVERSION=${NVIDIA_DISTVERSION}, .errors when the version file is missing and when NVIDIA_DISTVERSION is empty.
+case include before missing-file guard: exit=1
+FAIL: missing-file guard must come before the driver version .include
+case empty guard before include: exit=1
+FAIL: empty-version guard must come after the driver version .include
+case makefile symlink leaves the overlay: exit=1
+FAIL: port Makefile resolves outside OVERLAY: /tmp/tmp.ks9RlLcgBe/escaped.mk
+case HOME does not move the trees: exit=0
+PASS: canonical paths. text only, make was not run. driver NVIDIA_DISTVERSION=595.99.02 from /home/mlapointe/git/freebsd-ports/x11/nvidia-driver/Makefile.version. port sets one top-level DISTVERSION=${NVIDIA_DISTVERSION}, .errors when the version file is missing and when NVIDIA_DISTVERSION is empty.
+case bracket version is not globbed: exit=1
+FAIL: NVIDIA_DISTVERSION is not a dotted number: [595.99.0[0-9]]
+case canonical: exit=0
+PASS: canonical paths. text only, make was not run. driver NVIDIA_DISTVERSION=595.99.02 from /home/mlapointe/git/freebsd-ports/x11/nvidia-driver/Makefile.version. port sets one top-level DISTVERSION=${NVIDIA_DISTVERSION}, .errors when the version file is missing and when NVIDIA_DISTVERSION is empty.
+case decoy OVERLAY: exit=1
+FAIL: OVERLAY resolves to /tmp/tmp.ks9RlLcgBe/decoy/overlay, not /home/mlapointe/git/cloudbsd-ports-overlay. Unset OVERLAY.
+case decoy PORTS: exit=1
+FAIL: PORTS resolves to /tmp/tmp.ks9RlLcgBe/decoy/ports, not /home/mlapointe/git/freebsd-ports. Unset PORTS.
+
+self-test passed
