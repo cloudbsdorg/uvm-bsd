@@ -102,6 +102,18 @@ NVIDIA checkout was run on `src/` only.
   `tools/makeobjops.awk` and `tools/vnode_if.awk` (the interface headers
   the amd64 cross-compile check generates).
 
+## Architecture: our own design decision
+
+Owner decision (Mark, 2026-11-19): the driver is split into a vendor-neutral
+core (`sys/core/`: VA spaces and ranges, residency and migration policy, the
+fault-service queue on the FreeBSD VM system, device-memory accounting) and a
+vendor backend layer (`sys/nvidia/`: the `/dev/nvidia-uvm` ioctl ABI libcuda
+expects, the RM interface, the Blackwell HAL), joined by an ops table of our
+own (`docs/ARCHITECTURE.md`).  This structure is not derived from anyone's
+code; it is recorded here as a design decision and its consistency with the
+spec goes through the describer's Q&A loop (Q-006).  The split is carried
+out as opencode rounds after the flat phase-1 code landed.
+
 ## Decisions taken without a spec answer
 
 Phase-1 simplifications, each stated in the file that makes it:
@@ -150,3 +162,4 @@ when its checked answer arrives in a new frozen revision.
 | Q-003 SET_OBJECT on subchannel 4 for copy-engine methods | open | as the spec states: subchannels 0 and 5 only |
 | Q-004 the numEntries argument of the page directory hand-over | open | the root table's entry count (2 for MMU v3, 4 for v2) |
 | Q-005 NV_WARN_NOTHING_TO_DO from UVM_MM_INITIALIZE in this phase | open | answered; release ordering comes with managed ranges |
+| Q-006 the core/backend split against the spec's locking and teardown order | open | the mapping of spec objects to layers in docs/ARCHITECTURE.md |
