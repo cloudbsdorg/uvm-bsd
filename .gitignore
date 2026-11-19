@@ -1,0 +1,15 @@
+# build products of the module (bsd.kmod.mk) and the tests
+sys/*.o
+sys/*.ko
+sys/*.ko.debug
+sys/*.ko.full
+sys/.depend*
+sys/export_syms
+sys/machine
+sys/x86
+sys/*_if.h
+sys/opt_*.h
+sys/nvidia-uvm.kld
+tests/unit/*_test
+tests/ioctl/uvm_ioctl_test
+sys/vnode_if_*.h

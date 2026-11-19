@@ -1,0 +1,336 @@
+/*
+ * Copyright (c) 2026 REVYTECH, Inc.
+ * SPDX-License-Identifier: BSD-2-Clause
+ *
+ * abi_layout_test.c - the user ABI structures of sys/nvidia_uvm_ioctl.h
+ * have exactly the sizes, alignments and field offsets the specification
+ * gives (uvm-spec r1, 01-user-abi.md section 5 and section 2.5), and the
+ * request numbers and status codes are the specification's.  Every check
+ * is a compile-time assertion, so a wrong layout fails the build of this
+ * test; main() prints the count so a run leaves a visible trace.
+ *
+ * Red first: this file was compiled before the header existed (fails:
+ * missing header), then against the header.
+ */
+
+#include <stddef.h>
+#include <stdio.h>
+
+#include "nvidia_uvm_ioctl.h"
+#include "nvidia_uvm_status.h"
+
+/* CPD-OFF -- one compile-time assertion per field of the ABI: the repetition is the layout */
+#define SZ(t, n)	_Static_assert(sizeof(t) == (n), #t " size")
+#define AL(t, n)	_Static_assert(_Alignof(t) == (n), #t " align")
+#define OF(t, f, n)	_Static_assert(offsetof(t, f) == (n), #t "." #f)
+
+/* 2.5 primitive types */
+SZ(NvU8, 1); SZ(NvU16, 2); SZ(NvU32, 4); SZ(NvU64, 8); SZ(NvS32, 4);
+SZ(NvBool, 1); SZ(NvHandle, 4); SZ(NvP64, 8); SZ(NV_STATUS, 4);
+SZ(NvProcessorUuid, 16); AL(NvProcessorUuid, 1);
+SZ(UvmGpuMappingAttributes, 36); AL(UvmGpuMappingAttributes, 4);
+OF(UvmGpuMappingAttributes, gpuUuid, 0);
+OF(UvmGpuMappingAttributes, gpuMappingType, 16);
+OF(UvmGpuMappingAttributes, gpuCachingType, 20);
+OF(UvmGpuMappingAttributes, gpuFormatType, 24);
+OF(UvmGpuMappingAttributes, gpuElementBits, 28);
+OF(UvmGpuMappingAttributes, gpuCompressionType, 32);
+_Static_assert(UVM_MAX_GPUS == 256, "UVM_MAX_GPUS");
+_Static_assert(UVM_MAX_GPUS_V1 == 32, "UVM_MAX_GPUS_V1");
+
+/* 5.1 initialisation family */
+SZ(UVM_INITIALIZE_PARAMS, 16); AL(UVM_INITIALIZE_PARAMS, 8);
+OF(UVM_INITIALIZE_PARAMS, flags, 0); OF(UVM_INITIALIZE_PARAMS, rmStatus, 8);
+SZ(UVM_MM_INITIALIZE_PARAMS, 8); AL(UVM_MM_INITIALIZE_PARAMS, 4);
+OF(UVM_MM_INITIALIZE_PARAMS, uvmFd, 0); OF(UVM_MM_INITIALIZE_PARAMS, rmStatus, 4);
+SZ(UVM_IS_8_SUPPORTED_PARAMS, 8);
+OF(UVM_IS_8_SUPPORTED_PARAMS, is8Supported, 0);
+SZ(UVM_PAGEABLE_MEM_ACCESS_PARAMS, 8);
+OF(UVM_PAGEABLE_MEM_ACCESS_PARAMS, pageableMemAccess, 0);
+OF(UVM_PAGEABLE_MEM_ACCESS_PARAMS, rmStatus, 4);
+SZ(UVM_PAGEABLE_MEM_ACCESS_ON_GPU_PARAMS, 24); AL(UVM_PAGEABLE_MEM_ACCESS_ON_GPU_PARAMS, 4);
+OF(UVM_PAGEABLE_MEM_ACCESS_ON_GPU_PARAMS, gpu_uuid, 0);
+OF(UVM_PAGEABLE_MEM_ACCESS_ON_GPU_PARAMS, pageableMemAccess, 16);
+OF(UVM_PAGEABLE_MEM_ACCESS_ON_GPU_PARAMS, rmStatus, 20);
+
+/* 5.2 GPU registration */
+SZ(UVM_REGISTER_GPU_PARAMS, 40); AL(UVM_REGISTER_GPU_PARAMS, 4);
+OF(UVM_REGISTER_GPU_PARAMS, gpu_uuid, 0);
+OF(UVM_REGISTER_GPU_PARAMS, numaEnabled, 16);
+OF(UVM_REGISTER_GPU_PARAMS, numaNodeId, 20);
+OF(UVM_REGISTER_GPU_PARAMS, rmCtrlFd, 24);
+OF(UVM_REGISTER_GPU_PARAMS, hClient, 28);
+OF(UVM_REGISTER_GPU_PARAMS, hSmcPartRef, 32);
+OF(UVM_REGISTER_GPU_PARAMS, rmStatus, 36);
+SZ(UVM_UNREGISTER_GPU_PARAMS, 20); OF(UVM_UNREGISTER_GPU_PARAMS, rmStatus, 16);
+
+/* 5.3 GPU VA space */
+SZ(UVM_REGISTER_GPU_VASPACE_PARAMS, 32); AL(UVM_REGISTER_GPU_VASPACE_PARAMS, 4);
+OF(UVM_REGISTER_GPU_VASPACE_PARAMS, gpuUuid, 0);
+OF(UVM_REGISTER_GPU_VASPACE_PARAMS, rmCtrlFd, 16);
+OF(UVM_REGISTER_GPU_VASPACE_PARAMS, hClient, 20);
+OF(UVM_REGISTER_GPU_VASPACE_PARAMS, hVaSpace, 24);
+OF(UVM_REGISTER_GPU_VASPACE_PARAMS, rmStatus, 28);
+SZ(UVM_UNREGISTER_GPU_VASPACE_PARAMS, 20);
+OF(UVM_UNREGISTER_GPU_VASPACE_PARAMS, rmStatus, 16);
+
+/* 5.4 channels */
+SZ(UVM_REGISTER_CHANNEL_PARAMS, 56); AL(UVM_REGISTER_CHANNEL_PARAMS, 8);
+OF(UVM_REGISTER_CHANNEL_PARAMS, gpuUuid, 0);
+OF(UVM_REGISTER_CHANNEL_PARAMS, rmCtrlFd, 16);
+OF(UVM_REGISTER_CHANNEL_PARAMS, hClient, 20);
+OF(UVM_REGISTER_CHANNEL_PARAMS, hChannel, 24);
+OF(UVM_REGISTER_CHANNEL_PARAMS, base, 32);
+OF(UVM_REGISTER_CHANNEL_PARAMS, length, 40);
+OF(UVM_REGISTER_CHANNEL_PARAMS, rmStatus, 48);
+SZ(UVM_UNREGISTER_CHANNEL_PARAMS, 28); AL(UVM_UNREGISTER_CHANNEL_PARAMS, 4);
+OF(UVM_UNREGISTER_CHANNEL_PARAMS, hClient, 16);
+OF(UVM_UNREGISTER_CHANNEL_PARAMS, hChannel, 20);
+OF(UVM_UNREGISTER_CHANNEL_PARAMS, rmStatus, 24);
+
+/* 5.5 external ranges */
+SZ(UVM_CREATE_EXTERNAL_RANGE_PARAMS, 24); AL(UVM_CREATE_EXTERNAL_RANGE_PARAMS, 8);
+OF(UVM_CREATE_EXTERNAL_RANGE_PARAMS, length, 8);
+OF(UVM_CREATE_EXTERNAL_RANGE_PARAMS, rmStatus, 16);
+SZ(UVM_MAP_EXTERNAL_ALLOCATION_PARAMS, 9264); AL(UVM_MAP_EXTERNAL_ALLOCATION_PARAMS, 8);
+OF(UVM_MAP_EXTERNAL_ALLOCATION_PARAMS, base, 0);
+OF(UVM_MAP_EXTERNAL_ALLOCATION_PARAMS, length, 8);
+OF(UVM_MAP_EXTERNAL_ALLOCATION_PARAMS, offset, 16);
+OF(UVM_MAP_EXTERNAL_ALLOCATION_PARAMS, perGpuAttributes, 24);
+OF(UVM_MAP_EXTERNAL_ALLOCATION_PARAMS, gpuAttributesCount, 9240);
+OF(UVM_MAP_EXTERNAL_ALLOCATION_PARAMS, rmCtrlFd, 9248);
+OF(UVM_MAP_EXTERNAL_ALLOCATION_PARAMS, hClient, 9252);
+OF(UVM_MAP_EXTERNAL_ALLOCATION_PARAMS, hMemory, 9256);
+OF(UVM_MAP_EXTERNAL_ALLOCATION_PARAMS, rmStatus, 9260);
+SZ(UVM_MAP_EXTERNAL_SPARSE_PARAMS, 40); AL(UVM_MAP_EXTERNAL_SPARSE_PARAMS, 8);
+OF(UVM_MAP_EXTERNAL_SPARSE_PARAMS, gpuUuid, 16);
+OF(UVM_MAP_EXTERNAL_SPARSE_PARAMS, rmStatus, 32);
+SZ(UVM_UNMAP_EXTERNAL_PARAMS, 40);
+OF(UVM_UNMAP_EXTERNAL_PARAMS, gpuUuid, 16); OF(UVM_UNMAP_EXTERNAL_PARAMS, rmStatus, 32);
+SZ(UVM_FREE_PARAMS, 24); OF(UVM_FREE_PARAMS, rmStatus, 16);
+SZ(UVM_VALIDATE_VA_RANGE_PARAMS, 24); OF(UVM_VALIDATE_VA_RANGE_PARAMS, rmStatus, 16);
+SZ(UVM_MAP_DYNAMIC_PARALLELISM_REGION_PARAMS, 40);
+OF(UVM_MAP_DYNAMIC_PARALLELISM_REGION_PARAMS, gpuUuid, 16);
+OF(UVM_MAP_DYNAMIC_PARALLELISM_REGION_PARAMS, rmStatus, 32);
+
+/* 5.6 semaphore pools */
+SZ(UVM_ALLOC_SEMAPHORE_POOL_PARAMS, 9248); AL(UVM_ALLOC_SEMAPHORE_POOL_PARAMS, 8);
+OF(UVM_ALLOC_SEMAPHORE_POOL_PARAMS, perGpuAttributes, 16);
+OF(UVM_ALLOC_SEMAPHORE_POOL_PARAMS, gpuAttributesCount, 9232);
+OF(UVM_ALLOC_SEMAPHORE_POOL_PARAMS, rmStatus, 9240);
+
+/* 5.7 policy and migration */
+SZ(UVM_SET_PREFERRED_LOCATION_PARAMS, 40);
+OF(UVM_SET_PREFERRED_LOCATION_PARAMS, preferredLocation, 16);
+OF(UVM_SET_PREFERRED_LOCATION_PARAMS, preferredCpuNumaNode, 32);
+OF(UVM_SET_PREFERRED_LOCATION_PARAMS, rmStatus, 36);
+SZ(UVM_UNSET_PREFERRED_LOCATION_PARAMS, 24);
+SZ(UVM_SET_ACCESSED_BY_PARAMS, 40); OF(UVM_SET_ACCESSED_BY_PARAMS, accessedByUuid, 16);
+OF(UVM_SET_ACCESSED_BY_PARAMS, rmStatus, 32);
+SZ(UVM_UNSET_ACCESSED_BY_PARAMS, 40);
+SZ(UVM_ENABLE_READ_DUPLICATION_PARAMS, 24); SZ(UVM_DISABLE_READ_DUPLICATION_PARAMS, 24);
+SZ(UVM_MIGRATE_PARAMS, 80); AL(UVM_MIGRATE_PARAMS, 8);
+OF(UVM_MIGRATE_PARAMS, destinationUuid, 16);
+OF(UVM_MIGRATE_PARAMS, flags, 32);
+OF(UVM_MIGRATE_PARAMS, semaphoreAddress, 40);
+OF(UVM_MIGRATE_PARAMS, semaphorePayload, 48);
+OF(UVM_MIGRATE_PARAMS, cpuNumaNode, 52);
+OF(UVM_MIGRATE_PARAMS, userSpaceStart, 56);
+OF(UVM_MIGRATE_PARAMS, userSpaceLength, 64);
+OF(UVM_MIGRATE_PARAMS, rmStatus, 72);
+SZ(UVM_MIGRATE_RANGE_GROUP_PARAMS, 32);
+OF(UVM_MIGRATE_RANGE_GROUP_PARAMS, destinationUuid, 8);
+OF(UVM_MIGRATE_RANGE_GROUP_PARAMS, rmStatus, 24);
+SZ(UVM_DISCARD_PARAMS, 32); OF(UVM_DISCARD_PARAMS, length, 8);
+OF(UVM_DISCARD_PARAMS, flags, 16); OF(UVM_DISCARD_PARAMS, rmStatus, 24);
+
+/* 5.8 range groups */
+SZ(UVM_CREATE_RANGE_GROUP_PARAMS, 16); OF(UVM_CREATE_RANGE_GROUP_PARAMS, rmStatus, 8);
+SZ(UVM_DESTROY_RANGE_GROUP_PARAMS, 16);
+SZ(UVM_SET_RANGE_GROUP_PARAMS, 32); OF(UVM_SET_RANGE_GROUP_PARAMS, requestedBase, 8);
+OF(UVM_SET_RANGE_GROUP_PARAMS, length, 16); OF(UVM_SET_RANGE_GROUP_PARAMS, rmStatus, 24);
+SZ(UVM_PREVENT_MIGRATION_RANGE_GROUPS_PARAMS, 272);
+OF(UVM_PREVENT_MIGRATION_RANGE_GROUPS_PARAMS, numGroupIds, 256);
+OF(UVM_PREVENT_MIGRATION_RANGE_GROUPS_PARAMS, rmStatus, 264);
+SZ(UVM_ALLOW_MIGRATION_RANGE_GROUPS_PARAMS, 272);
+
+/* 5.9 - 5.14 */
+SZ(UVM_ENABLE_SYSTEM_WIDE_ATOMICS_PARAMS, 20);
+OF(UVM_ENABLE_SYSTEM_WIDE_ATOMICS_PARAMS, rmStatus, 16);
+SZ(UVM_DISABLE_SYSTEM_WIDE_ATOMICS_PARAMS, 20);
+SZ(UVM_CLEAN_UP_ZOMBIE_RESOURCES_PARAMS, 4);
+SZ(UVM_POPULATE_PAGEABLE_PARAMS, 24); OF(UVM_POPULATE_PAGEABLE_PARAMS, flags, 16);
+OF(UVM_POPULATE_PAGEABLE_PARAMS, rmStatus, 20);
+SZ(UVM_TOOLS_READ_PROCESS_MEMORY_PARAMS, 40);
+OF(UVM_TOOLS_READ_PROCESS_MEMORY_PARAMS, targetVa, 16);
+OF(UVM_TOOLS_READ_PROCESS_MEMORY_PARAMS, bytesRead, 24);
+OF(UVM_TOOLS_READ_PROCESS_MEMORY_PARAMS, rmStatus, 32);
+SZ(UVM_TOOLS_WRITE_PROCESS_MEMORY_PARAMS, 40);
+OF(UVM_TOOLS_WRITE_PROCESS_MEMORY_PARAMS, bytesWritten, 24);
+SZ(UVM_TOOLS_GET_PROCESSOR_UUID_TABLE_PARAMS, 16);
+OF(UVM_TOOLS_GET_PROCESSOR_UUID_TABLE_PARAMS, rmStatus, 8);
+SZ(UVM_TOOLS_GET_PROCESSOR_UUID_TABLE_V2_PARAMS, 16);
+SZ(UVM_TOOLS_FLUSH_EVENTS_PARAMS, 4);
+SZ(UVM_ENABLE_PEER_ACCESS_PARAMS, 36); OF(UVM_ENABLE_PEER_ACCESS_PARAMS, gpuUuidB, 16);
+OF(UVM_ENABLE_PEER_ACCESS_PARAMS, rmStatus, 32);
+SZ(UVM_DISABLE_PEER_ACCESS_PARAMS, 36);
+SZ(UVM_CLEAR_ALL_ACCESS_COUNTERS_PARAMS, 4);
+SZ(UVM_ALLOC_DEVICE_P2P_PARAMS, 56); OF(UVM_ALLOC_DEVICE_P2P_PARAMS, gpuUuid, 24);
+OF(UVM_ALLOC_DEVICE_P2P_PARAMS, rmCtrlFd, 40); OF(UVM_ALLOC_DEVICE_P2P_PARAMS, hClient, 44);
+OF(UVM_ALLOC_DEVICE_P2P_PARAMS, hMemory, 48); OF(UVM_ALLOC_DEVICE_P2P_PARAMS, rmStatus, 52);
+
+/* 7.1 tools node */
+SZ(UVM_TOOLS_INIT_EVENT_TRACKER_PARAMS, 56); AL(UVM_TOOLS_INIT_EVENT_TRACKER_PARAMS, 8);
+OF(UVM_TOOLS_INIT_EVENT_TRACKER_PARAMS, queueBufferSize, 8);
+OF(UVM_TOOLS_INIT_EVENT_TRACKER_PARAMS, controlBuffer, 16);
+OF(UVM_TOOLS_INIT_EVENT_TRACKER_PARAMS, processor, 24);
+OF(UVM_TOOLS_INIT_EVENT_TRACKER_PARAMS, allProcessors, 40);
+OF(UVM_TOOLS_INIT_EVENT_TRACKER_PARAMS, uvmFd, 44);
+OF(UVM_TOOLS_INIT_EVENT_TRACKER_PARAMS, rmStatus, 48);
+SZ(UVM_TOOLS_SET_NOTIFICATION_THRESHOLD_PARAMS, 8);
+SZ(UVM_TOOLS_EVENT_QUEUE_ENABLE_EVENTS_PARAMS, 16);
+OF(UVM_TOOLS_EVENT_QUEUE_ENABLE_EVENTS_PARAMS, rmStatus, 8);
+SZ(UVM_TOOLS_EVENT_QUEUE_DISABLE_EVENTS_PARAMS, 16);
+SZ(UVM_TOOLS_ENABLE_COUNTERS_PARAMS, 16); SZ(UVM_TOOLS_DISABLE_COUNTERS_PARAMS, 16);
+/* 7.2 control block, 7.3 event records */
+SZ(UvmToolsEventControlData, 528);
+OF(UvmToolsEventControlData, get_behind, 4); OF(UvmToolsEventControlData, put_ahead, 8);
+OF(UvmToolsEventControlData, put_behind, 12); OF(UvmToolsEventControlData, dropped, 16);
+SZ(UvmEventEntry, 64); SZ(UvmEventEntry_V2, 72);
+
+/* 2.1 request numbers */
+_Static_assert(UVM_INITIALIZE == 0x30000001, "UVM_INITIALIZE");
+_Static_assert(UVM_DEINITIALIZE == 0x30000002, "UVM_DEINITIALIZE");
+_Static_assert(UVM_CREATE_RANGE_GROUP == 23 && UVM_DESTROY_RANGE_GROUP == 24 &&
+    UVM_REGISTER_GPU_VASPACE == 25 && UVM_UNREGISTER_GPU_VASPACE == 26 &&
+    UVM_REGISTER_CHANNEL == 27 && UVM_UNREGISTER_CHANNEL == 28 &&
+    UVM_ENABLE_PEER_ACCESS == 29 && UVM_DISABLE_PEER_ACCESS == 30 &&
+    UVM_SET_RANGE_GROUP == 31 && UVM_MAP_EXTERNAL_ALLOCATION == 33 &&
+    UVM_FREE == 34 && UVM_REGISTER_GPU == 37 && UVM_UNREGISTER_GPU == 38 &&
+    UVM_PAGEABLE_MEM_ACCESS == 39 && UVM_PREVENT_MIGRATION_RANGE_GROUPS == 40 &&
+    UVM_ALLOW_MIGRATION_RANGE_GROUPS == 41 && UVM_SET_PREFERRED_LOCATION == 42 &&
+    UVM_UNSET_PREFERRED_LOCATION == 43 && UVM_ENABLE_READ_DUPLICATION == 44 &&
+    UVM_DISABLE_READ_DUPLICATION == 45 && UVM_SET_ACCESSED_BY == 46 &&
+    UVM_UNSET_ACCESSED_BY == 47 && UVM_MIGRATE == 51 && UVM_MIGRATE_RANGE_GROUP == 53 &&
+    UVM_ENABLE_SYSTEM_WIDE_ATOMICS == 54 && UVM_DISABLE_SYSTEM_WIDE_ATOMICS == 55 &&
+    UVM_TOOLS_INIT_EVENT_TRACKER == 56 && UVM_TOOLS_SET_NOTIFICATION_THRESHOLD == 57 &&
+    UVM_TOOLS_EVENT_QUEUE_ENABLE_EVENTS == 58 && UVM_TOOLS_EVENT_QUEUE_DISABLE_EVENTS == 59 &&
+    UVM_TOOLS_ENABLE_COUNTERS == 60 && UVM_TOOLS_DISABLE_COUNTERS == 61 &&
+    UVM_TOOLS_READ_PROCESS_MEMORY == 62 && UVM_TOOLS_WRITE_PROCESS_MEMORY == 63 &&
+    UVM_TOOLS_GET_PROCESSOR_UUID_TABLE == 64 && UVM_MAP_DYNAMIC_PARALLELISM_REGION == 65 &&
+    UVM_UNMAP_EXTERNAL == 66 && UVM_TOOLS_FLUSH_EVENTS == 67 &&
+    UVM_ALLOC_SEMAPHORE_POOL == 68 && UVM_CLEAN_UP_ZOMBIE_RESOURCES == 69 &&
+    UVM_PAGEABLE_MEM_ACCESS_ON_GPU == 70 && UVM_POPULATE_PAGEABLE == 71 &&
+    UVM_VALIDATE_VA_RANGE == 72 && UVM_CREATE_EXTERNAL_RANGE == 73 &&
+    UVM_MAP_EXTERNAL_SPARSE == 74 && UVM_MM_INITIALIZE == 75 &&
+    UVM_TOOLS_INIT_EVENT_TRACKER_V2 == 76 && UVM_TOOLS_GET_PROCESSOR_UUID_TABLE_V2 == 77 &&
+    UVM_ALLOC_DEVICE_P2P == 78 && UVM_CLEAR_ALL_ACCESS_COUNTERS == 79 &&
+    UVM_DISCARD == 80 && UVM_IS_8_SUPPORTED == 2047, "request numbers");
+
+/* 2.3 status codes the specification names */
+_Static_assert(NV_OK == 0 && NV_ERR_GENERIC == 0xFFFF && NV_ERR_BUFFER_TOO_SMALL == 2 &&
+    NV_ERR_BUSY_RETRY == 3 && NV_ERR_GPU_UUID_NOT_FOUND == 0x12 &&
+    NV_ERR_ILLEGAL_ACTION == 0x16 && NV_ERR_IN_USE == 0x17 &&
+    NV_ERR_INSUFFICIENT_RESOURCES == 0x1A && NV_ERR_INSUFFICIENT_PERMISSIONS == 0x1B &&
+    NV_ERR_INVALID_ACCESS_TYPE == 0x1D && NV_ERR_INVALID_ADDRESS == 0x1E &&
+    NV_ERR_INVALID_ARGUMENT == 0x1F && NV_ERR_INVALID_BASE == 0x20 &&
+    NV_ERR_INVALID_CHANNEL == 0x21 && NV_ERR_INVALID_CLASS == 0x22 &&
+    NV_ERR_INVALID_DEVICE == 0x26 && NV_ERR_INVALID_FLAGS == 0x29 &&
+    NV_ERR_INVALID_LIMIT == 0x2E && NV_ERR_INVALID_OBJECT_HANDLE == 0x33 &&
+    NV_ERR_INVALID_OFFSET == 0x37 && NV_ERR_INVALID_OPERATION == 0x38 &&
+    NV_ERR_INVALID_STATE == 0x40 && NV_ERR_MORE_PROCESSING_REQUIRED == 0x4D &&
+    NV_ERR_NO_INTR_PENDING == 0x50 && NV_ERR_NO_MEMORY == 0x51 &&
+    NV_ERR_NOT_COMPATIBLE == 0x54 && NV_ERR_NOT_READY == 0x55 &&
+    NV_ERR_NOT_SUPPORTED == 0x56 && NV_ERR_OBJECT_NOT_FOUND == 0x57 &&
+    NV_ERR_OPERATING_SYSTEM == 0x59 && NV_ERR_OUT_OF_RANGE == 0x5B &&
+    NV_ERR_PAGE_TABLE_NOT_AVAIL == 0x5D && NV_ERR_RC_ERROR == 0x60 &&
+    NV_ERR_STATE_IN_USE == 0x63 && NV_ERR_SIGNAL_PENDING == 0x64 &&
+    NV_ERR_TIMEOUT == 0x65 && NV_ERR_UVM_ADDRESS_IN_USE == 0x68 &&
+    NV_ERR_ECC_ERROR == 0x0B && NV_ERR_GPU_IS_LOST == 0x0F &&
+    NV_ERR_MEMORY_ERROR == 0x72 && NV_ERR_FATAL_ERROR == 0x71 &&
+    NV_WARN_MORE_PROCESSING_REQUIRED == 0x10005 && NV_WARN_NOTHING_TO_DO == 0x10006 &&
+    NV_WARN_MISMATCHED_TARGET == 0x10004, "status codes");
+
+/* CPD-ON */
+
+/* 2.5 the CPU's well-known processor UUID */
+static const NvU8 cpu_uuid_bytes[16] = {
+	0xa6, 0x5e, 0x0f, 0x4e, 0xd7, 0xd4, 0x7b, 0xa2,
+	0x50, 0x47, 0x41, 0x2c, 0x14, 0x2a, 0x77, 0x73
+};
+
+/*
+ * check_errno_table - the errno translation of 01 section 2.3: the
+ * header's table is the spec's (26 rows, every status the spec names), the
+ * lookup agrees with its own table, a sample of rows has the spec's errno,
+ * and anything else is EINVAL.  Returns 0 when right.
+ */
+static int
+check_errno_table(void)
+{
+	static const NV_STATUS named[] = { NV_OK, NV_ERR_BUSY_RETRY, NV_ERR_INSUFFICIENT_PERMISSIONS,
+		NV_ERR_GPU_UUID_NOT_FOUND, NV_ERR_INSUFFICIENT_RESOURCES, NV_ERR_NO_MEMORY,
+		NV_ERR_INVALID_ACCESS_TYPE, NV_ERR_INVALID_ADDRESS, NV_ERR_INVALID_ARGUMENT,
+		NV_ERR_INVALID_DEVICE, NV_ERR_INVALID_STATE, NV_ERR_INVALID_PARAMETER, NV_ERR_INVALID_REQUEST,
+		NV_ERR_NOT_SUPPORTED, NV_ERR_OBJECT_NOT_FOUND, NV_ERR_UVM_ADDRESS_IN_USE,
+		NV_ERR_OVERLAPPING_UVM_COMMIT, NV_ERR_TIMEOUT, NV_ERR_TIMEOUT_RETRY, NV_ERR_IN_USE,
+		NV_ERR_RC_ERROR, NV_ERR_ECC_ERROR, NV_ERR_OUT_OF_RANGE, NV_ERR_MODULE_LOAD_FAILED,
+		NV_ERR_PID_NOT_FOUND, NV_ERR_NO_VALID_PATH };
+	const size_t rows = sizeof(uvm_status_errnos) / sizeof(uvm_status_errnos[0]);
+	size_t k, j;
+
+	if (rows != sizeof(named) / sizeof(named[0])) {
+		printf("FAIL: errno table has %zu rows, the spec names %zu\n", rows, sizeof(named) / sizeof(named[0]));
+		return (1);
+	}
+	for (k = 0; k < rows; k++) {
+		for (j = 0; j < rows && named[j] != uvm_status_errnos[k].status; j++)
+			;
+		if (j == rows || uvm_status_to_errno(uvm_status_errnos[k].status) != uvm_status_errnos[k].error) {
+			printf("FAIL: errno table row %zu (status %#x)\n", k, uvm_status_errnos[k].status);
+			return (1);
+		}
+	}
+	/* the values the user sees most: a sample of rows, by the spec's words */
+	if (uvm_status_to_errno(NV_ERR_UVM_ADDRESS_IN_USE) != EADDRINUSE ||
+	    uvm_status_to_errno(NV_ERR_NOT_SUPPORTED) != ENOSYS ||
+	    uvm_status_to_errno(NV_ERR_OBJECT_NOT_FOUND) != UVM_ERRNO_NODATA ||
+	    uvm_status_to_errno(NV_ERR_GPU_UUID_NOT_FOUND) != ENODEV ||
+	    uvm_status_to_errno(NV_ERR_INVALID_ADDRESS) != EFAULT ||
+	    uvm_status_to_errno(NV_ERR_BUSY_RETRY) != EAGAIN || uvm_status_to_errno(NV_OK) != 0 ||
+	    uvm_status_to_errno(NV_ERR_GENERIC) != EINVAL || uvm_status_to_errno(NV_ERR_INVALID_CHANNEL) != EINVAL) {
+		printf("FAIL: errno sample rows\n");
+		return (1);
+	}
+	return (0);
+}
+
+int
+main(void)
+{
+	int i, bad = 0;
+
+	for (i = 0; i < 16; i++)
+		if (NV_PROCESSOR_UUID_CPU_DEFAULT.uuid[i] != cpu_uuid_bytes[i])
+			bad++;
+	if (bad != 0) {
+		printf("FAIL: CPU UUID constant differs in %d bytes\n", bad);
+		return (1);
+	}
+	if (check_errno_table() != 0)
+		return (1);
+	/* the native FreeBSD request encoding round-trips every number */
+	{
+		static const NvU32 nums[] = { 1, 23, 80, 2047, 0x30000001, 0x30000002 };
+		unsigned k;
+
+		for (k = 0; k < sizeof(nums) / sizeof(nums[0]); k++) {
+			if (uvm_ioctl_native_decode(UVM_IOCTL_NATIVE(nums[k])) != nums[k]) {
+				printf("FAIL: native encoding of %#x\n", nums[k]);
+				return (1);
+			}
+		}
+	}
+	printf("abi_layout_test: PASS (all layout assertions compiled)\n");
+	return (0);
+}
