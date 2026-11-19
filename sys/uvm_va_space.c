@@ -20,62 +20,19 @@
 
 #include "uvm_ext_split.h"
 
-/* ---- the range tree (03 section 4) ---- */
-
-int
-uvm_range_cmp(const struct uvm_range *a, const struct uvm_range *b)
-{
-	if (a->start < b->start)
-		return (-1);
-	return (a->start > b->start);
-}
-
-RB_GENERATE(uvm_range_tree, uvm_range, node, uvm_range_cmp);
-
-/* the range containing `addr`, or NULL.  Time: O(log n). */
-struct uvm_range *
-uvm_range_find(struct uvm_va_space *vas, uint64_t addr)
-{
-	struct uvm_range key, *r;
-
-	key.start = addr;
-	r = RB_NFIND(uvm_range_tree, &vas->ranges, &key);
-	if (r != NULL && r->start == addr)
-		return (r);
-	r = r != NULL ? RB_PREV(uvm_range_tree, &vas->ranges, r) : RB_MAX(uvm_range_tree, &vas->ranges);
-	if (r != NULL && r->end >= addr)
-		return (r);
-	return (NULL);
-}
-
-/* any range overlapping [start, end], or NULL */
-struct uvm_range *
-uvm_range_find_overlap(struct uvm_va_space *vas, uint64_t start, uint64_t end)
-{
-	struct uvm_range key, *r;
-
-	r = uvm_range_find(vas, start);
-	if (r != NULL)
-		return (r);
-	key.start = start;
-	r = RB_NFIND(uvm_range_tree, &vas->ranges, &key);
-	if (r != NULL && r->start <= end)
-		return (r);
-	return (NULL);
-}
+/* ---- the range tree (03 section 4): the core's interval tree ---- */
 
 NV_STATUS
 uvm_range_create(struct uvm_va_space *vas, enum uvm_range_type type, uint64_t start, uint64_t end,
     struct uvm_range **out)
 {
 	struct uvm_range *r;
+	int error;
 
 	sx_assert(&vas->lock, SA_XLOCKED);
-	if (uvm_range_find_overlap(vas, start, end) != NULL)
-		return (NV_ERR_UVM_ADDRESS_IN_USE);
 	r = malloc(sizeof(*r), M_NVIDIA_UVM, M_WAITOK | M_ZERO);
-	r->start = start;
-	r->end = end;
+	r->core.start = start;
+	r->core.end = end;
 	r->type = type;
 	r->vas = vas;
 	switch (type) {
@@ -92,7 +49,11 @@ uvm_range_create(struct uvm_va_space *vas, enum uvm_range_type type, uint64_t st
 	default:
 		break;
 	}
-	RB_INSERT(uvm_range_tree, &vas->ranges, r);
+	error = uvm_core_range_insert(&vas->ranges, &r->core);
+	if (error != 0) {
+		free(r, M_NVIDIA_UVM);
+		return (NV_ERR_UVM_ADDRESS_IN_USE);
+	}
 	*out = r;
 	return (NV_OK);
 }
@@ -157,10 +118,9 @@ uvm_va_space_create(uint64_t flags, struct uvm_va_space **out)
 	vas = malloc(sizeof(*vas), M_NVIDIA_UVM, M_WAITOK | M_ZERO);
 	sx_init(&vas->lock, "nvidia_uvm_va_space");
 	sx_init(&vas->serialize, "nvidia_uvm_va_space_ser");
-	RB_INIT(&vas->ranges);
-	LIST_INIT(&vas->groups);
+	uvm_core_range_tree_init(&vas->ranges);
+	uvm_core_group_set_init(&vas->groups);
 	vas->init_flags = flags;
-	vas->next_group_id = 1;
 	vas->refs = 1;
 	vas->owner_pid = curproc->p_pid;
 	if (uvm.enable_va_space_mm) {
@@ -262,7 +222,7 @@ uvm_channel_range_unref(struct uvm_range *r)
 		uvm_pt_range_vec_deinit(gvas->tree, &r->u.chan.ptes);
 	}
 	uvm_tracker_deinit(&r->u.chan.tracker);
-	RB_REMOVE(uvm_range_tree, &r->vas->ranges, r);
+	uvm_core_range_remove(&r->vas->ranges, &r->core);
 	free(r, M_NVIDIA_UVM);
 }
 
@@ -276,7 +236,7 @@ uvm_channel_range_map(struct uvm_range *r, const UvmGpuChannelResourceInfo *res)
 	struct uvm_gpu_va_space *gvas = r->u.chan.gvas;
 	UvmGpuExternalMappingInfo info;
 	uint64_t page_size = res->resourceInfo.pageSize;
-	uint64_t size = r->end - r->start + 1;
+	uint64_t size = r->core.end - r->core.start + 1;
 	uint64_t npages, done = 0, offset = 0;
 	uint64_t *ptes;
 	NV_STATUS status;
@@ -284,7 +244,7 @@ uvm_channel_range_map(struct uvm_range *r, const UvmGpuChannelResourceInfo *res)
 
 	if (page_size != UVM_PAGE_SIZE_4K && page_size != UVM_PAGE_SIZE_64K && page_size != UVM_PAGE_SIZE_2M)
 		page_size = UVM_PAGE_SIZE_4K;
-	status = uvm_pt_range_vec_init(gvas->tree, r->start, size, page_size, &r->u.chan.ptes);
+	status = uvm_pt_range_vec_init(gvas->tree, r->core.start, size, page_size, &r->u.chan.ptes);
 	if (status != NV_OK)
 		return (status);
 	npages = size / page_size;
@@ -310,7 +270,7 @@ uvm_channel_range_map(struct uvm_range *r, const UvmGpuChannelResourceInfo *res)
 		sx_xlock(&gvas->tree->lock);
 		for (i = 0; i < r->u.chan.ptes.count && status == NV_OK; i++) {
 			struct uvm_pt_range *pr = &r->u.chan.ptes.ranges[i];
-			uint64_t pr_first = (pr->va_start - r->start) / page_size;
+			uint64_t pr_first = (pr->va_start - r->core.start) / page_size;
 			uint64_t pr_last = pr_first + pr->count - 1;
 			uint64_t w_first = done, w_last = done + info.numWrittenPtes - 1;
 			uint64_t lo = pr_first > w_first ? pr_first : w_first;
@@ -343,21 +303,7 @@ static bool
 uvm_find_free_va(struct uvm_va_space *vas, uint64_t base, uint64_t length, uint64_t size, uint64_t align,
     uint64_t *out)
 {
-	uint64_t cur = roundup2(base, align);
-	uint64_t limit = base + length;
-	struct uvm_range *r;
-
-	while (cur + size <= limit && cur + size > cur) {
-		r = uvm_range_find_overlap(vas, cur, cur + size - 1);
-		if (r == NULL) {
-			*out = cur;
-			return (true);
-		}
-		if (r->end == UINT64_MAX)
-			return (false);
-		cur = roundup2(r->end + 1, align);
-	}
-	return (false);
+	return (uvm_core_range_find_free(&vas->ranges, base, length, size, align, out) == 0);
 }
 
 static int
@@ -432,7 +378,7 @@ uvm_channel_range_shared(struct uvm_va_space *vas, const struct uvm_user_channel
 
 	if (!ch->info->bTsgChannel)
 		return (NULL);
-	RB_FOREACH(cand, uvm_range_tree, &vas->ranges) {
+	for (cand = uvm_range_first(vas); cand != NULL; cand = uvm_range_next(vas, cand)) {
 		if (cand->type == UVM_RANGE_CHANNEL && cand->u.chan.gvas == ch->gvas && cand->u.chan.tsg_channel &&
 		    cand->u.chan.tsg_id == ch->info->tsgId && cand->u.chan.runlist_id == ch->info->runlistId &&
 		    cand->u.chan.descriptor == res->resourceDescriptor)
@@ -491,7 +437,7 @@ uvm_register_channel_place(struct uvm_va_space *vas, struct uvm_user_channel *ch
 		r->u.chan.refs++;
 		ch->resources[ch->nresources++] = r;
 		bind[i].resourceId = res->resourceId;
-		bind[i].resourceVa = r->start;
+		bind[i].resourceVa = r->core.start;
 	}
 	TAILQ_INSERT_TAIL(&gvas->channels, ch, link);
 	return (NV_OK);
@@ -656,7 +602,7 @@ static NV_STATUS
 uvm_sema_pool_map_gpu(struct uvm_range *r, struct uvm_gpu_va_space *gvas)
 {
 	struct uvm_sema_gpu_map *m;
-	uint64_t size = r->end - r->start + 1, npages = size / PAGE_SIZE, i;
+	uint64_t size = r->core.end - r->core.start + 1, npages = size / PAGE_SIZE, i;
 	uint64_t *ptes;
 	bool cached = uvm_gpu_mask_test(&r->u.sema.cached_gpus, gvas->gpu->id);
 	NV_STATUS status;
@@ -667,7 +613,7 @@ uvm_sema_pool_map_gpu(struct uvm_range *r, struct uvm_gpu_va_space *gvas)
 	m = malloc(sizeof(*m), M_NVIDIA_UVM, M_WAITOK | M_ZERO);
 	m->gpu = gvas->gpu;
 	m->cached = cached;
-	status = uvm_pt_range_vec_init(gvas->tree, r->start, size, UVM_PAGE_SIZE_4K, &m->ptes);
+	status = uvm_pt_range_vec_init(gvas->tree, r->core.start, size, UVM_PAGE_SIZE_4K, &m->ptes);
 	if (status != NV_OK) {
 		free(m, M_NVIDIA_UVM);
 		return (status);
@@ -839,7 +785,7 @@ uvm_vas_alloc_semaphore_pool(struct uvm_va_space *vas, UVM_ALLOC_SEMAPHORE_POOL_
 	if (status != NV_OK) {
 		sx_xlock(&vas->lock);
 		uvm_sema_pool_destroy(r);
-		RB_REMOVE(uvm_range_tree, &vas->ranges, r);
+		uvm_core_range_remove(&vas->ranges, &r->core);
 		sx_xunlock(&vas->lock);
 		free(r, M_NVIDIA_UVM);
 	}
@@ -1237,7 +1183,7 @@ uvm_ext_range_for(struct uvm_va_space *vas, uint64_t base, uint64_t length)
 {
 	struct uvm_range *r = uvm_range_find(vas, base);
 
-	if (r == NULL || r->type != UVM_RANGE_EXTERNAL || r->end < base + length - 1)
+	if (r == NULL || r->type != UVM_RANGE_EXTERNAL || r->core.end < base + length - 1)
 		return (NULL);
 	return (r);
 }
@@ -1437,7 +1383,7 @@ uvm_vas_map_dynamic_parallelism(struct uvm_va_space *vas, UVM_MAP_DYNAMIC_PARALL
 		uvm_pt_range_vec_deinit(gvas->tree, &r->u.sked.ptes);
 		sx_sunlock(&vas->lock);
 		sx_xlock(&vas->lock);
-		RB_REMOVE(uvm_range_tree, &vas->ranges, r);
+		uvm_core_range_remove(&vas->ranges, &r->core);
 		free(r, M_NVIDIA_UVM);
 		goto out_write;
 	}
@@ -1491,7 +1437,7 @@ uvm_range_destroy(struct uvm_range *r)
 {
 	uvm_range_teardown(r);
 	sx_xlock(&r->vas->lock);
-	RB_REMOVE(uvm_range_tree, &r->vas->ranges, r);
+	uvm_core_range_remove(&r->vas->ranges, &r->core);
 	sx_xunlock(&r->vas->lock);
 	free(r, M_NVIDIA_UVM);
 }
@@ -1507,7 +1453,7 @@ uvm_vas_free(struct uvm_va_space *vas, uint64_t base, uint64_t length)
 	sx_xlock(&vas->serialize);
 	sx_slock(&vas->lock);
 	r = uvm_range_find(vas, base);
-	if (r == NULL || r->start != base || r->end != base + length - 1 ||
+	if (r == NULL || r->core.start != base || r->core.end != base + length - 1 ||
 	    (r->type != UVM_RANGE_EXTERNAL && r->type != UVM_RANGE_SEMA_POOL && r->type != UVM_RANGE_SKED)) {
 		status = NV_ERR_INVALID_ADDRESS;
 		sx_sunlock(&vas->lock);
@@ -1516,7 +1462,7 @@ uvm_vas_free(struct uvm_va_space *vas, uint64_t base, uint64_t length)
 	uvm_range_teardown(r);
 	sx_sunlock(&vas->lock);
 	sx_xlock(&vas->lock);
-	RB_REMOVE(uvm_range_tree, &vas->ranges, r);
+	uvm_core_range_remove(&vas->ranges, &r->core);
 	sx_xunlock(&vas->lock);
 	free(r, M_NVIDIA_UVM);
 out:
@@ -1534,7 +1480,7 @@ uvm_vas_validate(struct uvm_va_space *vas, uint64_t base, uint64_t length)
 		return (NV_ERR_INVALID_ADDRESS);
 	sx_slock(&vas->lock);
 	r = uvm_range_find(vas, base);
-	status = (r != NULL && r->start == base && r->end == base + length - 1) ? NV_OK : NV_ERR_INVALID_ADDRESS;
+	status = (r != NULL && r->core.start == base && r->core.end == base + length - 1) ? NV_OK : NV_ERR_INVALID_ADDRESS;
 	sx_sunlock(&vas->lock);
 	return (status);
 }
@@ -1586,7 +1532,8 @@ uvm_gvas_remove_locked(struct uvm_va_space *vas, struct uvm_gpu_va_space *gvas, 
 		else
 			uvm_user_channel_unref(ch);
 	}
-	RB_FOREACH_SAFE(r, uvm_range_tree, &vas->ranges, next) {
+	for (r = uvm_range_first(vas); r != NULL; r = next) {
+		next = uvm_range_next(vas, r);
 		switch (r->type) {
 		case UVM_RANGE_EXTERNAL:
 			uvm_ext_range_unmap_gpu(r, gvas->gpu);
@@ -1601,7 +1548,7 @@ uvm_gvas_remove_locked(struct uvm_va_space *vas, struct uvm_gpu_va_space *gvas, 
 		case UVM_RANGE_SKED:
 			if (r->u.sked.gpu == gvas->gpu) {
 				uvm_sked_range_destroy(r);
-				RB_REMOVE(uvm_range_tree, &vas->ranges, r);
+				uvm_core_range_remove(&vas->ranges, &r->core);
 				free(r, M_NVIDIA_UVM);
 			}
 			break;
@@ -1613,12 +1560,32 @@ uvm_gvas_remove_locked(struct uvm_va_space *vas, struct uvm_gpu_va_space *gvas, 
 	vas->gvas[gvas->gpu->id] = NULL;
 }
 
+/*
+ * uvm_vas_map_sema_pools - the semaphore pools of the VA space map
+ * themselves on the new GPU VA space.
+ * Time: O(ranges).  Space: O(1).
+ */
+static NV_STATUS
+uvm_vas_map_sema_pools(struct uvm_va_space *vas, struct uvm_gpu_va_space *gvas)
+{
+	struct uvm_range *r;
+	NV_STATUS status = NV_OK;
+
+	for (r = uvm_range_first(vas); r != NULL; r = uvm_range_next(vas, r)) {
+		if (r->type != UVM_RANGE_SEMA_POOL)
+			continue;
+		status = uvm_sema_pool_map_gpu(r, gvas);
+		if (status != NV_OK)
+			break;
+	}
+	return (status);
+}
+
 NV_STATUS
 uvm_vas_register_gpu_va_space(struct uvm_va_space *vas, UVM_REGISTER_GPU_VASPACE_PARAMS *p)
 {
 	struct uvm_gpu *gpu;
 	struct uvm_gpu_va_space *gvas;
-	struct uvm_range *r;
 	NV_STATUS status;
 	NvU64 dma = 0;
 	uint32_t root_entries;
@@ -1686,13 +1653,7 @@ uvm_vas_register_gpu_va_space(struct uvm_va_space *vas, UVM_REGISTER_GPU_VASPACE
 	/* existing semaphore pools map themselves on the new GPU VA space */
 	sx_xlock(&vas->serialize);
 	sx_slock(&vas->lock);
-	RB_FOREACH(r, uvm_range_tree, &vas->ranges) {
-		if (r->type == UVM_RANGE_SEMA_POOL) {
-			status = uvm_sema_pool_map_gpu(r, gvas);
-			if (status != NV_OK)
-				break;
-		}
-	}
+	status = uvm_vas_map_sema_pools(vas, gvas);
 	sx_sunlock(&vas->lock);
 	sx_xunlock(&vas->serialize);
 	if (status != NV_OK) {
@@ -1795,7 +1756,8 @@ uvm_vas_unregister_gpu(struct uvm_va_space *vas, const NvProcessorUuid *uuid)
 
 	sx_xlock(&vas->serialize);
 	sx_slock(&vas->lock);
-	RB_FOREACH_SAFE(r, uvm_range_tree, &vas->ranges, next) {
+	for (r = uvm_range_first(vas); r != NULL; r = next) {
+		next = uvm_range_next(vas, r);
 		if (r->type == UVM_RANGE_EXTERNAL)
 			uvm_ext_range_unmap_gpu(r, gpu);
 	}
@@ -1845,13 +1807,12 @@ uvm_vas_pageable_on_gpu(struct uvm_va_space *vas, const NvProcessorUuid *uuid, N
 NV_STATUS
 uvm_vas_create_range_group(struct uvm_va_space *vas, uint64_t *id)
 {
-	struct uvm_range_group *g;
+	struct uvm_core_group *g;
 
 	g = malloc(sizeof(*g), M_NVIDIA_UVM, M_WAITOK | M_ZERO);
 	g->migratable = true;
 	sx_xlock(&vas->lock);
-	g->id = vas->next_group_id++;
-	LIST_INSERT_HEAD(&vas->groups, g, link);
+	uvm_core_group_create(&vas->groups, g);
 	sx_xunlock(&vas->lock);
 	*id = g->id;
 	return (NV_OK);
@@ -1860,16 +1821,15 @@ uvm_vas_create_range_group(struct uvm_va_space *vas, uint64_t *id)
 NV_STATUS
 uvm_vas_destroy_range_group(struct uvm_va_space *vas, uint64_t id)
 {
-	struct uvm_range_group *g;
+	struct uvm_core_group *g = NULL;
+	int error;
 
 	sx_xlock(&vas->lock);
-	LIST_FOREACH(g, &vas->groups, link)
-		if (g->id == id)
-			break;
-	if (g != NULL)
-		LIST_REMOVE(g, link);
+	error = uvm_core_group_lookup(&vas->groups, id, &g);
+	if (error == 0)
+		error = uvm_core_group_remove(&vas->groups, g);
 	sx_xunlock(&vas->lock);
-	if (g == NULL)
+	if (error != 0)
 		return (NV_ERR_OBJECT_NOT_FOUND);
 	free(g, M_NVIDIA_UVM);
 	return (NV_OK);
@@ -1878,16 +1838,12 @@ uvm_vas_destroy_range_group(struct uvm_va_space *vas, uint64_t id)
 NV_STATUS
 uvm_vas_range_group_lookup(struct uvm_va_space *vas, uint64_t id)
 {
-	struct uvm_range_group *g;
+	int error;
 
-	if (id == 0)
-		return (NV_OK);	/* "no group" is always valid */
 	sx_slock(&vas->lock);
-	LIST_FOREACH(g, &vas->groups, link)
-		if (g->id == id)
-			break;
+	error = uvm_core_group_lookup(&vas->groups, id, NULL);
 	sx_sunlock(&vas->lock);
-	return (g != NULL ? NV_OK : NV_ERR_OBJECT_NOT_FOUND);
+	return (error == 0 ? NV_OK : NV_ERR_OBJECT_NOT_FOUND);
 }
 
 /* ---- the processor UUID table (01 section 5.11) ---- */
@@ -1918,7 +1874,7 @@ void
 uvm_va_space_destroy(struct uvm_va_space *vas)
 {
 	struct uvm_range *r, *next;
-	struct uvm_range_group *g;
+	struct uvm_core_group *g;
 	struct uvm_user_channel *ch;
 	int i;
 
@@ -1944,13 +1900,14 @@ uvm_va_space_destroy(struct uvm_va_space *vas)
 		if (vas->gpus[i] != NULL)
 			(void)uvm_vas_unregister_gpu(vas, &vas->gpus[i]->uuid);
 	}
-	RB_FOREACH_SAFE(r, uvm_range_tree, &vas->ranges, next) {
+	for (r = uvm_range_first(vas); r != NULL; r = next) {
+		next = uvm_range_next(vas, r);
 		uvm_range_teardown(r);
-		RB_REMOVE(uvm_range_tree, &vas->ranges, r);
+		uvm_core_range_remove(&vas->ranges, &r->core);
 		free(r, M_NVIDIA_UVM);
 	}
-	while ((g = LIST_FIRST(&vas->groups)) != NULL) {
-		LIST_REMOVE(g, link);
+	while ((g = LIST_FIRST(&vas->groups.list)) != NULL) {
+		uvm_core_group_remove(&vas->groups, g);
 		free(g, M_NVIDIA_UVM);
 	}
 	if (vas->vm != NULL)

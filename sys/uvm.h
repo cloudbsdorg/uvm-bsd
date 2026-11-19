@@ -38,6 +38,9 @@
 #include <vm/vm_map.h>
 #include <vm/vm_extern.h>
 
+#include "core/uvm_core_range.h"
+#include "core/uvm_core_group.h"
+
 #include "nvidia_uvm_ioctl.h"
 #include "nvidia_uvm_rm.h"
 #include "uvm_hal_methods.h"
@@ -455,8 +458,7 @@ struct uvm_sema_gpu_map {
 };
 
 struct uvm_range {
-	RB_ENTRY(uvm_range)	node;
-	uint64_t		start, end;	/* inclusive */
+	struct uvm_core_range	core;		/* the interval: core.start, core.end */
 	enum uvm_range_type	type;
 	struct uvm_va_space	*vas;
 	union {
@@ -489,10 +491,6 @@ struct uvm_range {
 	} u;
 };
 
-RB_HEAD(uvm_range_tree, uvm_range);
-int	uvm_range_cmp(const struct uvm_range *a, const struct uvm_range *b);
-RB_PROTOTYPE(uvm_range_tree, uvm_range, node, uvm_range_cmp);
-
 struct uvm_user_channel {
 	TAILQ_ENTRY(uvm_user_channel) link;
 	struct uvm_gpu_va_space	*gvas;
@@ -523,12 +521,6 @@ struct uvm_gpu_va_space {
 	u_int			refs;
 };
 
-struct uvm_range_group {
-	LIST_ENTRY(uvm_range_group) link;
-	uint64_t		id;
-	bool			migratable;
-};
-
 enum uvm_mm_state { UVM_MM_UNINITIALIZED = 0, UVM_MM_ALIVE, UVM_MM_RELEASED };
 
 struct uvm_va_space {
@@ -538,7 +530,7 @@ struct uvm_va_space {
 	struct vmspace		*vm;		/* the bound address space (a reference) */
 	pid_t			owner_pid;
 	uint64_t		init_flags;
-	struct uvm_range_tree	ranges;
+	struct uvm_core_range_tree	ranges;
 	struct uvm_gpu		*gpus[UVM_MAX_GPUS + 1];
 	struct uvm_gpu_va_space	*gvas[UVM_MAX_GPUS + 1];
 	struct uvm_gpu_mask	registered;
@@ -547,17 +539,66 @@ struct uvm_va_space {
 	bool			user_channels_stopped;
 	bool			disallow_new_registers;
 	enum uvm_mm_state	mm_state;
-	uint64_t		next_group_id;
-	LIST_HEAD(, uvm_range_group) groups;
+	struct uvm_core_group_set	groups;
 	u_int			refs;
 };
+
+/*
+ * The ranges of a VA space live in the core's interval tree: a module
+ * range starts with the core range, so the core's ranges are found, walked
+ * and taken out through the four functions below.  The VA space lock stays
+ * with the module; the core takes none.
+ */
+static inline struct uvm_range *
+uvm_range_find(struct uvm_va_space *vas, uint64_t addr)
+{
+	struct uvm_core_range *r;
+
+	r = uvm_core_range_find(&vas->ranges, addr);
+	if (r == NULL)
+		return (NULL);
+	return (__containerof(r, struct uvm_range, core));
+}
+
+static inline struct uvm_range *
+uvm_range_find_overlap(struct uvm_va_space *vas, uint64_t start, uint64_t end)
+{
+	struct uvm_core_range *r;
+
+	r = uvm_core_range_find_overlap(&vas->ranges, start, end);
+	if (r == NULL)
+		return (NULL);
+	return (__containerof(r, struct uvm_range, core));
+}
+
+/* the lowest range of the VA space, or NULL when it has none */
+static inline struct uvm_range *
+uvm_range_first(struct uvm_va_space *vas)
+{
+	struct uvm_core_range *r;
+
+	r = uvm_core_range_first(&vas->ranges);
+	if (r == NULL)
+		return (NULL);
+	return (__containerof(r, struct uvm_range, core));
+}
+
+/* the range that follows `r` in address order, or NULL when `r` is the last */
+static inline struct uvm_range *
+uvm_range_next(struct uvm_va_space *vas, struct uvm_range *r)
+{
+	struct uvm_core_range *n;
+
+	n = uvm_core_range_next(&vas->ranges, &r->core);
+	if (n == NULL)
+		return (NULL);
+	return (__containerof(n, struct uvm_range, core));
+}
 
 NV_STATUS uvm_va_space_create(uint64_t flags, struct uvm_va_space **out);
 void	uvm_va_space_destroy(struct uvm_va_space *vas);
 void	uvm_va_space_ref(struct uvm_va_space *vas);
 void	uvm_va_space_unref(struct uvm_va_space *vas);
-struct uvm_range *uvm_range_find(struct uvm_va_space *vas, uint64_t addr);
-struct uvm_range *uvm_range_find_overlap(struct uvm_va_space *vas, uint64_t start, uint64_t end);
 NV_STATUS uvm_range_create(struct uvm_va_space *vas, enum uvm_range_type type, uint64_t start, uint64_t end,
     struct uvm_range **out);
 void	uvm_range_destroy(struct uvm_range *r);

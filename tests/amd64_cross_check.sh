@@ -43,7 +43,7 @@ CFLAGS="-target x86_64-unknown-freebsd16.0 -fsyntax-only -O2 -pipe -fno-strict-a
 -Wno-error=shift-negative-value -Wno-address-of-packed-member -Wno-format-zero-length"
 
 rc=0
-for src in "$REPO"/sys/uvm_*.c; do
+for src in "$REPO"/sys/uvm_*.c "$REPO"/sys/core/*.c; do
 	# shellcheck disable=SC2086
 	if cc $CFLAGS "$src" 2> "$T/err"; then
 		echo "ok   amd64: $(basename "$src")"

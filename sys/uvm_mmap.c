@@ -121,13 +121,13 @@ uvm_mmap_single(struct cdev *cdev, vm_ooffset_t *offset, vm_size_t size, vm_obje
 		    (uintmax_t)*offset, (uintmax_t)size, curproc->p_pid);
 		return (ENOSYS);
 	}
-	if (r->type != UVM_RANGE_SEMA_POOL || r->start != *offset || r->end != *offset + size - 1) {
+	if (r->type != UVM_RANGE_SEMA_POOL || r->core.start != *offset || r->core.end != *offset + size - 1) {
 		sx_sunlock(&vas->lock);
 		sx_sunlock(&uvm.pm_lock);
 		return (uvm_status_to_errno(NV_ERR_UVM_ADDRESS_IN_USE));
 	}
 	mem = uvm_sema_mem_ref(r->u.sema.mem);
-	mem->user_start = r->start;
+	mem->user_start = r->core.start;
 	sx_sunlock(&vas->lock);
 
 	obj = cdev_pager_allocate(mem, OBJT_DEVICE, &uvm_sema_pager_ops, *offset + size, nprot, *offset,

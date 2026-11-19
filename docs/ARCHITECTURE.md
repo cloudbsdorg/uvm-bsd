@@ -76,5 +76,7 @@ opencode rounds, each a reviewed commit:
 2. the core: range tree, VA space bookkeeping, range groups, the fault
    service queue, device-memory accounting skeleton, built with a check
    that no vendor header is included (`tests/core_isolation_test.sh`);
+   the range tree is done (`sys/core/uvm_core_range.[ch]`);
+   the range groups are done (`sys/core/uvm_core_group.[ch]`);
 3. the NVIDIA backend behind the table: ioctl layer, RM glue, HAL, page
    trees, channels, fault decoding; the module links both.
