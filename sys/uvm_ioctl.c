@@ -14,6 +14,12 @@
  * tries the power-management lock for read; EAGAIN when it cannot.  An
  * unknown number is ENOSYS on the main node and EINVAL on the tools node.
  *
+ * The status is written at the ABI's rmStatus offset
+ * (UVM_RM_STATUS_OFFSET), not at the end of the structure: a structure
+ * with tail padding carries rmStatus before that padding, and the user
+ * (libcuda, the test harness) reads the field where the specification
+ * puts it.
+ *
  * Requests whose feature is a later phase answer as the spec says for the
  * state that exists: policy and migration requests find no managed range
  * and return NV_ERR_INVALID_ADDRESS; peer access, device P2P and the tools
@@ -37,6 +43,7 @@ struct uvm_request {
 	uint32_t	number;
 	const char	*name;
 	size_t		size;
+	size_t		rm_status_offset;	/* where rmStatus sits in the structure */
 	bool		needs_va_space;
 	bool		tools_node;	/* accepted on /dev/nvidia-uvm-tools */
 	uvm_handler_t	*handler;
@@ -525,7 +532,7 @@ uvm_h_tools_tracker(struct uvm_fd *fd, struct uvm_va_space *vas, void *params, s
 /* ---- the table ---- */
 
 #define	REQ(num, type, vas_req, tools, fn) \
-	{ num, #num, sizeof(type), vas_req, tools, fn }
+	{ num, #num, sizeof(type), UVM_RM_STATUS_OFFSET(type), vas_req, tools, fn }
 
 static const struct uvm_request uvm_requests[] = {
 	REQ(UVM_INITIALIZE, UVM_INITIALIZE_PARAMS, false, false, uvm_h_initialize),
@@ -612,11 +619,18 @@ uvm_request_lookup(uint32_t number)
 	return (NULL);
 }
 
-/* every parameter structure ends with rmStatus */
+/*
+ * uvm_rm_status_field - the rmStatus field of a parameter structure.
+ *
+ * The offset is the ABI's (UVM_RM_STATUS_OFFSET), not the end of the
+ * structure: a structure with tail padding carries rmStatus before that
+ * padding, and the user reads the field where the specification puts it
+ * (01 section 2.2 step 4).
+ */
 static inline NV_STATUS *
-uvm_rm_status_field(void *params, size_t size)
+uvm_rm_status_field(void *params, size_t offset)
 {
-	return ((NV_STATUS *)((uint8_t *)params + size - sizeof(NV_STATUS)));
+	return ((NV_STATUS *)((uint8_t *)params + offset));
 }
 
 #define	UVM_IOCTL_SMALL_SIZE	288
@@ -653,14 +667,14 @@ uvm_ioctl_dispatch(struct uvm_fd *fd, bool tools_node, uint32_t request, void *u
 		goto out;
 	}
 	status = uvm_global_status();
-	*uvm_rm_status_field(params, req->size) = status;
+	*uvm_rm_status_field(params, req->rm_status_offset) = status;
 	if (status == NV_OK) {
 		vas = uvm_fd_va_space(fd);
 		if (req->needs_va_space && vas == NULL)
 			status = NV_ERR_ILLEGAL_ACTION;
 		else
 			status = req->handler(fd, vas, params, td);
-		*uvm_rm_status_field(params, req->size) = status;
+		*uvm_rm_status_field(params, req->rm_status_offset) = status;
 	}
 	if (copyout(params, user_ptr, req->size) != 0)
 		error = EFAULT;

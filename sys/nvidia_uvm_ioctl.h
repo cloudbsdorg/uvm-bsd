@@ -19,6 +19,7 @@
 
 #include <sys/types.h>
 #ifndef _KERNEL
+#include <stddef.h>
 #include <stdint.h>
 #endif
 #ifdef __FreeBSD__
@@ -43,6 +44,29 @@ typedef uint64_t	NvLength;
 #define	NV_FALSE	((NvBool)0)
 
 #define	UVM_ALIGN8	__attribute__((aligned(8)))
+
+/*
+ * UVM_RM_STATUS_OFFSET - where the rmStatus field sits inside a parameter
+ * structure.
+ *
+ * It is NOT sizeof(type) - sizeof(NV_STATUS).  A parameter structure whose
+ * alignment is 8 and whose last field before rmStatus is 64-bit wide ends
+ * with four bytes of tail padding, so the field the user reads is at
+ * sizeof(type) - 8, not at sizeof(type) - 4 (uvm-spec r1, 01-user-abi.md
+ * section 2.2 step 4 and the layouts of section 5: UVM_INITIALIZE_PARAMS
+ * has rmStatus at 8 in 16 bytes, UVM_CREATE_EXTERNAL_RANGE_PARAMS at 16 in
+ * 24, UVM_MIGRATE_PARAMS at 72 in 80).  A driver that writes the status at
+ * the end of the structure writes it into that padding; the user then reads
+ * the value the field had before the call and never sees the answer.
+ *
+ * The same rule is the only one both the module and the userland tests can
+ * use, so it lives here.
+ */
+#ifdef _KERNEL
+#define	UVM_RM_STATUS_OFFSET(type)	((size_t)__offsetof(type, rmStatus))
+#else
+#define	UVM_RM_STATUS_OFFSET(type)	((size_t)offsetof(type, rmStatus))
+#endif
 
 typedef struct NvProcessorUuid {
 	NvU8	uuid[16];

@@ -47,6 +47,12 @@ static int fails, passes;
 static int
 uvm_ioctl(int fd, unsigned long raw, void *params)
 {
+	/*
+	 * errno is cleared first so that the errno a failing check prints is
+	 * this call's own: a call that succeeds leaves errno at zero, and a
+	 * stale value from an earlier failure cannot be read as this one's.
+	 */
+	errno = 0;
 	return (ioctl(fd, UVM_IOCTL_NATIVE(raw), params));
 }
 
