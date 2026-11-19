@@ -1,0 +1,111 @@
+.\" Copyright (c) 2026 REVYTECH, Inc.
+.\" SPDX-License-Identifier: BSD-2-Clause
+.\"
+.Dd November 19, 2026
+.Dt NVIDIA-UVM 4
+.Os
+.Sh NAME
+.Nm nvidia-uvm
+.Nd NVIDIA unified virtual memory driver
+.Sh SYNOPSIS
+.Cd "kldload nvidia-uvm"
+.Sh DESCRIPTION
+The
+.Nm
+module provides the two device nodes the NVIDIA CUDA user-mode driver
+.Pq libcuda
+needs beside
+.Pa /dev/nvidiactl :
+.Bl -tag -width "/dev/nvidia-uvm-tools"
+.It Pa /dev/nvidia-uvm
+The main device.
+One open file is one UVM virtual address space, bound to the address
+space of the process that initialised it.
+All GPU registrations, mappings and memory requests go here.
+.It Pa /dev/nvidia-uvm-tools
+The profiler and debugger event interface.
+.El
+.Pp
+Both nodes are created mode 0666 when the module loads, as libcuda runs as
+an ordinary user.
+The module is a client of the resource manager inside the NVIDIA GPU
+driver and needs an
+.Pa nvidia.ko
+that exports the UVM kernel interface.
+.Pp
+CUDA programs run under the Linuxulator; the module registers a
+.Xr linux 4
+ioctl handler so the request numbers libcuda issues reach it unchanged.
+A native
+.Fx
+program wraps the same numbers with the encoding in
+.In nvidia_uvm_ioctl.h .
+.Pp
+This is a clean-room implementation written from a functional
+specification (revision r1), not from NVIDIA's Linux driver.
+The present phase drives Blackwell GB20x GPUs
+.Pq GeForce RTX 50 series
+and covers GPU, GPU address space and channel registration, external
+allocations
+.Pq Fn cudaMalloc , Fn cudaHostAlloc ,
+semaphore pools and dynamic-parallelism regions, with every GPU fault
+cancelled.
+Managed memory
+.Pq Fn cudaMallocManaged ,
+peer access, access counters and the tools event queues are later phases;
+their requests answer
+.Dv NV_ERR_INVALID_ADDRESS
+or
+.Dv NV_ERR_NOT_SUPPORTED
+as the specification prescribes and log the phase once.
+Other GPU generations report themselves unsupported at registration.
+.Sh LOADER TUNABLES
+.Bl -tag -width indent
+.It Va hw.nvidia_uvm.builtin_tests
+Built-in tests enabled; default 0, when unknown request numbers fail with
+.Er ENOSYS .
+.It Va hw.nvidia_uvm.enable_va_space_mm
+Bind each VA space to the creating process address space; default 1.
+.It Va hw.nvidia_uvm.gpfifo_entries
+GPFIFO entries per UVM channel, a power of two in [32, 1048576]; default 1024.
+.It Va hw.nvidia_uvm.fault_batch_count
+Replayable faults fetched per batch; default 256.
+.It Va hw.nvidia_uvm.wait_timeout_ms
+How long a wait on GPU work may take before the module records a fatal
+error; default 30000.
+.It Va hw.nvidia_uvm.sysmem_gpfifo
+Place the GPFIFO ring and PUT word in system memory (1, the default) or
+video memory (0).
+.El
+.Sh SYSCTL VARIABLES
+.Bl -tag -width indent
+.It Va hw.nvidia_uvm.fatal_error
+The module-wide fatal status; 0 until an unrecoverable error (a channel
+error, a timeout, a lost GPU) is recorded, after which every request fails
+with it until the module is reloaded.
+.It Va hw.nvidia_uvm.gpus
+One line per registered GPU with its architecture, classes and fault
+statistics.
+.El
+.Sh FILES
+.Bl -tag -width "/dev/nvidia-uvm-tools" -compact
+.It Pa /dev/nvidia-uvm
+.It Pa /dev/nvidia-uvm-tools
+.El
+.Sh SEE ALSO
+.Xr linux 4
+.Sh HISTORY
+The
+.Nm
+driver first appeared in CloudBSD in 2026.
+.Sh AUTHORS
+.An REVYTECH Inc
+.Sh BUGS
+Only Blackwell GB20x has a hardware abstraction layer in this phase;
+Ampere, Ada, Hopper and Blackwell GB100 GPUs are refused at registration.
+Partial unmaps of an external mapping remove the whole mapping instead of
+splitting it.
+The semaphore pool mapping cannot verify that the file offset equals the
+mapped address, as the specification asks: the
+.Fx
+device mmap path does not pass the address to the driver.
