@@ -290,6 +290,8 @@ NV_STATUS uvm_pt_range_vec_write_same(struct uvm_page_tree *tree, struct uvm_pt_
     uvm_membar_t membar, struct uvm_tracker *tracker);
 NV_STATUS uvm_pt_range_vec_clear(struct uvm_page_tree *tree, struct uvm_pt_range_vec *vec, uvm_membar_t membar,
     struct uvm_tracker *tracker);
+NV_STATUS uvm_pt_range_vec_clear_sub(struct uvm_page_tree *tree, struct uvm_pt_range_vec *vec, uint64_t va,
+    uint64_t size, uvm_membar_t membar, struct uvm_tracker *tracker);
 
 /* ---- GPU objects (02 section 3.2, 03 section 1, 06) ---- */
 
@@ -398,12 +400,24 @@ enum uvm_range_type {
 	UVM_RANGE_SKED
 };
 
+/*
+ * The duplicated RM handle of an external mapping, shared by the parts a
+ * mapping is split into (03 section 4.2: "the duplicated RM handle
+ * (reference counted because splitting one mapping shares the handle)").
+ * The count is a refcount (sys/refcount.h); the handle is freed with RM
+ * when the last part is gone.
+ */
+struct uvm_ext_handle {
+	u_int			refs;
+	NvHandle		dup;
+};
+
 /* an RM allocation mapped on one GPU inside an external range (03 section 4.2) */
 struct uvm_ext_mapping {
 	TAILQ_ENTRY(uvm_ext_mapping) link;
 	uint64_t		start, end;	/* inclusive */
 	struct uvm_gpu		*gpu;
-	NvHandle		dup_handle;	/* 0 for a sparse mapping */
+	struct uvm_ext_handle	*handle;	/* NULL for a sparse mapping */
 	bool			is_sysmem;
 	bool			l2_invalidate_at_unmap;
 	struct uvm_pt_range_vec	ptes;

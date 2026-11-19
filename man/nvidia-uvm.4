@@ -103,8 +103,6 @@ driver first appeared in CloudBSD in 2026.
 .Sh BUGS
 Only Blackwell GB20x has a hardware abstraction layer in this phase;
 Ampere, Ada, Hopper and Blackwell GB100 GPUs are refused at registration.
-Partial unmaps of an external mapping remove the whole mapping instead of
-splitting it.
 The semaphore pool mapping cannot verify that the file offset equals the
 mapped address, as the specification asks: the
 .Fx

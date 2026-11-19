@@ -21,7 +21,7 @@ Phases 0 and 1 of the specification's plan:
 | GPU registration through RM | done: device, address space, fault buffers, interrupt ownership, PMA object, copy-engine channels; Blackwell GB20x has the HAL, other generations are refused at registration |
 | GPU VA space registration (page directory hand-over) | done, page tables in system memory written by the copy engine |
 | Channel registration with resource mapping | done |
-| External ranges, `cudaMalloc` mappings, sparse mappings, unmap, free, validate | done (a partial unmap removes the whole mapping instead of splitting it) |
+| External ranges, `cudaMalloc` mappings, sparse mappings, unmap, free, validate | done |
 | Semaphore pools with mmap | done |
 | Dynamic-parallelism regions | done |
 | Replayable faults | fetched, attributed and cancelled (no managed memory yet); non-replayable faults reported to RM |

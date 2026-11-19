@@ -604,3 +604,52 @@ uvm_pt_range_vec_clear(struct uvm_page_tree *tree, struct uvm_pt_range_vec *vec,
 	sx_xunlock(&tree->lock);
 	return (status);
 }
+
+/*
+ * uvm_pt_range_vec_clear_sub - clear the PTEs of the pages of [va, va+size)
+ * only, inside the vector's range; the pages outside keep their PTEs.  The
+ * sub-range must be aligned to the vector's page size and lie inside the
+ * vector, as one PTE covers one page.
+ *
+ * Time: O(ranges + pages cleared).  Space: O(pages of one table).
+ */
+NV_STATUS
+uvm_pt_range_vec_clear_sub(struct uvm_page_tree *tree, struct uvm_pt_range_vec *vec, uint64_t va, uint64_t size,
+    uvm_membar_t membar, struct uvm_tracker *tracker)
+{
+	uint64_t page_size = vec->page_size;
+	uint64_t sub_first, sub_last;
+	unsigned i;
+	NV_STATUS status = NV_OK;
+
+	if (vec->ranges == NULL || vec->count == 0 || page_size == 0)
+		return (NV_ERR_INVALID_ADDRESS);
+	if (size == 0 || (va & (page_size - 1)) != 0 || (size & (page_size - 1)) != 0)
+		return (NV_ERR_INVALID_ADDRESS);
+	if (va < vec->va || va + size > vec->va + vec->size)
+		return (NV_ERR_INVALID_ADDRESS);
+	sub_first = (va - vec->va) / page_size;
+	sub_last = sub_first + size / page_size - 1;
+	sx_xlock(&tree->lock);
+	for (i = 0; i < vec->count && status == NV_OK; i++) {
+		struct uvm_pt_range *pr = &vec->ranges[i];
+		uint64_t pr_first = (pr->va_start - vec->va) / page_size;
+		uint64_t pr_last = pr_first + pr->count - 1;
+		uint64_t lo = pr_first > sub_first ? pr_first : sub_first;
+		uint64_t hi = pr_last < sub_last ? pr_last : sub_last;
+		uint64_t invalid = uvm_page_tree_invalid_pte(tree, pr->page_size);
+		uint64_t *ptes;
+		uint32_t j, count;
+
+		if (lo > hi)
+			continue;
+		count = (uint32_t)(hi - lo + 1);
+		ptes = malloc(sizeof(uint64_t) * count, M_NVIDIA_UVM, M_WAITOK);
+		for (j = 0; j < count; j++)
+			ptes[j] = invalid;
+		status = uvm_page_tree_write_ptes(tree, pr, (uint32_t)(lo - pr_first), ptes, count, membar, tracker);
+		free(ptes, M_NVIDIA_UVM);
+	}
+	sx_xunlock(&tree->lock);
+	return (status);
+}

@@ -18,6 +18,8 @@
 
 #include <sys/refcount.h>
 
+#include "uvm_ext_split.h"
+
 /* ---- the range tree (03 section 4) ---- */
 
 int
@@ -864,6 +866,22 @@ uvm_ext_gpu_state(struct uvm_range *r, struct uvm_gpu *gpu, bool create)
 	return (s);
 }
 
+/*
+ * Drop one reference on the shared RM handle; the handle is freed with RM
+ * when the last part of the mapping is gone (refcount_release() returns
+ * true when the count it drops was the last one).
+ */
+static void
+uvm_ext_handle_unref(struct uvm_gpu *gpu, struct uvm_ext_handle *h)
+{
+	if (h == NULL)
+		return;
+	if (refcount_release(&h->refs)) {
+		nvUvmInterfaceFreeDupedHandle(gpu->rm_device, h->dup);
+		free(h, M_NVIDIA_UVM);
+	}
+}
+
 /* clear the PTEs of a mapping, wait, release its page tables and RM handle; caller holds s->lock */
 static void
 uvm_ext_mapping_destroy(struct uvm_ext_gpu_state *s, struct uvm_ext_mapping *m, struct uvm_gpu_va_space *gvas)
@@ -888,8 +906,7 @@ uvm_ext_mapping_destroy(struct uvm_ext_gpu_state *s, struct uvm_ext_mapping *m, 
 		uvm_pt_range_vec_deinit(gvas->tree, &m->ptes);
 	}
 	uvm_tracker_deinit(&m->tracker);
-	if (m->dup_handle != 0)
-		nvUvmInterfaceFreeDupedHandle(s->gpu->rm_device, m->dup_handle);
+	uvm_ext_handle_unref(s->gpu, m->handle);
 	free(m, M_NVIDIA_UVM);
 }
 
@@ -938,7 +955,7 @@ uvm_ext_mapping_write(struct uvm_gpu_va_space *gvas, struct uvm_ext_mapping *m, 
 		info.pteBufferSize = want * sizeof(uint64_t);
 		info.pteBuffer = ptes;
 		info.mappingPageSize = page_size;
-		status = nvUvmInterfaceGetExternalAllocPtes(gvas->rm_as, m->dup_handle, offset + done * page_size,
+		status = nvUvmInterfaceGetExternalAllocPtes(gvas->rm_as, m->handle->dup, offset + done * page_size,
 		    want * page_size, &info);
 		if (status != NV_OK)
 			break;
@@ -970,6 +987,102 @@ uvm_ext_mapping_write(struct uvm_gpu_va_space *gvas, struct uvm_ext_mapping *m, 
 	return (status);
 }
 
+/*
+ * The part of the mapping that the unmapped interval [start, end] covers,
+ * rounded out to the mapping's page size: one PTE covers one whole page, so
+ * a page the interval only partly covers is removed as a whole.  The parts of
+ * the mapping that stay are therefore page aligned.
+ */
+static void
+uvm_ext_overlap_pages(const struct uvm_ext_mapping *m, uint64_t start, uint64_t end, uint64_t *ov_start,
+    uint64_t *ov_end)
+{
+	uint64_t ps = m->ptes.page_size;
+	uint64_t lo = start > m->start ? start : m->start;
+	uint64_t hi = end < m->end ? end : m->end;
+	uint64_t excl;
+
+	lo &= ~(ps - 1);
+	excl = hi + 1;
+	if ((excl & (ps - 1)) != 0)
+		excl += ps - (excl & (ps - 1));
+	*ov_start = lo < m->start ? m->start : lo;
+	*ov_end = excl - 1 < m->end ? excl - 1 : m->end;
+}
+
+/*
+ * Clear the PTEs of the removed part of a mapping, invalidate the L2 when
+ * the mapping asked for it and wait for the GPU work; the pages outside the
+ * part keep their PTEs.
+ */
+static NV_STATUS
+uvm_ext_mapping_remove_part(struct uvm_ext_mapping *m, struct uvm_gpu_va_space *gvas, uint64_t start, uint64_t end)
+{
+	uvm_membar_t membar = m->is_sysmem ? UVM_MEMBAR_SYS : UVM_MEMBAR_GPU;
+	NV_STATUS status;
+
+	status = uvm_pt_range_vec_clear_sub(gvas->tree, &m->ptes, start, end - start + 1, membar, &m->tracker);
+	if (status != NV_OK)
+		return (status);
+	if (m->l2_invalidate_at_unmap) {
+		struct uvm_push push;
+
+		if (uvm_push_begin(gvas->gpu, &push, &m->tracker) == NV_OK) {
+			uint32_t *w = uvm_push_space(&push, UVM_HOST_L2_INVALIDATE_MAX_WORDS);
+
+			push.next = w + uvm_host_l2_invalidate(w, 0);
+			uvm_push_end(&push);
+			uvm_tracker_add(&m->tracker, push.channel, push.value);
+		}
+	}
+	return (uvm_tracker_wait(&m->tracker));
+}
+
+/*
+ * Make the part [start, end] of a mapping that survives the unmap into a
+ * mapping of its own: the same GPU, the same memory and the same shared RM
+ * handle (one more reference), with its own page-table range vector, which
+ * re-references the page tables of the part and writes no PTE, so the pages
+ * of the part stay mapped the whole time.
+ */
+static NV_STATUS
+uvm_ext_mapping_split_part(struct uvm_ext_mapping *m, struct uvm_gpu_va_space *gvas, uint64_t start, uint64_t end,
+    struct uvm_ext_mapping **out)
+{
+	struct uvm_ext_mapping *p;
+	NV_STATUS status;
+
+	p = malloc(sizeof(*p), M_NVIDIA_UVM, M_WAITOK | M_ZERO);
+	p->start = start;
+	p->end = end;
+	p->gpu = m->gpu;
+	p->handle = m->handle;
+	p->is_sysmem = m->is_sysmem;
+	p->l2_invalidate_at_unmap = m->l2_invalidate_at_unmap;
+	if (p->handle != NULL)
+		refcount_acquire(&p->handle->refs);
+	uvm_tracker_init(&p->tracker);
+	status = uvm_pt_range_vec_init(gvas->tree, p->start, end - start + 1, m->ptes.page_size, &p->ptes);
+	if (status != NV_OK) {
+		uvm_tracker_deinit(&p->tracker);
+		uvm_ext_handle_unref(p->gpu, p->handle);
+		free(p, M_NVIDIA_UVM);
+		return (status);
+	}
+	*out = p;
+	return (NV_OK);
+}
+
+/* drop a part that was made but not inserted into the list */
+static void
+uvm_ext_mapping_free_part(struct uvm_ext_mapping *p, struct uvm_gpu_va_space *gvas)
+{
+	uvm_pt_range_vec_deinit(gvas->tree, &p->ptes);
+	uvm_tracker_deinit(&p->tracker);
+	uvm_ext_handle_unref(p->gpu, p->handle);
+	free(p, M_NVIDIA_UVM);
+}
+
 /* unmap the parts of this GPU's mappings that overlap [start, end]; caller holds s->lock and the VA space read lock */
 static NV_STATUS
 uvm_ext_unmap_overlap(struct uvm_range *r, struct uvm_ext_gpu_state *s, struct uvm_gpu_va_space *gvas,
@@ -980,20 +1093,55 @@ uvm_ext_unmap_overlap(struct uvm_range *r, struct uvm_ext_gpu_state *s, struct u
 
 	(void)r;
 	TAILQ_FOREACH_SAFE(m, &s->mappings, link, next) {
+		struct uvm_ext_split_plan plan;
+		struct uvm_ext_mapping *left = NULL, *right = NULL;
+		uint64_t ov_start, ov_end;
+
 		if (m->end < start || m->start > end)
 			continue;
-		if (m->start < start || m->end > end) {
-			/*
-			 * A partial overlap: the spec splits the mapping and removes the
-			 * overlap only.  This phase removes the whole mapping and tells
-			 * the caller, which the UMD's usage (whole-allocation unmaps)
-			 * does not exercise; a split is a later refinement.
-			 */
-			uvm_log_ratelimited("external unmap of [%#jx, %#jx] splits mapping [%#jx, %#jx]: "
-			    "the whole mapping is removed in this phase", (uintmax_t)start, (uintmax_t)end,
-			    (uintmax_t)m->start, (uintmax_t)m->end);
+		if (gvas == NULL || m->ptes.page_size == 0) {
+			/* without a page tree the mapping's PTEs cannot be split */
+			uvm_ext_mapping_destroy(s, m, gvas);
+			continue;
 		}
-		uvm_ext_mapping_destroy(s, m, gvas);
+		uvm_ext_overlap_pages(m, start, end, &ov_start, &ov_end);
+		uvm_ext_split_plan(m->start, m->end, ov_start, ov_end, &plan);
+		if (!plan.keep_left && !plan.keep_right) {
+			/* the whole mapping is covered: it goes as a whole */
+			uvm_ext_mapping_destroy(s, m, gvas);
+			continue;
+		}
+		/*
+		 * A partial overlap: the spec splits the mapping and removes the
+		 * overlap only (03 section 4.2).  The PTEs of the overlap are
+		 * cleared, the parts that stay become mappings of their own and
+		 * share the RM handle of the mapping they come from.
+		 */
+		status = uvm_ext_mapping_remove_part(m, gvas, ov_start, ov_end);
+		if (status == NV_OK && plan.keep_left)
+			status = uvm_ext_mapping_split_part(m, gvas, plan.left_start, plan.left_end, &left);
+		if (status == NV_OK && plan.keep_right)
+			status = uvm_ext_mapping_split_part(m, gvas, plan.right_start, plan.right_end, &right);
+		if (status != NV_OK) {
+			/* the split failed: the whole mapping goes, as it did before */
+			uvm_log_ratelimited("external unmap of [%#jx, %#jx] cannot split mapping [%#jx, %#jx]: "
+			    "the whole mapping is removed", (uintmax_t)start, (uintmax_t)end, (uintmax_t)m->start,
+			    (uintmax_t)m->end);
+			if (left != NULL)
+				uvm_ext_mapping_free_part(left, gvas);
+			uvm_ext_mapping_destroy(s, m, gvas);
+			continue;
+		}
+		if (left != NULL)
+			TAILQ_INSERT_BEFORE(m, left, link);
+		if (right != NULL)
+			TAILQ_INSERT_BEFORE(m, right, link);
+		/* the old mapping goes; its page tables and handle reference go with it */
+		uvm_pt_range_vec_deinit(gvas->tree, &m->ptes);
+		uvm_tracker_deinit(&m->tracker);
+		uvm_ext_handle_unref(m->gpu, m->handle);
+		TAILQ_REMOVE(&s->mappings, m, link);
+		free(m, M_NVIDIA_UVM);
 	}
 	return (status);
 }
@@ -1006,6 +1154,7 @@ uvm_ext_map_one(struct uvm_va_space *vas, struct uvm_range *r, const UvmGpuMappi
 	struct uvm_gpu_va_space *gvas;
 	struct uvm_ext_gpu_state *s;
 	struct uvm_ext_mapping *m;
+	struct uvm_ext_handle *h;
 	UvmGpuMemoryInfo meminfo;
 	NvHandle dup = 0;
 	uint64_t page_size, cap;
@@ -1046,7 +1195,10 @@ uvm_ext_map_one(struct uvm_va_space *vas, struct uvm_range *r, const UvmGpuMappi
 	m->start = p->base;
 	m->end = p->base + p->length - 1;
 	m->gpu = gpu;
-	m->dup_handle = dup;
+	h = malloc(sizeof(*h), M_NVIDIA_UVM, M_WAITOK | M_ZERO);
+	h->dup = dup;
+	refcount_init(&h->refs, 1);
+	m->handle = h;
 	m->is_sysmem = meminfo.sysmem != 0;
 	uvm_tracker_init(&m->tracker);
 	status = uvm_pt_range_vec_init(gvas->tree, m->start, p->length, page_size, &m->ptes);
