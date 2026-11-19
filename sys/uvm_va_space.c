@@ -1708,20 +1708,35 @@ NV_STATUS
 uvm_vas_register_gpu(struct uvm_va_space *vas, UVM_REGISTER_GPU_PARAMS *p)
 {
 	struct uvm_gpu *gpu;
+	struct uvm_core_device *dev;
 	UvmGpuClientInfo client = { p->hClient, p->hSmcPartRef };
 	NV_STATUS status;
+	int error;
 
 	status = uvm_gpu_retain_by_uuid_client(&p->gpu_uuid, &client, &gpu);
 	if (status != NV_OK)
 		return (status);
+	/*
+	 * Two references: the one above carries the caller's RM client
+	 * handles (backend-side; a second vendor has none), the core's
+	 * device reference below makes the GPU a device of the core.  The
+	 * unregister path drops both.
+	 */
+	error = uvm_core_device_probe(&p->gpu_uuid, sizeof(p->gpu_uuid), &dev);
+	if (error != 0) {
+		uvm_gpu_release(gpu);
+		return (uvm_nvidia_core_status(error));
+	}
 	sx_xlock(&vas->lock);
 	if (vas->gpus[gpu->id] != NULL) {
 		sx_xunlock(&vas->lock);
+		uvm_core_device_release(dev);
 		uvm_gpu_release(gpu);
 		return (NV_ERR_INVALID_DEVICE);
 	}
 	if (vas->disallow_new_registers) {
 		sx_xunlock(&vas->lock);
+		uvm_core_device_release(dev);
 		uvm_gpu_release(gpu);
 		return (NV_ERR_PAGE_TABLE_NOT_AVAIL);
 	}
@@ -1769,6 +1784,9 @@ uvm_vas_unregister_gpu(struct uvm_va_space *vas, const NvProcessorUuid *uuid)
 	uvm_gpu_mask_clear(&vas->unregister_in_progress, gpu->id);
 	sx_xunlock(&vas->lock);
 	sx_xunlock(&vas->serialize);
+	/* the core device reference the registration took, then the RM one */
+	if (gpu->core_dev != NULL)
+		uvm_core_device_release(gpu->core_dev);
 	uvm_gpu_release(gpu);
 	return (NV_OK);
 }

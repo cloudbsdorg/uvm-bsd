@@ -329,6 +329,14 @@ uvm_load(void)
 	}
 	uvm.callbacks_registered = true;
 
+	/* the core's registry and the NVIDIA backend come before the nodes */
+	uvm_core_registry_init();
+	error = uvm_core_backend_register(&uvm_nvidia_backend);
+	if (error != 0) {
+		uvm_log("the NVIDIA backend did not register: %d", error);
+		goto fail_core;
+	}
+
 	make_dev_args_init(&args);
 	args.mda_devsw = &uvm_cdevsw;
 	args.mda_uid = UID_ROOT;
@@ -354,6 +362,9 @@ fail_tools:
 	destroy_dev(uvm.cdev_tools);
 fail_main:
 	destroy_dev(uvm.cdev_main);
+fail_core:
+	uvm_core_backend_unregister(&uvm_nvidia_backend);
+	uvm_core_registry_deinit();
 fail_callbacks:
 	nvUvmInterfaceDeRegisterUvmOps();
 	uvm.callbacks_registered = false;

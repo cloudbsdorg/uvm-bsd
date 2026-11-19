@@ -9,9 +9,9 @@
 # Linuxulator (linux64elf on arm64, linux on amd64) plus linux_common.
 
 KMOD=	nvidia-uvm
-SRCS=	uvm_main.c uvm_ioctl.c uvm_va_space.c uvm_gpu.c uvm_channel.c \
+SRCS=	uvm_main.c uvm_ioctl.c uvm_va_space.c uvm_gpu.c uvm_channel.c uvm_backend_nvidia.c \
 	uvm_page_tree.c uvm_faults.c uvm_mmap.c \
-	uvm_core_range.c uvm_core_group.c
+	uvm_core_range.c uvm_core_group.c uvm_core_device.c
 SRCS+=	bus_if.h device_if.h vnode_if.h opt_global.h
 
 CFLAGS+=	-I${.CURDIR} -I${.CURDIR}/core

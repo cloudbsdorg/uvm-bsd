@@ -101,6 +101,11 @@ NVIDIA checkout was run on `src/` only.
   `arm64/linux/linux_proto.h` (`struct linux_ioctl_args`),
   `tools/makeobjops.awk` and `tools/vnode_if.awk` (the interface headers
   the amd64 cross-compile check generates).
+- For the vendor-neutral core (`sys/core/`): `sys/tree.h` (the red-black
+  tree behind the range tree), `sys/queue.h`, `sys/sx.h`, `sys/malloc.h`,
+  `sys/kernel.h` and `sys/systm.h` (`KASSERT`) behind `uvm_core_os.h`; the
+  userland shim of that header uses pthread(3) and assert(3) from the base
+  system only.
 
 ## Architecture: our own design decision
 
@@ -163,3 +168,4 @@ when its checked answer arrives in a new frozen revision.
 | Q-004 the numEntries argument of the page directory hand-over | open | the root table's entry count (2 for MMU v3, 4 for v2) |
 | Q-005 NV_WARN_NOTHING_TO_DO from UVM_MM_INITIALIZE in this phase | open | answered; release ordering comes with managed ranges |
 | Q-006 the core/backend split against the spec's locking and teardown order | open | the mapping of spec objects to layers in docs/ARCHITECTURE.md |
+| Q-007 the core device registry (probe by identity, two reference counts) against the spec's register-GPU order | open | the core reference brackets the spec's retain and release steps; the RM client handles stay backend-side |

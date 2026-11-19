@@ -269,40 +269,40 @@ typedef int (*uvm_core_op_user_abi_translate_status)(struct uvm_core_device *dev
  */
 struct uvm_core_device_ops {
 	/* device lifetime */
-	uvm_core_op_probe		*probe;
-	uvm_core_op_retain		*retain;
-	uvm_core_op_release		*release;
-	uvm_core_op_describe		*describe;
+	uvm_core_op_probe		probe;
+	uvm_core_op_retain		retain;
+	uvm_core_op_release		release;
+	uvm_core_op_describe		describe;
 
 	/* address spaces */
-	uvm_core_op_create_va_space	*create_va_space;
-	uvm_core_op_destroy_va_space	*destroy_va_space;
-	uvm_core_op_map_runs		*map_runs;
-	uvm_core_op_unmap_runs		*unmap_runs;
-	uvm_core_op_map_sparse		*map_sparse;
-	uvm_core_op_map_reflected	*map_reflected;
+	uvm_core_op_create_va_space	create_va_space;
+	uvm_core_op_destroy_va_space	destroy_va_space;
+	uvm_core_op_map_runs		map_runs;
+	uvm_core_op_unmap_runs		unmap_runs;
+	uvm_core_op_map_sparse		map_sparse;
+	uvm_core_op_map_reflected	map_reflected;
 
 	/* work */
-	uvm_core_op_work_wait		*work_wait;
-	uvm_core_op_work_order_after	*work_order_after;
-	uvm_core_op_work_copy		*work_copy;
+	uvm_core_op_work_wait		work_wait;
+	uvm_core_op_work_order_after	work_order_after;
+	uvm_core_op_work_copy		work_copy;
 
 	/* faults */
-	uvm_core_op_fault_service	*fault_service;
-	uvm_core_op_fault_replay	*fault_replay;
-	uvm_core_op_fault_cancel	*fault_cancel;
-	uvm_core_op_fault_kill_context	*fault_kill_context;
+	uvm_core_op_fault_service	fault_service;
+	uvm_core_op_fault_replay	fault_replay;
+	uvm_core_op_fault_cancel	fault_cancel;
+	uvm_core_op_fault_kill_context	fault_kill_context;
 
 	/* device memory */
-	uvm_core_op_mem_alloc		*mem_alloc;
-	uvm_core_op_mem_free		*mem_free;
-	uvm_core_op_mem_evict		*mem_evict;
-	uvm_core_op_mem_resident_bytes	*mem_resident_bytes;
+	uvm_core_op_mem_alloc		mem_alloc;
+	uvm_core_op_mem_free		mem_free;
+	uvm_core_op_mem_evict		mem_evict;
+	uvm_core_op_mem_resident_bytes	mem_resident_bytes;
 
 	/* the hooks the user ABI needs */
-	uvm_core_op_user_abi_va_space_released	*user_abi_va_space_released;
-	uvm_core_op_user_abi_range_unmapped	*user_abi_range_unmapped;
-	uvm_core_op_user_abi_translate_status	*user_abi_translate_status;
+	uvm_core_op_user_abi_va_space_released	user_abi_va_space_released;
+	uvm_core_op_user_abi_range_unmapped	user_abi_range_unmapped;
+	uvm_core_op_user_abi_translate_status	user_abi_translate_status;
 };
 
 /*

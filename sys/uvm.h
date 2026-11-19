@@ -40,6 +40,7 @@
 
 #include "core/uvm_core_range.h"
 #include "core/uvm_core_group.h"
+#include "core/uvm_core_device.h"
 
 #include "nvidia_uvm_ioctl.h"
 #include "nvidia_uvm_rm.h"
@@ -128,6 +129,8 @@ NV_STATUS uvm_tracker_wait(struct uvm_tracker *t);
 
 struct uvm_gpu;
 struct uvm_channel_manager;
+struct uvm_core_device;
+struct uvm_core_backend;
 
 struct uvm_gpfifo_entry_state {
 	uint64_t	tracking_value;
@@ -341,6 +344,7 @@ struct uvm_gpu {
 	u_int			refs;		/* VA spaces that registered it plus retainers */
 	NvProcessorUuid		uuid;
 	char			name[UVM_GPU_NAME_LENGTH];
+	struct uvm_core_device	*core_dev;	/* the device of the core, when it has one */
 	UvmGpuInfo		info;
 	UvmGpuPlatformInfo	platform;
 	UvmGpuFbInfo		fb;
@@ -392,6 +396,14 @@ NV_STATUS uvm_gpu_resume_all(void);
 NV_STATUS uvm_gpu_sysmem_alloc(struct uvm_gpu *gpu, size_t bytes, void **kva, bus_dmamap_t *map, bus_addr_t *bus);
 void	uvm_gpu_sysmem_free(struct uvm_gpu *gpu, void *kva, bus_dmamap_t map, size_t bytes);
 uint64_t uvm_gpu_dma_address(const struct uvm_gpu *gpu, bus_addr_t bus);
+
+/* ---- the NVIDIA backend of the core (sys/uvm_backend_nvidia.c) ---- */
+
+/* the backend that is registered with the core when the module loads */
+extern struct uvm_core_backend uvm_nvidia_backend;
+
+/* the status of the vendor that a core errno becomes */
+NV_STATUS uvm_nvidia_core_status(int core_errno);
 
 /* ---- VA spaces, ranges (03) ---- */
 

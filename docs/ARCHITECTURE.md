@@ -80,3 +80,8 @@ opencode rounds, each a reviewed commit:
    the range groups are done (`sys/core/uvm_core_group.[ch]`);
 3. the NVIDIA backend behind the table: ioctl layer, RM glue, HAL, page
    trees, channels, fault decoding; the module links both.
+   The device registry and the backend registration are done
+   (`sys/core/uvm_core_device.[ch]`, `sys/core/uvm_core_os.h`,
+   `sys/uvm_backend_nvidia.c`): a GPU registered with a VA space is also a
+   core device, probed by its UUID; the RM client handles of a registration
+   stay a backend-side argument because they are RM-specific.

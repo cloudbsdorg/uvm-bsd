@@ -24,6 +24,7 @@ for src in "$REPO"/tests/unit/*_test.c; do
 	case "$name" in
 	core_range_test)	extra="$REPO/sys/core/uvm_core_range.c" ;;
 	core_group_test)	extra="$REPO/sys/core/uvm_core_group.c" ;;
+	core_device_test)	extra="$REPO/sys/core/uvm_core_device.c -lpthread" ;;
 	esac
 	# shellcheck disable=SC2086
 	if ! cc -std=c11 -Wall -Wextra -Werror -I "$REPO/sys" -o "$T/$name" "$src" $extra; then
