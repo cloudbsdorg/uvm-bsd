@@ -1,7 +1,7 @@
 .\" Copyright (c) 2026 REVYTECH, Inc.
 .\" SPDX-License-Identifier: BSD-2-Clause
 .\"
-.Dd November 19, 2026
+.Dd November 20, 2026
 .Dt NVIDIA-UVM 4
 .Os
 .Sh NAME
@@ -119,6 +119,24 @@ with it until the module is reloaded.
 One line per registered GPU with its architecture, classes and fault
 statistics.
 .El
+.Sh UNLOADING
+.Xr kldunload 8
+of the module fails with
+.Er EBUSY
+while any
+.Pa /dev/nvidia-uvm
+or
+.Pa /dev/nvidia-uvm-tools
+file is open, even one that never created a virtual address space, while a
+virtual address space or a GPU registration exists, and while any mapping
+of a semaphore pool or a managed range is alive.
+A mapping outlives the file it was made through, because a process closes
+its files before its address space is torn down, so the module stays loaded
+until the last such mapping is unmapped or its process has exited.
+Once an unload has begun,
+.Xr open 2
+of either node fails with
+.Er ENXIO .
 .Sh FILES
 .Bl -tag -width "/dev/nvidia-uvm-tools" -compact
 .It Pa /dev/nvidia-uvm

@@ -148,6 +148,9 @@ uvm_fd_dtor(void *arg)
 		uvm_va_space_unref(vas);
 	}
 	free(fd, M_NVIDIA_UVM);
+	/* last: the unload waits for the count, so nothing may touch module state after it */
+	KASSERT(atomic_load_int(&uvm.open_fds) > 0, ("uvm open file count underflow"));
+	atomic_subtract_int(&uvm.open_fds, 1);
 }
 
 static int
@@ -158,11 +161,21 @@ uvm_open(struct cdev *cdev, int oflags, int devtype, struct thread *td)
 
 	if (uvm_global_status() != NV_OK)
 		return (uvm_status_to_errno(uvm_global_status()));
+	/* the count and the unload's decision are one step under uvm.lock (uvm_unload_state.h) */
+	sx_slock(&uvm.lock);
+	if (!uvm_open_admit(uvm.unloading)) {
+		sx_sunlock(&uvm.lock);
+		return (ENXIO);
+	}
+	atomic_add_int(&uvm.open_fds, 1);
+	sx_sunlock(&uvm.lock);
 	fd = malloc(sizeof(*fd), M_NVIDIA_UVM, M_WAITOK | M_ZERO);
 	fd->cdev = cdev;
 	error = devfs_set_cdevpriv(fd, uvm_fd_dtor);
-	if (error != 0)
+	if (error != 0) {
 		free(fd, M_NVIDIA_UVM);
+		atomic_subtract_int(&uvm.open_fds, 1);
+	}
 	return (error);
 }
 
@@ -392,25 +405,48 @@ fail_locks:
 	return (error);
 }
 
+/* the module is in use: a GPU, a VA space, an open file or a pager object (uvm_unload_state.h); `lock` is held */
+static bool
+uvm_in_use_locked(void)
+{
+	unsigned gpus = 0;
+	int i;
+
+	for (i = UVM_ID_GPU_FIRST; i <= UVM_ID_GPU_LAST; i++) {
+		if (uvm.gpus[i] != NULL)
+			gpus++;
+	}
+	return (uvm_unload_busy(atomic_load_int(&uvm.open_fds), atomic_load_int(&uvm.pager_objs),
+	    TAILQ_EMPTY(&uvm.va_spaces) ? 0 : 1, gpus));
+}
+
 static int
 uvm_unload(void)
 {
-	int i;
-
-	sx_slock(&uvm.lock);
-	for (i = UVM_ID_GPU_FIRST; i <= UVM_ID_GPU_LAST; i++) {
-		if (uvm.gpus[i] != NULL) {
-			sx_sunlock(&uvm.lock);
-			uvm_log("unload refused: a GPU is still registered (open VA spaces)");
-			return (EBUSY);
-		}
-	}
-	if (!TAILQ_EMPTY(&uvm.va_spaces) || atomic_load_int(&uvm.managed_objs) != 0) {
-		/* a managed mapping can outlive its VA space; its pager code lives in this module */
-		sx_sunlock(&uvm.lock);
+	/*
+	 * The check and the mark are one step: from the mark on uvm_open
+	 * refuses, so no file, VA space or pager object can appear.  Pager
+	 * objects outlive their fd (the process map goes after its files), so
+	 * they are counted too; a file with no VA space yet is counted as
+	 * well, its destructor is module code.
+	 */
+	sx_xlock(&uvm.lock);
+	if (uvm_in_use_locked()) {
+		sx_xunlock(&uvm.lock);
+		uvm_log("unload refused: %u open files, %u pager objects, a GPU or a VA space is still in use",
+		    atomic_load_int(&uvm.open_fds), atomic_load_int(&uvm.pager_objs));
 		return (EBUSY);
 	}
-	sx_sunlock(&uvm.lock);
+	uvm.unloading = true;
+	sx_xunlock(&uvm.lock);
+	/*
+	 * A destructor drops its count after its last access to module
+	 * state; the barrier below waits out one that still holds the
+	 * power-management lock, the pause one that is returning.
+	 */
+	sx_xlock(&uvm.pm_lock);
+	sx_xunlock(&uvm.pm_lock);
+	pause("uvmdrn", hz / 10);
 
 	linux_ioctl_unregister_handler(&uvm_linux_handler);
 	/* the nodes go first so no new open can race the teardown */
@@ -432,13 +468,18 @@ uvm_unload(void)
 static int
 uvm_modevent(module_t mod, int what, void *arg)
 {
+	int error;
+
 	switch (what) {
 	case MOD_LOAD:
 		return (uvm_load());
 	case MOD_UNLOAD:
 		return (uvm_unload());
 	case MOD_QUIESCE:
-		return (TAILQ_EMPTY(&uvm.va_spaces) ? 0 : EBUSY);
+		sx_slock(&uvm.lock);
+		error = uvm_in_use_locked() ? EBUSY : 0;
+		sx_sunlock(&uvm.lock);
+		return (error);
 	default:
 		return (EOPNOTSUPP);
 	}

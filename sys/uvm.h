@@ -48,6 +48,7 @@
 #include "uvm_hal_methods.h"
 #include "uvm_pte.h"
 #include "uvm_mm_state.h"
+#include "uvm_unload_state.h"
 
 MALLOC_DECLARE(M_NVIDIA_UVM);
 
@@ -668,7 +669,9 @@ struct uvm_global {
 	struct sx		pm_lock;	/* 08 order 1 */
 	struct sx		lock;		/* 08 order 2 */
 	struct sx		managed_lock;	/* managed range <-> pager object links; above every VA space lock */
-	u_int			managed_objs;	/* live pager objects: the module cannot unload under them */
+	u_int			pager_objs;	/* live pager objects (pool and managed mappings): the module cannot unload under them */
+	u_int			open_fds;	/* open files whose private data is not yet destroyed */
+	bool			unloading;	/* set under `lock` once the unload is decided: no new open (uvm_unload_state.h) */
 	struct mtx		gpu_table_lock;	/* irq-safe lookup for the top half */
 	uvmGpuSessionHandle	rm_session;
 	UvmPlatformInfo		platform;
@@ -694,6 +697,25 @@ struct uvm_global {
 };
 
 extern struct uvm_global uvm;
+
+/*
+ * A pager object or an open file is counted from its birth to the very end
+ * of its destructor: done() is the last access to module state, so that the
+ * unload, which waits for both counts to reach zero, never frees the module
+ * under a destructor that is still returning (Track #2272).
+ */
+static inline void
+uvm_pager_obj_new(void)
+{
+	atomic_add_int(&uvm.pager_objs, 1);
+}
+
+static inline void
+uvm_pager_obj_done(void)
+{
+	KASSERT(atomic_load_int(&uvm.pager_objs) > 0, ("uvm pager object count underflow"));
+	atomic_subtract_int(&uvm.pager_objs, 1);
+}
 
 static inline NV_STATUS
 uvm_global_status(void)

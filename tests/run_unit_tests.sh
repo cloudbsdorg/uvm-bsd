@@ -51,4 +51,10 @@ else
 	echo "FAIL uvm_ioctl_test does not compile"
 	rc=1
 fi
+if sh -n "$REPO/tests/stress/uvm_stress.sh"; then
+	echo "ok   uvm_stress.sh parses (run it with the modules loaded)"
+else
+	echo "FAIL uvm_stress.sh does not parse"
+	rc=1
+fi
 exit $rc

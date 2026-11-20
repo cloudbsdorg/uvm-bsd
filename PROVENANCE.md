@@ -155,6 +155,18 @@ Phase-1 simplifications, each stated in the file that makes it:
 - GC6 blocking in the glue is the open device reference (the FreeBSD OS
   layer has no runtime power management), see `nv-uvm-interface.c`.
 
+### Lifetime audit and unload gate (Track #2272)
+
+No NVIDIA, Linux or dirty-notes path was opened for this change.  Sources
+read: this repository; the frozen spec r1 (`03-va-space-and-ranges.md`,
+`08-locking.md`, `09-freebsd-facilities.md`); and the FreeBSD sources
+`sys/fs/devfs/devfs_vnops.c` (cdevpriv, `devfs_fp_check`, `devfs_mmap_f`),
+`sys/kern/kern_conf.c` (`destroy_devl`), `sys/vm/device_pager.c`
+(`cdev_pager_allocate`, `dev_pager_dealloc`), `sys/vm/vm_pager.c`
+(`vm_pager_object_lookup`), `sys/compat/linux/linux_ioctl.c` (handler
+registry), `sys/kern/kern_shutdown.c` (panic path) and the `ddb(4)`,
+`textdump(4)` and `ddb(8)` manual pages.
+
 ## Questions
 
 Numbered questions filed in `uvm-qa/QUESTIONS.md`; each is resolved here

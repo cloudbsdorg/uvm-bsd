@@ -854,7 +854,7 @@ uvm_vas_create_managed(struct uvm_va_space *vas, uint64_t start, uint64_t size, 
 	r->u.sema.mem = mem;
 	r->u.sema.obj = obj;
 	obj->range = r;
-	atomic_add_int(&uvm.managed_objs, 1);
+	uvm_pager_obj_new();	/* until the pager destructor, or the failure paths, call uvm_pager_obj_done() */
 	sx_downgrade(&vas->lock);
 	for (j = UVM_ID_GPU_FIRST; j <= UVM_ID_GPU_LAST && status == NV_OK; j++) {
 		if (vas->gvas[j] != NULL && !vas->gvas[j]->dead)
@@ -863,6 +863,7 @@ uvm_vas_create_managed(struct uvm_va_space *vas, uint64_t start, uint64_t size, 
 	sx_sunlock(&vas->lock);
 	if (status != NV_OK) {
 		uvm_managed_obj_release(obj);	/* destroys the range and frees the handle */
+		uvm_pager_obj_done();
 		return (status);
 	}
 	*out = obj;
@@ -877,7 +878,10 @@ uvm_vas_create_managed(struct uvm_va_space *vas, uint64_t start, uint64_t size, 
  * application's own GPU work on the memory is its to finish before munmap,
  * as cudaFree does.  The managed lock is held across the destroy so that a
  * VA space destroy cannot free the range under us, and the VA space cannot
- * be freed while it holds a range we found linked.
+ * be freed while it holds a range we found linked.  The object's count in
+ * uvm.pager_objs is not dropped here: the caller drops it after its own last
+ * access to module state (the pager destructor still has to release the
+ * power-management lock), so the unload never frees the module under it.
  */
 void
 uvm_managed_obj_release(struct uvm_managed_obj *obj)
@@ -912,7 +916,7 @@ uvm_managed_obj_release(struct uvm_managed_obj *obj)
 	sx_xunlock(&uvm.managed_lock);
 	uvm_sema_mem_unref(obj->mem);
 	free(obj, M_NVIDIA_UVM);
-	atomic_subtract_int(&uvm.managed_objs, 1);
+	/* the caller drops the object's count (uvm_pager_obj_done) once it no longer touches module state */
 }
 
 /* ---- external ranges and mappings (03 section 4.2, 01 section 5.5) ---- */

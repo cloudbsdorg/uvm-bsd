@@ -99,7 +99,13 @@ From a one-shot boot environment, as root:
    6 and `pageableMemoryAccess = 0`; then `vectorAdd` (cudaMalloc +
    cudaMemcpy + a kernel). `sysctl hw.nvidia_uvm.gpus` then shows the
    GPU, its classes and zero fatal faults.
-6. `kldunload nvidia-uvm` once every CUDA process has exited.
+6. `kldunload nvidia-uvm` once every CUDA process has exited; it answers
+   EBUSY while any node is open or any mapping of a pool or managed range is
+   alive (`nvidia-uvm(4)`, UNLOADING).
+7. Lifetime stress (Track #2272): `sh tests/stress/uvm_stress.sh -n 30 -j 4 -U`
+   runs parallel CUDA workers with random `kill -9`, open/close/mmap churn and
+   an unload probe, and fails on a new Xid, FATAL or panic line.  The panic
+   capture settings for a test BE are in `docs/panic-capture.md`.
 
 ## Licence
 

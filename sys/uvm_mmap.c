@@ -34,11 +34,24 @@
 #include <vm/vm_page.h>
 #include <vm/vm_pager.h>
 
+/*
+ * The pager of a semaphore pool: the handle is the pool's memory.  The
+ * constructor runs exactly once per object, under the device pager's list
+ * lock, so it is where the object takes its one memory reference and its
+ * place in the module's count of live pager objects.  (Deciding afterwards,
+ * from the object's reference count, whether a mapper "created" it is a
+ * race: two mappers of one pool can both see a count above one, both drop
+ * their reference, and leave the object with none -- Track #2272.)  The
+ * destructor drops both; the count goes last, as nothing may touch module
+ * state after it.
+ */
 static int
 uvm_sema_pg_ctor(void *handle, vm_ooffset_t size, vm_prot_t prot, vm_ooffset_t foff, struct ucred *cred,
     u_short *color)
 {
-	(void)handle; (void)size; (void)prot; (void)foff; (void)cred;
+	(void)size; (void)prot; (void)foff; (void)cred;
+	uvm_sema_mem_ref(handle);
+	uvm_pager_obj_new();
 	*color = 0;
 	return (0);
 }
@@ -46,9 +59,18 @@ uvm_sema_pg_ctor(void *handle, vm_ooffset_t size, vm_prot_t prot, vm_ooffset_t f
 static void
 uvm_sema_pg_dtor(void *handle)
 {
-	struct uvm_sema_mem *mem = handle;
+	uvm_sema_mem_unref(handle);
+	uvm_pager_obj_done();
+}
 
-	uvm_sema_mem_unref(mem);
+static int
+uvm_managed_pg_ctor(void *handle, vm_ooffset_t size, vm_prot_t prot, vm_ooffset_t foff, struct ucred *cred,
+    u_short *color)
+{
+	/* the object was counted, and holds its memory, when the range was created */
+	(void)handle; (void)size; (void)prot; (void)foff; (void)cred;
+	*color = 0;
+	return (0);
 }
 
 /*
@@ -105,6 +127,8 @@ uvm_managed_pg_dtor(void *handle)
 	sx_slock(&uvm.pm_lock);
 	uvm_managed_obj_release(handle);
 	sx_sunlock(&uvm.pm_lock);
+	/* nothing below touches module state: the unload may proceed once the count drops */
+	uvm_pager_obj_done();
 }
 
 static int
@@ -117,7 +141,7 @@ uvm_managed_pg_fault(vm_object_t object, vm_ooffset_t offset, int prot, vm_page_
 }
 
 static const struct cdev_pager_ops uvm_managed_pager_ops = {
-	.cdev_pg_ctor = uvm_sema_pg_ctor,
+	.cdev_pg_ctor = uvm_managed_pg_ctor,
 	.cdev_pg_dtor = uvm_managed_pg_dtor,
 	.cdev_pg_fault = uvm_managed_pg_fault,
 };
@@ -137,9 +161,10 @@ uvm_mmap_managed(struct uvm_va_space *vas, vm_ooffset_t *offset, vm_size_t size,
 	    curthread->td_ucred);
 	if (obj == NULL) {
 		uvm_managed_obj_release(mobj);	/* pm_lock is already held: not through the dtor */
+		uvm_pager_obj_done();
 		return (EINVAL);
 	}
-	KASSERT(obj->handle == mobj && obj->ref_count == 1, ("managed pager object %p reused", obj));
+	KASSERT(obj->handle == mobj, ("managed pager object %p has handle %p, not %p", obj, obj->handle, mobj));
 	*object = obj;
 	return (0);
 }
@@ -193,14 +218,16 @@ uvm_mmap_single(struct cdev *cdev, vm_ooffset_t *offset, vm_size_t size, vm_obje
 
 	obj = cdev_pager_allocate(mem, OBJT_DEVICE, &uvm_sema_pager_ops, *offset + size, nprot, *offset,
 	    curthread->td_ucred);
+	/*
+	 * Our reference only keeps the memory alive until the pager has its
+	 * own: a new object's constructor took it, an existing object already
+	 * had it.  Either way ours goes now.
+	 */
+	uvm_sema_mem_unref(mem);
 	if (obj == NULL) {
-		uvm_sema_mem_unref(mem);
 		sx_sunlock(&uvm.pm_lock);
 		return (EINVAL);
 	}
-	/* the pager holds exactly one memory reference per object: drop ours when it reused an existing one */
-	if (obj->handle == mem && obj->ref_count > 1)
-		uvm_sema_mem_unref(mem);
 	*object = obj;
 	sx_sunlock(&uvm.pm_lock);
 	return (0);
