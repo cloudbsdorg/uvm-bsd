@@ -93,7 +93,12 @@ stages, each a push followed by a wait and a check of the written data:
 1 virtual copy, 2 virtual memset, 4 physical system-memory copy, 8 physical
 memset without flush, 16 the same with flush, 32 plus a host wait for idle,
 64 plus a host membar (the push that raised Xid 71), 128 as 32 completed by a
-host-class semaphore release.
+host-class semaphore release;
+256 a copy-engine semaphore release into the semaphore page, 512 a virtual copy
+page to page, 1024 the same with LINE_COUNT 1, 2048 a memset with source pitch,
+explicit remap and LINE_COUNT, 4096 the virtual memset of value 2 plus
+source pitch only, 8192 as
+2048 with a block-linear source.
 Default 0.
 Diagnostic.
 .It Va hw.nvidia_uvm.ce_bind_subch4

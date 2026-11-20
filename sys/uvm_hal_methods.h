@@ -62,6 +62,7 @@
 #define	UVM_CE_OFFSET_OUT_UPPER		0x0408u
 #define	UVM_CE_OFFSET_OUT_LOWER		0x040Cu
 #define	UVM_CE_LINE_LENGTH_IN		0x0418u
+#define	UVM_CE_LINE_COUNT		0x041Cu
 #define	UVM_CE_SET_MEMORY_SCRUB_PARAMETERS 0x06FCu
 #define	UVM_CE_SET_REMAP_CONST_A	0x0700u
 #define	UVM_CE_SET_REMAP_CONST_B	0x0704u
@@ -444,7 +445,7 @@ uvm_ce_phys_mode(uvm_aperture_t aperture)
 
 /* the pieces of a copy or memset: offsets group, line length, launch */
 static inline size_t
-uvm_ce_piece(uint32_t *w, uint64_t dst, const uint64_t *src, uint32_t length, uint32_t launch)
+uvm_ce_piece_x(uint32_t *w, uint64_t dst, const uint64_t *src, uint32_t length, uint32_t launch, int line_count)
 {
 	size_t n = 0;
 
@@ -459,12 +460,22 @@ uvm_ce_piece(uint32_t *w, uint64_t dst, const uint64_t *src, uint32_t length, ui
 	w[n++] = (uint32_t)dst;
 	w[n++] = uvm_method_header(UVM_METHOD_INCR, UVM_SUBCH_CE, UVM_CE_LINE_LENGTH_IN, 1);
 	w[n++] = length;
+	if (line_count) {	/* probe only: LINE_COUNT 0x41C = 1 line (clca0b5.h) */
+		w[n++] = uvm_method_header(UVM_METHOD_INCR, UVM_SUBCH_CE, UVM_CE_LINE_COUNT, 1);
+		w[n++] = 1;
+	}
 	n += uvm_ce_launch(w + n, launch);
 	return (n);
 }
 
+static inline size_t
+uvm_ce_piece(uint32_t *w, uint64_t dst, const uint64_t *src, uint32_t length, uint32_t launch)
+{
+	return (uvm_ce_piece_x(w, dst, src, length, launch, 0));
+}
+
 /* words one piece needs (phys-mode group + offsets + length + launch) */
-#define	UVM_CE_PIECE_MAX_WORDS	(3 + 5 + 2 + 2)
+#define	UVM_CE_PIECE_MAX_WORDS	(3 + 5 + 2 + 2 + 2)
 #define	UVM_CE_MEMSET_HEADER_WORDS	4
 
 /*
@@ -487,8 +498,8 @@ uvm_ce_memcopy_words(uint64_t size)
 }
 
 static inline size_t
-uvm_ce_memcopy(uint32_t *w, const struct uvm_gpu_address *dst, const struct uvm_gpu_address *src,
-    uint64_t size, uvm_membar_t membar, int pipelined)
+uvm_ce_memcopy_x(uint32_t *w, const struct uvm_gpu_address *dst, const struct uvm_gpu_address *src,
+    uint64_t size, uvm_membar_t membar, int pipelined, int line_count)
 {
 	size_t n = 0;
 	uint64_t done = 0;
@@ -521,10 +532,17 @@ uvm_ce_memcopy(uint32_t *w, const struct uvm_gpu_address *dst, const struct uvm_
 		    UVM_CE_LAUNCH_TRANSFER_PIPELINED;
 		if (done + piece >= size)
 			launch |= uvm_ce_launch_flush(membar);
-		n += uvm_ce_piece(w + n, dst->address + done, &s, (uint32_t)piece, launch);
+		n += uvm_ce_piece_x(w + n, dst->address + done, &s, (uint32_t)piece, launch, line_count);
 		done += piece;
 	} while (done < size);
 	return (n);
+}
+
+static inline size_t
+uvm_ce_memcopy(uint32_t *w, const struct uvm_gpu_address *dst, const struct uvm_gpu_address *src,
+    uint64_t size, uvm_membar_t membar, int pipelined)
+{
+	return (uvm_ce_memcopy_x(w, dst, src, size, membar, pipelined, 0));
 }
 
 #define	UVM_CE_MEMSET_MAX_WORDS(size)	(UVM_CE_MEMSET_HEADER_WORDS + 2 + \
@@ -535,9 +553,14 @@ uvm_ce_memcopy(uint32_t *w, const struct uvm_gpu_address *dst, const struct uvm_
  * components X and Y, 4-byte components, two of them; LINE_LENGTH_IN counts
  * elements.
  */
+/* probe-only memset variants (hw.nvidia_uvm.init_probe_work); defaults use none */
+#define	UVM_CE_MEMSET_X_SRC_PITCH	0x1u	/* LAUNCH_DMA source layout PITCH (bit 7) */
+#define	UVM_CE_MEMSET_X_EXPLICIT_REMAP	0x2u	/* remap DST_Z and DST_W NO_WRITE */
+#define	UVM_CE_MEMSET_X_LINE_COUNT	0x4u	/* LINE_COUNT = 1 before the launch */
+
 static inline size_t
-uvm_ce_memset_8(uint32_t *w, const struct uvm_gpu_address *dst, uint64_t value, uint64_t size,
-    uvm_membar_t membar)
+uvm_ce_memset_8_x(uint32_t *w, const struct uvm_gpu_address *dst, uint64_t value, uint64_t size,
+    uvm_membar_t membar, unsigned xflags)
 {
 	size_t n = 0;
 	uint64_t done = 0;
@@ -552,7 +575,12 @@ uvm_ce_memset_8(uint32_t *w, const struct uvm_gpu_address *dst, uint64_t value, 
 	w[n++] = uvm_method_header(UVM_METHOD_INCR, UVM_SUBCH_CE, UVM_CE_SET_REMAP_CONST_A, 3);
 	w[n++] = (uint32_t)value;
 	w[n++] = (uint32_t)(value >> 32);
+	if (xflags & UVM_CE_MEMSET_X_SRC_PITCH)
+		base |= UVM_CE_LAUNCH_SRC_PITCH;
+	/* X from const A, Y from const B, 4-byte components, two destination components */
 	w[n++] = 4u | (5u << 4) | (3u << 16) | (1u << 24);
+	if (xflags & UVM_CE_MEMSET_X_EXPLICIT_REMAP)	/* Z and W NO_WRITE (6), one source component */
+		w[n - 1] |= (6u << 8) | (6u << 12);
 	do {
 		uint64_t piece = size - done;
 		uint32_t launch = base;
@@ -561,10 +589,18 @@ uvm_ce_memset_8(uint32_t *w, const struct uvm_gpu_address *dst, uint64_t value, 
 			piece = UVM_CE_MAX_PIECE;
 		if (done + piece >= size)
 			launch |= uvm_ce_launch_flush(membar);
-		n += uvm_ce_piece(w + n, dst->address + done, NULL, (uint32_t)(piece / 8), launch);
+		n += uvm_ce_piece_x(w + n, dst->address + done, NULL, (uint32_t)(piece / 8), launch,
+		    (xflags & UVM_CE_MEMSET_X_LINE_COUNT) != 0);
 		done += piece;
 	} while (done < size);
 	return (n);
+}
+
+static inline size_t
+uvm_ce_memset_8(uint32_t *w, const struct uvm_gpu_address *dst, uint64_t value, uint64_t size,
+    uvm_membar_t membar)
+{
+	return (uvm_ce_memset_8_x(w, dst, value, size, membar, 0));
 }
 
 /* ---- 1.2 GPFIFO entries ---- */
