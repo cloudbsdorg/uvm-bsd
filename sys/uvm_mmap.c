@@ -25,6 +25,7 @@
  */
 
 #include "uvm.h"
+#include "uvm_pager_ref.h"
 
 #include <sys/filedesc.h>
 #include <sys/file.h>
@@ -36,9 +37,11 @@
 
 /*
  * The pager of a semaphore pool: the handle is the pool's memory.  The
- * constructor runs exactly once per object, under the device pager's list
- * lock, so it is where the object takes its one memory reference and its
- * place in the module's count of live pager objects.  (Deciding afterwards,
+ * constructor runs exactly once per object, after the device pager's list
+ * mutex is dropped (a concurrent finder of the same handle waits until the
+ * constructor has returned), so it is where the object takes its memory
+ * reference (uvm_pager_ref.h) and its place in the module's count of live
+ * pager objects.  (Deciding afterwards,
  * from the object's reference count, whether a mapper "created" it is a
  * race: two mappers of one pool can both see a count above one, both drop
  * their reference, and leave the object with none -- Track #2272.)  The
@@ -50,7 +53,8 @@ uvm_sema_pg_ctor(void *handle, vm_ooffset_t size, vm_prot_t prot, vm_ooffset_t f
     u_short *color)
 {
 	(void)size; (void)prot; (void)foff; (void)cred;
-	uvm_sema_mem_ref(handle);
+	for (unsigned i = 0; i < uvm_pager_ctor_mem_refs(); i++)
+		uvm_sema_mem_ref(handle);
 	uvm_pager_obj_new();
 	*color = 0;
 	return (0);
@@ -223,7 +227,8 @@ uvm_mmap_single(struct cdev *cdev, vm_ooffset_t *offset, vm_size_t size, vm_obje
 	 * own: a new object's constructor took it, an existing object already
 	 * had it.  Either way ours goes now.
 	 */
-	uvm_sema_mem_unref(mem);
+	if (uvm_pager_mapper_drops_ref(0))
+		uvm_sema_mem_unref(mem);
 	if (obj == NULL) {
 		sx_sunlock(&uvm.pm_lock);
 		return (EINVAL);

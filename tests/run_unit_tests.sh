@@ -51,6 +51,17 @@ else
 	echo "FAIL uvm_ioctl_test does not compile"
 	rc=1
 fi
+# the pure rules only protect the module if the kernel code calls them: a
+# removed call leaves the userland tests green, so pin the call sites
+for pat in 'sys/uvm_main.c:uvm_open_admit(uvm.unloading)' 'sys/uvm_main.c:uvm_unload_busy(' \
+    'sys/uvm_mmap.c:uvm_pager_ctor_mem_refs()' 'sys/uvm_mmap.c:uvm_pager_mapper_drops_ref('; do
+	if grep -qF -- "${pat#*:}" "$REPO/${pat%%:*}"; then
+		echo "ok   ${pat%%:*} uses ${pat#*:}"
+	else
+		echo "FAIL ${pat%%:*} does not use ${pat#*:}"
+		rc=1
+	fi
+done
 if sh -n "$REPO/tests/stress/uvm_stress.sh"; then
 	echo "ok   uvm_stress.sh parses (run it with the modules loaded)"
 else

@@ -3,29 +3,28 @@
  * SPDX-License-Identifier: BSD-2-Clause
  *
  * pager_ref_test.c - who owns the semaphore pool memory reference of a
- * device pager object (sys/uvm_mmap.c, Track #2272), by exhaustive
- * interleaving of two concurrent mmap calls and one munmap of an existing
- * mapping.
+ * device pager object (sys/uvm_pager_ref.h, the rule sys/uvm_mmap.c uses,
+ * Track #2272), by exhaustive interleaving of two concurrent mmap calls
+ * and one munmap of an existing mapping.
  *
  * Model of cdev_pager_allocate(9): one atomic step that finds the object
  * with the handle (taking a reference on it) or creates it with one
  * reference and runs the constructor.  The mapper holds a memory reference
- * from before the call.  The two protocols:
- *
- *   OLD  after the call, drop the mapper's memory reference when
- *        obj->ref_count > 1 ("the object existed")
- *   NEW  the constructor takes the object's memory reference; the mapper
- *        always drops its own after the call
+ * from before the call.  The decisions come from uvm_pager_ref.h: how many
+ * references the constructor takes, and whether the mapper drops its own
+ * after the call (given the object reference count it saw).
  *
  * Invariant: the memory is never freed (references 0) while an object or
  * the range still uses it, and everything is released exactly once at the
- * end.  The OLD protocol must fail the invariant in some interleaving (two
- * mappers both seeing a count above one, or a mapper seeing one after a
- * concurrent munmap), the NEW one in none.
+ * end.  The pre-fix rule ("the mapper keeps its reference when it saw a
+ * count of one", constructor takes none) fails it; build this file against
+ * that header to see the test red.
  */
 
 #include <stdio.h>
 #include <string.h>
+
+#include "uvm_pager_ref.h"
 
 static int fails;
 
@@ -48,8 +47,6 @@ struct st {
 	int leak_or_under;
 };
 
-enum proto { OLD, NEW };
-
 static void
 mem_unref(struct st *s)
 {
@@ -67,7 +64,7 @@ check_alive(struct st *s)
 
 /* one step of mapper m (0 or 1); returns 0 when finished */
 static int
-mapper_step(struct st *s, int m, enum proto p)
+mapper_step(struct st *s, int m)
 {
 	switch (s->pc[m]++) {
 	case 0:		/* uvm_sema_mem_ref(r->u.sema.mem) under the VA space lock */
@@ -76,24 +73,16 @@ mapper_step(struct st *s, int m, enum proto p)
 	case 1:		/* cdev_pager_allocate: atomic */
 		if (s->obj_refs == 0) {
 			s->obj_refs = 1;
-			if (p == NEW) {
-				s->mem_refs++;	/* constructor */
-				s->obj_mem_ref = 1;
-			} else {
-				s->obj_mem_ref = 0;	/* OLD: the mapper's reference is meant to become it */
-			}
+			s->mem_refs += (int)uvm_pager_ctor_mem_refs();	/* constructor */
+			s->obj_mem_ref = uvm_pager_ctor_mem_refs() > 0;
 		} else {
 			s->obj_refs++;
 		}
 		s->a_seen[m] = s->obj_refs;
 		return (1);
 	case 2:		/* after the call */
-		if (p == OLD) {
-			if (s->obj_refs > 1)
-				mem_unref(s);	/* "the object existed": read obj->ref_count now */
-		} else {
+		if (uvm_pager_mapper_drops_ref((unsigned)s->obj_refs))
 			mem_unref(s);
-		}
 		return (1);
 	default:
 		return (0);
@@ -102,19 +91,18 @@ mapper_step(struct st *s, int m, enum proto p)
 
 /* U: munmap of the pre-existing mapping: drop one object reference; the last runs the destructor */
 static int
-unmapper_step(struct st *s, enum proto p)
+unmapper_step(struct st *s)
 {
 	if (s->pc[2]++ != 0)
 		return (0);
 	if (--s->obj_refs == 0) {
-		mem_unref(s);	/* destructor: the object's one reference (both protocols) */
-		(void)p;
+		mem_unref(s);	/* destructor: the object's one reference */
 	}
 	return (1);
 }
 
 static int
-explore(enum proto p)
+explore(void)
 {
 	int bad = 0, order, n;
 
@@ -138,9 +126,9 @@ explore(enum proto p)
 		s.obj_mem_ref = 1;
 		for (k = 0; k < 7; k++) {
 			if (seq[k] == 2)
-				(void)unmapper_step(&s, p);
+				(void)unmapper_step(&s);
 			else
-				(void)mapper_step(&s, seq[k], p);
+				(void)mapper_step(&s, seq[k]);
 			check_alive(&s);
 		}
 		/* everyone unmaps what they mapped, then the range goes (its reference) */
@@ -152,20 +140,30 @@ explore(enum proto p)
 		}
 		/* the object's pre-existing reference is gone with the object; the range's remains */
 		mem_unref(&s);
-		/* the pre-existing object was created with a constructor reference in NEW and the range-time one in OLD: both hold 2 */
 		if (s.uaf || s.leak_or_under || s.mem_refs != 0)
 			bad++;
 	}
 	return (bad);
 }
 
+/* the rule itself, whatever the model: the constructor owns a reference and the mapper's drop is unconditional */
+static void
+check_rule(void)
+{
+	unsigned seen;
+
+	CHECK(uvm_pager_ctor_mem_refs() == 1, "the constructor takes the object's one reference");
+	for (seen = 0; seen < 8; seen++)
+		CHECK(uvm_pager_mapper_drops_ref(seen), "the mapper drops its reference after seeing %u", seen);
+}
+
 int
 main(void)
 {
-	int old_bad = explore(OLD), new_bad = explore(NEW);
+	int bad = explore();
 
-	CHECK(old_bad > 0, "the reference-count heuristic must fail in some interleaving (red), failed in %d", old_bad);
-	CHECK(new_bad == 0, "the constructor-owned reference failed in %d interleavings", new_bad);
-	printf("pager_ref_test: old protocol bad in %d interleavings, new in %d\n", old_bad, new_bad);
+	check_rule();
+	CHECK(bad == 0, "the reference rule failed in %d interleavings", bad);
+	printf("pager_ref_test: %d bad interleavings\n", bad);
 	return (fails != 0);
 }

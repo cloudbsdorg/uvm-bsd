@@ -11,3 +11,10 @@
 - Next: commit through the gate, push branch, comment on #2272, hand off. Resume: if commit not done, run git status and commit with ~/work/gb10/tmp/COMMIT-MSG-2272-1.txt.
 - 2026-11-20T07:43:22Z committed 9cb8134 and pushed; commented on #2272. Resume: nothing left; wait for test boot results.
 - 2026-11-20 fixed 5 -Wcast-qual in uvm_channel.c (log pointers keep volatile: cast to volatile void *); amd64 cross-check, unit tests, base-lld build green.
+
+## 2026-11-20T09:56Z
+- Resumed after the 09:30 panic/reboot (tree clean at 63777bf, no gate was running). Working review findings 1a-e, 2, 3, 4, 5, 6 of reviews/uvm-2272-opus-2026-11-20.md. No module loads, no stress runs.
+- Next: uvm_pager_ref.h + tests red/green, then sysctl ctx, uvm_unload comment, mmap comment, stress script, README.
+
+## 2026-11-20T10:20Z
+- All review findings fixed in the tree (pager_ref.h, sysctl ctx, unload comment/pause, mmap comment, stress script, README, tests with call-site pins). Gates green. Next: commit, push, Track comment. Resume: git status; commit.

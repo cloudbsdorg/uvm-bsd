@@ -13,16 +13,23 @@
 # tests/ioctl/uvm_ioctl_test, and every few seconds looks for new "Xid",
 # "FATAL" and "panic" lines in dmesg and for a non-zero
 # hw.nvidia_uvm.fatal_error.  With -U it also tries kldunload of nvidia-uvm
-# while workers run: the kernel must answer EBUSY (before the fix of #2272
-# it could free the module under a pager destructor); if the module does
-# unload, because nothing was open, it is loaded again.
+# while workers run (before the fix of #2272 the module could be freed under
+# a pager destructor).  Two kinds of probe, alternating unless -H says one:
+#   hold  a holder process keeps /dev/nvidia-uvm open: the unload must be
+#         refused with "Device busy" (decided by the open file alone);
+#   free  no holder: the unload may be refused (workers, or the maps of
+#         killed workers still tearing down) or may succeed, and then the
+#         module is loaded again from UVM_KO and the health check runs.
+# Any other kldunload failure (doas, a wrong name) is a FAIL, never a
+# refusal.  After the load stops a last probe must unload the idle module.
 #
-# Usage: uvm_stress.sh [-n MINUTES] [-j JOBS] [-c CHURN] [-s SEED] [-U] [-h]
+# Usage: uvm_stress.sh [-n MINUTES] [-j JOBS] [-c CHURN] [-s SEED] [-U] [-H MODE] [-h]
 #   -n  run time in minutes (default 10)
 #   -j  concurrent CUDA workers (default 4)
 #   -c  concurrent churn loops (default 2)
 #   -s  seed of the random choices (default: the time)
 #   -U  also try to unload the module under load (needs doas)
+#   -H  with -U, the probe kind: hold, free or alternate (default alternate)
 # Environment:
 #   GB10_WORK   work root (default $HOME/work/gb10); logs go to
 #               $GB10_WORK/logs/uvm-stress-<time>/, scratch to $GB10_WORK/tmp
@@ -33,9 +40,13 @@
 #   UVM_STRESS_NO_DEVICE_CHECK  set to 1 to skip the /dev/nvidia-uvm check
 #               (self test with a fake RUN_CUDA)
 # Run as the ordinary user, with nvidia.ko and nvidia-uvm.ko loaded.
-# Exit status: 0 the run was clean; 1 a worker failed other than by kill -9,
-# the dmesg or fatal check fired, or an unload under load succeeded while a
-# worker was open; 2 usage or a missing prerequisite.
+# Exit status: 0 the run was clean; 1 a worker failed other than by kill -9
+# (a worker that was alive when a "free" unload succeeded is excused, and
+# logged), a worker was still alive 120 s after the load stopped, the dmesg
+# or fatal check fired, an unload succeeded while the holder had the device
+# open, an unload failed for any reason but "Device busy", a reload failed,
+# or the final idle unload did not happen; 2 usage, a missing prerequisite or
+# a holder that did not open the device.
 
 set -u
 
@@ -48,22 +59,28 @@ JOBS=4
 CHURN=2
 SEED=$(date +%s)
 UNLOAD=0
+HMODE=alternate
 
 usage() {
 	sed -n '/^# Usage:/,/^# Run as/p' "$0" | sed 's/^# \{0,1\}//'
 }
 
-while getopts n:j:c:s:Uh opt; do
+while getopts n:j:c:s:UH:h opt; do
 	case $opt in
 	n) MINUTES=$OPTARG ;;
 	j) JOBS=$OPTARG ;;
 	c) CHURN=$OPTARG ;;
 	s) SEED=$OPTARG ;;
 	U) UNLOAD=1 ;;
+	H) HMODE=$OPTARG ;;
 	h) usage; exit 0 ;;
 	*) usage >&2; exit 2 ;;
 	esac
 done
+case $HMODE in
+hold | free | alternate) ;;
+*) echo "uvm_stress: -H is hold, free or alternate, not $HMODE" >&2; exit 2 ;;
+esac
 for v in "$MINUTES" "$JOBS" "$CHURN" "$SEED"; do
 	case $v in
 	'' | *[!0-9]*) echo "uvm_stress: not a number: $v" >&2; exit 2 ;;
@@ -96,6 +113,7 @@ cleanup() {
 		kill -9 "$p" 2>/dev/null
 	done
 	[ -n "${HOLDER:-}" ] && kill "$HOLDER" 2>/dev/null
+	:
 	rm -rf "$T"
 }
 trap cleanup EXIT
@@ -121,6 +139,10 @@ FAILED=0
 CHURNS=0
 UNLOAD_REFUSED=0
 UNLOAD_DONE=0
+HOLD_REFUSED=0
+EXCUSED=0
+PROBES=0
+HOLDER=
 RESULT=0
 DEADLINE=$(( $(date +%s) + MINUTES * 60 ))
 LASTCHECK=0
@@ -178,12 +200,15 @@ reap() {
 			:
 		elif [ "$rc" -eq 0 ]; then
 			OK=$((OK + 1))
+		elif [ -e "$T/w/$id.gap" ]; then
+			EXCUSED=$((EXCUSED + 1))
+			log "worker $id ($(cat "$T/w/$id.name")) exited $rc across an unload that succeeded: excused; see $LOGDIR/w$id.log"
 		else
 			FAILED=$((FAILED + 1))
 			log "FAIL: worker $id ($(cat "$T/w/$id.name")) exited $rc; see $LOGDIR/w$id.log"
 			RESULT=1
 		fi
-		rm -f "$pf" "$T/w/$id.name" "$T/w/$id.killed"
+		rm -f "$pf" "$T/w/$id.name" "$T/w/$id.killed" "$T/w/$id.gap"
 	done
 }
 
@@ -231,41 +256,87 @@ churn_loop() {
 	echo $! >"$T/c/$1.pid"
 }
 
-# try to unload the module under load; EBUSY is the right answer.  With -U a
-# holder process keeps /dev/nvidia-uvm open for the whole run, so a refusal
-# is certain to be owed: an unload that succeeds while the holder lives is a
-# failure of the unload gate (Track #2272), whatever the workers are doing.
-# The loaded file is nvidia-uvm.ko (a hyphen), so kldunload names the file;
-# the reload uses UVM_KO, because the module may live outside module_path.
+# try to unload the module under load.  The loaded file is nvidia-uvm.ko (a
+# hyphen), so kldunload names the file; the reload uses UVM_KO, because the
+# module may live outside module_path.
 UVM_KO=${UVM_KO:-/boot/modules.nvtest/nvidia-uvm.ko}
-holder_start() {
-	sh -c 'exec 3</dev/nvidia-uvm; exec sleep 86400' &
-	HOLDER=$!
-	sleep 1
-}
+
 holder_alive() {
 	[ -n "${HOLDER:-}" ] && kill -0 "$HOLDER" 2>/dev/null
 }
+# start a holder that keeps /dev/nvidia-uvm open, and prove it does
+holder_start() {
+	holder_alive && return 0
+	sh -c 'exec 3</dev/nvidia-uvm; exec sleep 86400' &
+	HOLDER=$!
+	sleep 1
+	if ! holder_alive; then
+		echo "uvm_stress: the holder exited: /dev/nvidia-uvm could not be opened" >&2
+		exit 2
+	fi
+	if ! fstat -p "$HOLDER" 2>/dev/null | grep -q 'nvidia-uvm'; then
+		echo "uvm_stress: the holder (pid $HOLDER) does not show /dev/nvidia-uvm in fstat" >&2
+		exit 2
+	fi
+}
+holder_stop() {
+	holder_alive || { HOLDER=; return 0; }
+	kill "$HOLDER" 2>/dev/null
+	wait "$HOLDER" 2>/dev/null
+	HOLDER=
+}
+
+# one attempt; returns 0 when the module is still loaded and 1 when it was
+# unloaded (and reloaded).  A refusal is only "Device busy".
 unload_probe() {
-	if ! doas kldunload nvidia-uvm >"$T/unload.out" 2>&1; then
+	held=0
+	holder_alive && held=1
+	if doas kldunload nvidia-uvm >"$T/unload.out" 2>&1; then
+		UNLOAD_DONE=$((UNLOAD_DONE + 1))
+		if [ "$held" -eq 1 ]; then
+			log "FAIL: nvidia-uvm unloaded while a holder kept /dev/nvidia-uvm open (the unload gate did not hold)"
+			RESULT=1
+		fi
+		for pf in "$T"/w/*.pid; do
+			[ -e "$pf" ] && : >"${pf%.pid}.gap"
+		done
+		log "unloaded with nothing open ($(live_workers) workers recorded); reloading"
+		doas kldload "$UVM_KO" >>"$LOGDIR/run.log" 2>&1 || {
+			log "FAIL: kldload $UVM_KO after an unload failed"
+			RESULT=1
+			return 1
+		}
+		[ -c /dev/nvidia-uvm ] || { log "FAIL: /dev/nvidia-uvm is missing after the reload"; RESULT=1; }
+		check_health
+		return 1
+	fi
+	if grep -q 'Device busy' "$T/unload.out"; then
 		UNLOAD_REFUSED=$((UNLOAD_REFUSED + 1))
+		[ "$held" -eq 1 ] && HOLD_REFUSED=$((HOLD_REFUSED + 1))
 		return 0
 	fi
-	UNLOAD_DONE=$((UNLOAD_DONE + 1))
-	if holder_alive; then
-		log "FAIL: nvidia-uvm unloaded while a holder kept /dev/nvidia-uvm open (the unload gate did not hold)"
-		RESULT=1
-	elif [ "$(live_workers)" -gt 0 ]; then
-		log "unload succeeded with $(live_workers) workers recorded; reloading (workers may have been between runs)"
+	log "FAIL: kldunload nvidia-uvm failed for a reason other than Device busy: $(tr '\n' ' ' <"$T/unload.out")"
+	RESULT=1
+	return 0
+}
+
+# a probe of the kind this round calls for
+probe_round() {
+	PROBES=$((PROBES + 1))
+	case $HMODE in
+	hold) kind=hold ;;
+	free) kind=free ;;
+	*) if [ $((PROBES % 2)) -eq 1 ]; then kind=hold; else kind=free; fi ;;
+	esac
+	if [ "$kind" = hold ]; then
+		holder_start
+	else
+		holder_stop
 	fi
-	doas kldload "$UVM_KO" >>"$LOGDIR/run.log" 2>&1 || {
-		log "FAIL: kldload $UVM_KO after an unload failed"
-		RESULT=1
-	}
+	unload_probe || true
 }
 
 log "start: $MINUTES min, $JOBS workers, $CHURN churn loops, seed $SEED, unload probe $UNLOAD, logs $LOGDIR"
-[ "$UNLOAD" -eq 1 ] && holder_start
 i=1
 while [ "$i" -le "$CHURN" ]; do
 	churn_loop "$i"
@@ -283,7 +354,7 @@ while [ "$(date +%s)" -lt "$DEADLINE" ] && [ "$RESULT" -eq 0 ]; do
 		LASTKILL=$now
 	fi
 	if [ "$UNLOAD" -eq 1 ] && [ $((now - LASTUNLOAD)) -ge 20 ]; then
-		unload_probe
+		probe_round
 		LASTUNLOAD=$now
 	fi
 	if [ $((now - LASTCHECK)) -ge 5 ]; then
@@ -300,6 +371,13 @@ for _ in $(seq 1 120); do
 	[ "$(live_workers)" -eq 0 ] && break
 	sleep 1
 done
+if [ "$(live_workers)" -gt 0 ]; then
+	log "FAIL: $(live_workers) workers still alive 120 s after the load stopped (hung): $(cat "$T"/w/*.name 2>/dev/null | tr '\n' ';')"
+	RESULT=1
+	for p in $(cat "$T"/w/*.pid 2>/dev/null); do kill -9 "$p" 2>/dev/null; done
+	sleep 2
+	reap
+fi
 for p in $(cat "$T"/c/*.pid 2>/dev/null); do wait "$p" 2>/dev/null; done
 for f in "$LOGDIR"/churn*.fail; do
 	[ -e "$f" ] && { log "FAIL: $(basename "$f") (see its log)"; RESULT=1; }
@@ -307,11 +385,17 @@ done
 CHURNS=$(cat "$LOGDIR"/churn*.count 2>/dev/null | wc -l | tr -d ' ')
 check_health
 if [ "$UNLOAD" -eq 1 ]; then
-	# nothing is open now: the module may go, and must come back
-	unload_probe
+	# nothing is open now (the holder first): the module must go, and must come back
+	holder_stop
+	before=$UNLOAD_DONE
+	unload_probe || true
+	if [ "$UNLOAD_DONE" -le "$before" ]; then
+		log "FAIL: the idle module did not unload ($(tr '\n' ' ' <"$T/unload.out"))"
+		RESULT=1
+	fi
 fi
 
-log "summary: spawned $SPAWNED, killed $KILLED, ok $OK, failed $FAILED, churn runs $CHURNS, unload refused $UNLOAD_REFUSED, unloaded $UNLOAD_DONE"
+log "summary: spawned $SPAWNED, killed $KILLED, ok $OK, failed $FAILED, churn runs $CHURNS, probes $PROBES, unload refused $UNLOAD_REFUSED (with a holder $HOLD_REFUSED), unloaded $UNLOAD_DONE, workers excused $EXCUSED"
 if [ "$RESULT" -eq 0 ]; then
 	log "PASS"
 else

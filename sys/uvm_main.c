@@ -83,9 +83,14 @@ SYSCTL_UINT(_hw_nvidia_uvm, OID_AUTO, fatal_error, CTLFLAG_RD, &uvm.fatal_error,
 
 /* CPD-ON */
 
+/*
+ * hw.nvidia_uvm.gpus is registered on a context in uvm_load and removed in
+ * uvm_unload before the locks go: sysctl_ctx_free waits for a handler that
+ * is running, and no handler can start afterwards, so none can take
+ * uvm.lock once it is destroyed.
+ */
+static struct sysctl_ctx_list uvm_sysctl_ctx;
 static int uvm_sysctl_gpus(SYSCTL_HANDLER_ARGS);
-SYSCTL_PROC(_hw_nvidia_uvm, OID_AUTO, gpus, CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, 0,
-    uvm_sysctl_gpus, "A", "registered GPUs and their fault statistics");
 
 static int
 uvm_sysctl_gpus(SYSCTL_HANDLER_ARGS)
@@ -381,6 +386,12 @@ uvm_load(void)
 	if (error != 0)
 		goto fail_tools;
 
+	sysctl_ctx_init(&uvm_sysctl_ctx);
+	if (SYSCTL_ADD_PROC(&uvm_sysctl_ctx, SYSCTL_STATIC_CHILDREN(_hw_nvidia_uvm), OID_AUTO, "gpus",
+	    CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, 0, uvm_sysctl_gpus, "A",
+	    "registered GPUs and their fault statistics") == NULL)
+		uvm_log("hw.nvidia_uvm.gpus could not be registered");
+
 	uvm_log("loaded: /dev/nvidia-uvm and /dev/nvidia-uvm-tools (spec r1, phase 1)");
 	return (0);
 
@@ -439,14 +450,17 @@ uvm_unload(void)
 	}
 	uvm.unloading = true;
 	sx_xunlock(&uvm.lock);
+	/* the sysctl handler takes uvm.lock: drain it before any lock is destroyed */
+	sysctl_ctx_free(&uvm_sysctl_ctx);
 	/*
 	 * A destructor drops its count after its last access to module
-	 * state; the barrier below waits out one that still holds the
-	 * power-management lock, the pause one that is returning.
+	 * state, so with the counts at zero only the epilogue of a pager
+	 * destructor (the return into the VM system) can still be running
+	 * module text.  No kernel primitive drains the return of
+	 * cdev_pg_dtor, so this pause is a deliberate heuristic, not a
+	 * barrier: long enough for a thread that was preempted right there.
 	 */
-	sx_xlock(&uvm.pm_lock);
-	sx_xunlock(&uvm.pm_lock);
-	pause("uvmdrn", hz / 10);
+	pause("uvmdrn", hz);
 
 	linux_ioctl_unregister_handler(&uvm_linux_handler);
 	/* the nodes go first so no new open can race the teardown */

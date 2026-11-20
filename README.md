@@ -103,9 +103,17 @@ From a one-shot boot environment, as root:
    EBUSY while any node is open or any mapping of a pool or managed range is
    alive (`nvidia-uvm(4)`, UNLOADING).
 7. Lifetime stress (Track #2272): `sh tests/stress/uvm_stress.sh -n 30 -j 4 -U`
-   runs parallel CUDA workers with random `kill -9`, open/close/mmap churn and
-   an unload probe, and fails on a new Xid, FATAL or panic line.  The panic
-   capture settings for a test BE are in `docs/panic-capture.md`.
+   runs parallel CUDA workers with random `kill -9` and open/close/mmap churn,
+   and with `-U` alternates two unload probes: with a holder keeping
+   `/dev/nvidia-uvm` open (must answer "Device busy") and with none (may
+   succeed; the module is then reloaded and checked).  It fails on: a new Xid,
+   FATAL or panic line; a non-zero `hw.nvidia_uvm.fatal_error`; a worker that
+   fails other than by `kill -9` (excused only across a successful unload); a
+   worker hung 120 s after the load stops; an unload that succeeds under the
+   holder; a `kldunload` failure other than "Device busy"; a failed reload;
+   and a final idle unload that does not happen.  `-H hold|free` picks one
+   probe kind; `-h` lists every option.  The panic capture settings for a test
+   BE are in `docs/panic-capture.md`.
 
 ## Licence
 
