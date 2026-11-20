@@ -9,6 +9,35 @@ It is written from a functional specification only (`uvm-spec`, revision
 r1, see `.clean-room`), never from NVIDIA's Linux driver; `PROVENANCE.md`
 records every source consulted. Track #2101.
 
+## Status (2026-11-20, commit 256297e)
+
+- **Running:** this version is loaded and running on an Ampere Altra (FreeBSD 16.0-CURRENT
+  arm64) with a GeForce RTX 5060 Ti, beside `nvidia.ko` 580.178.04 from
+  [nvidia-gb10-freebsd](https://github.com/cloudbsdorg/nvidia-gb10-freebsd).
+- **Linux CUDA works through the Linuxulator:**
+  - `cuInit` returns in about 1 s;
+  - context creation, memory copies and managed memory work;
+  - a kernel launch (vectorAdd over 1,048,576 floats) gives 0 mismatches;
+  - llama.cpp b12531 runs on the CUDA backend: with Llama-3.2-3B-Instruct Q4_K_M, prompt
+    processing over 512 tokens reaches 8728 tokens per second, and generation over 128 tokens
+    166.2.
+- **Stress test:** 30 minutes, 5992 CUDA processes, 220 of them killed with `kill -9`, no
+  failure. All 90 attempts to unload the module while the device was open were refused. No Xid
+  error, no lock-order reversal, no panic.
+- **Fixes in this version:**
+  - unloading while the device is open is refused (it used to free memory still in use,
+    Track #2272);
+  - page tables come from one-page DMA allocations, and Giant is dropped around ioctls (CUDA
+    used to take 12-15 minutes to start, Track #2295);
+  - copy-engine memsets use a pitch source layout (block-linear caused an Xid 71, 5350a13).
+- **Packaging:** the CloudBSD ports overlay has a port for this module,
+  `graphics/nvidia-uvm-kmod`. Its record is amd64-only for now, because aarch64 packages also
+  need the 580 `nvidia-kmod` built on an aarch64 builder. The module itself is tested only on
+  arm64, by hand (above). No package is published yet. This repository is private, so an
+  operator stages the source on the builder.
+- **Not done yet:** peer access, device P2P, access counters and tools trackers (later phases);
+  a test on amd64 hardware; a test on the DGX Spark (GB10).
+
 ## What this phase does
 
 Phases 0 and 1 of the specification's plan:
@@ -36,7 +65,7 @@ Locking, memory and logging (Track #2295):
 - The long page-table loops call `maybe_yield()`; the map loop also stops with `NV_ERR_SIGNAL_PENDING` on a pending signal and unwinds its page-table references. Unmap yields but does not stop early.
 - "GPU lookup by UUID failed", the "not available yet" messages and the failing-request `rmStatus` line are limited to one per call site per ten seconds (`uvm_log_slow`).
 
-Nothing has been loaded or booted yet: see "First test boot" below.
+"First test boot" below is the plan the first boots followed. Their results, and the current state, are under "Status" above.
 
 ## Layout
 
