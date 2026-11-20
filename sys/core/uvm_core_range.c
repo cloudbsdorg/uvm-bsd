@@ -155,6 +155,32 @@ uvm_core_range_next(struct uvm_core_range_tree *tree, struct uvm_core_range *ran
 }
 
 /*
+ * uvm_core_range_covered - [start, end] is covered by accepted ranges with
+ * no gap.  Walks from the range that holds `start`: each range must begin
+ * at or before the next uncovered address; the cursor then moves to the
+ * address after the range's end (stopping at the top of the address space).
+ * Time: O(log n + k).  Space: O(1).
+ */
+bool
+uvm_core_range_covered(struct uvm_core_range_tree *tree, uint64_t start, uint64_t end,
+    bool (*accept)(const struct uvm_core_range *))
+{
+	struct uvm_core_range *r;
+	uint64_t cursor = start;
+
+	if (end < start)
+		return (false);
+	for (;;) {
+		r = uvm_core_range_find(tree, cursor);
+		if (r == NULL || (accept != NULL && !accept(r)))
+			return (false);
+		if (r->end >= end)
+			return (true);
+		cursor = r->end + 1;
+	}
+}
+
+/*
  * uvm_core_range_find_free - the first address in [base, base+length) that
  * holds `size` bytes aligned to `align` and overlaps no range of the tree.
  * 0 and the address in `out` when there is one, ENOSPC when there is none.

@@ -39,6 +39,7 @@
 #include <vm/vm_extern.h>
 
 #include "core/uvm_core_range.h"
+#include "uvm_managed_state.h"
 #include "core/uvm_core_group.h"
 #include "core/uvm_core_device.h"
 
@@ -463,6 +464,19 @@ struct uvm_sema_mem {
 struct uvm_sema_mem *uvm_sema_mem_ref(struct uvm_sema_mem *mem);
 void	uvm_sema_mem_unref(struct uvm_sema_mem *mem);
 
+/*
+ * The handle of a managed range's device pager object (uvm_managed_state.h
+ * has the lifetime rules).  `range` and `state` are protected by
+ * uvm.managed_lock; `mem` and `start` never change.  The object holds its
+ * own reference on the memory, so the CPU view outlives the VA space.
+ */
+struct uvm_managed_obj {
+	struct uvm_sema_mem	*mem;
+	struct uvm_range	*range;		/* NULL once DETACHED */
+	enum uvm_mobj_state	state;
+	uint64_t		start;		/* the range's start: pager offsets are absolute */
+};
+
 /* a semaphore pool's mapping on one GPU */
 struct uvm_sema_gpu_map {
 	TAILQ_ENTRY(uvm_sema_gpu_map) link;
@@ -484,7 +498,8 @@ struct uvm_range {
 			struct uvm_gpu_mask cached_gpus;	/* GPUs asked to map it cached (at most one) */
 			TAILQ_HEAD(, uvm_sema_gpu_map) gpus;
 			struct uvm_tracker tracker;
-		} sema;
+			struct uvm_managed_obj *obj;	/* UVM_RANGE_MANAGED only: the pager's handle */
+		} sema;		/* a UVM_RANGE_MANAGED range is backed and mapped like a pool */
 		struct {
 			struct uvm_gpu	*gpu;
 			struct uvm_pt_range_vec ptes;
@@ -632,6 +647,9 @@ NV_STATUS uvm_vas_unmap_external(struct uvm_va_space *vas, UVM_UNMAP_EXTERNAL_PA
 NV_STATUS uvm_vas_free(struct uvm_va_space *vas, uint64_t base, uint64_t length);
 NV_STATUS uvm_vas_validate(struct uvm_va_space *vas, uint64_t base, uint64_t length);
 NV_STATUS uvm_vas_map_dynamic_parallelism(struct uvm_va_space *vas, UVM_MAP_DYNAMIC_PARALLELISM_REGION_PARAMS *p);
+NV_STATUS uvm_vas_create_managed(struct uvm_va_space *vas, uint64_t start, uint64_t size,
+    struct uvm_managed_obj **out);
+void	uvm_managed_obj_release(struct uvm_managed_obj *obj);
 NV_STATUS uvm_vas_alloc_semaphore_pool(struct uvm_va_space *vas, UVM_ALLOC_SEMAPHORE_POOL_PARAMS *p);
 NV_STATUS uvm_vas_set_sys_wide_atomics(struct uvm_va_space *vas, const NvProcessorUuid *uuid, bool enable);
 NV_STATUS uvm_vas_pageable_on_gpu(struct uvm_va_space *vas, const NvProcessorUuid *uuid, NvBool *out);
@@ -649,6 +667,8 @@ void	uvm_user_channel_unref(struct uvm_user_channel *ch);
 struct uvm_global {
 	struct sx		pm_lock;	/* 08 order 1 */
 	struct sx		lock;		/* 08 order 2 */
+	struct sx		managed_lock;	/* managed range <-> pager object links; above every VA space lock */
+	u_int			managed_objs;	/* live pager objects: the module cannot unload under them */
 	struct mtx		gpu_table_lock;	/* irq-safe lookup for the top half */
 	uvmGpuSessionHandle	rm_session;
 	UvmPlatformInfo		platform;

@@ -113,4 +113,14 @@ struct uvm_core_range *uvm_core_range_next(struct uvm_core_range_tree *tree,
 int	uvm_core_range_find_free(struct uvm_core_range_tree *tree, uint64_t base, uint64_t length,
     uint64_t size, uint64_t align, uint64_t *out);
 
+/*
+ * uvm_core_range_covered - true when [start, end] is covered by ranges of
+ * the tree with no gap between them and, when `accept` is not NULL, every
+ * one of those ranges is accepted by it.  A range that only partly lies in
+ * the interval counts for the part that does.
+ * Time: O(log n + k) for k ranges in the interval.  Space: O(1).
+ */
+bool	uvm_core_range_covered(struct uvm_core_range_tree *tree, uint64_t start, uint64_t end,
+    bool (*accept)(const struct uvm_core_range *));
+
 #endif /* _UVM_CORE_RANGE_H_ */

@@ -41,6 +41,7 @@ uvm_range_create(struct uvm_va_space *vas, enum uvm_range_type type, uint64_t st
 		TAILQ_INIT(&r->u.ext.gpus);
 		break;
 	case UVM_RANGE_SEMA_POOL:
+	case UVM_RANGE_MANAGED:
 		TAILQ_INIT(&r->u.sema.gpus);
 		uvm_tracker_init(&r->u.sema.tracker);
 		break;
@@ -795,6 +796,125 @@ uvm_vas_alloc_semaphore_pool(struct uvm_va_space *vas, UVM_ALLOC_SEMAPHORE_POOL_
 	return (status);
 }
 
+static void uvm_range_teardown(struct uvm_range *r);
+
+/*
+ * ---- managed ranges (01 section 4.1, 03 section 4.1) ----
+ *
+ * First step of managed memory: a range that is CPU resident and mapped on
+ * every GPU, backed by zeroed system memory like a semaphore pool.  No
+ * fault is ever taken on the GPU side; the CPU side is the device pager.
+ */
+
+/*
+ * uvm_vas_create_managed - the range [start, start+size) with its memory
+ * and its pager handle.  The memory has two references, the range's and the
+ * handle's.  NV_ERR_UVM_ADDRESS_IN_USE when the interval overlaps a range.
+ */
+NV_STATUS
+uvm_vas_create_managed(struct uvm_va_space *vas, uint64_t start, uint64_t size, struct uvm_managed_obj **out)
+{
+	struct uvm_managed_obj *obj;
+	struct uvm_sema_mem *mem;
+	struct uvm_range *r;
+	struct uvm_gpu *first_gpu = NULL;
+	NV_STATUS status;
+	int j;
+
+	if (uvm_managed_mmap_check(start, size, PAGE_SIZE) != NV_OK)
+		return (NV_ERR_INVALID_ADDRESS);
+	sx_slock(&vas->lock);
+	for (j = UVM_ID_GPU_FIRST; j <= UVM_ID_GPU_LAST && first_gpu == NULL; j++)
+		first_gpu = vas->gpus[j];
+	/* the interval must be free before any memory is spent on it */
+	if (uvm_range_find_overlap(vas, start, start + size - 1) != NULL) {
+		sx_sunlock(&vas->lock);
+		return (NV_ERR_UVM_ADDRESS_IN_USE);
+	}
+	sx_sunlock(&vas->lock);
+
+	mem = uvm_sema_mem_alloc(first_gpu, size);
+	if (mem == NULL)
+		return (NV_ERR_NO_MEMORY);
+	mem->user_start = start;
+	obj = malloc(sizeof(*obj), M_NVIDIA_UVM, M_WAITOK | M_ZERO);
+	obj->mem = uvm_sema_mem_ref(mem);
+	obj->start = start;
+	obj->state = UVM_MOBJ_LINKED;
+
+	sx_xlock(&vas->lock);
+	status = uvm_range_create(vas, UVM_RANGE_MANAGED, start, start + size - 1, &r);
+	if (status != NV_OK) {	/* lost a race with another mapping of the same addresses */
+		sx_xunlock(&vas->lock);
+		uvm_sema_mem_unref(obj->mem);
+		uvm_sema_mem_unref(mem);
+		free(obj, M_NVIDIA_UVM);
+		return (status);
+	}
+	r->u.sema.mem = mem;
+	r->u.sema.obj = obj;
+	obj->range = r;
+	atomic_add_int(&uvm.managed_objs, 1);
+	sx_downgrade(&vas->lock);
+	for (j = UVM_ID_GPU_FIRST; j <= UVM_ID_GPU_LAST && status == NV_OK; j++) {
+		if (vas->gvas[j] != NULL && !vas->gvas[j]->dead)
+			status = uvm_sema_pool_map_gpu(r, vas->gvas[j]);
+	}
+	sx_sunlock(&vas->lock);
+	if (status != NV_OK) {
+		uvm_managed_obj_release(obj);	/* destroys the range and frees the handle */
+		return (status);
+	}
+	*out = obj;
+	return (NV_OK);
+}
+
+/*
+ * uvm_managed_obj_release - the pager object is gone (or its creation
+ * failed): destroy the range if its VA space is still there, then free the
+ * handle.  GPU work that UVM itself pushed on the range (its PTE writes) is
+ * waited for by the range's teardown (the tracker wait of every unmap); the
+ * application's own GPU work on the memory is its to finish before munmap,
+ * as cudaFree does.  The managed lock is held across the destroy so that a
+ * VA space destroy cannot free the range under us, and the VA space cannot
+ * be freed while it holds a range we found linked.
+ */
+void
+uvm_managed_obj_release(struct uvm_managed_obj *obj)
+{
+	enum uvm_mobj_state next_state;
+	struct uvm_range *r;
+	struct uvm_va_space *vas;
+
+	sx_xlock(&uvm.managed_lock);
+	switch (uvm_mobj_event_decide(obj->state, UVM_MOBJ_PAGER_DTOR, &next_state)) {
+	case UVM_MOBJ_DO_DESTROY_RANGE_AND_FREE:
+		r = obj->range;
+		KASSERT(r != NULL && r->type == UVM_RANGE_MANAGED && r->u.sema.obj == obj, ("managed obj %p range %p", obj, r));
+		vas = r->vas;
+		sx_xlock(&vas->serialize);
+		sx_slock(&vas->lock);
+		uvm_range_teardown(r);
+		sx_sunlock(&vas->lock);
+		sx_xlock(&vas->lock);
+		uvm_core_range_remove(&vas->ranges, &r->core);
+		sx_xunlock(&vas->lock);
+		sx_xunlock(&vas->serialize);
+		free(r, M_NVIDIA_UVM);
+		obj->range = NULL;
+		break;
+	case UVM_MOBJ_DO_FREE:
+		KASSERT(obj->range == NULL, ("detached managed obj %p has a range", obj));
+		break;
+	default:
+		panic("uvm managed obj %p: unexpected decision", obj);
+	}
+	sx_xunlock(&uvm.managed_lock);
+	uvm_sema_mem_unref(obj->mem);
+	free(obj, M_NVIDIA_UVM);
+	atomic_subtract_int(&uvm.managed_objs, 1);
+}
+
 /* ---- external ranges and mappings (03 section 4.2, 01 section 5.5) ---- */
 
 static struct uvm_ext_gpu_state *
@@ -1429,6 +1549,7 @@ uvm_range_teardown(struct uvm_range *r)
 		uvm_ext_range_destroy(r);
 		break;
 	case UVM_RANGE_SEMA_POOL:
+	case UVM_RANGE_MANAGED:
 		uvm_sema_pool_destroy(r);
 		break;
 	case UVM_RANGE_SKED:
@@ -1492,14 +1613,29 @@ uvm_vas_validate(struct uvm_va_space *vas, uint64_t base, uint64_t length)
 	return (status);
 }
 
-/* the policy and migration ioctls need an interval fully covered by managed ranges: none exist yet */
+static bool
+uvm_range_is_managed(const struct uvm_core_range *cr)
+{
+	return (__containerof(cr, struct uvm_range, core)->type == UVM_RANGE_MANAGED);
+}
+
+/*
+ * The policy and migration ioctls need an interval fully covered by managed
+ * ranges with no gap (01 section 5.7).  The policy itself is not kept yet:
+ * every managed range is CPU resident and mapped on every GPU, which is the
+ * state a preferred location of the CPU with the GPUs accessing it asks for.
+ */
 NV_STATUS
 uvm_vas_check_managed_interval(struct uvm_va_space *vas, uint64_t base, uint64_t length)
 {
-	(void)vas;
+	bool covered;
+
 	if (!uvm_interval_ok(base, length, PAGE_SIZE))
 		return (NV_ERR_INVALID_ADDRESS);
-	return (NV_ERR_INVALID_ADDRESS);
+	sx_slock(&vas->lock);
+	covered = uvm_core_range_covered(&vas->ranges, base, base + length - 1, uvm_range_is_managed);
+	sx_sunlock(&vas->lock);
+	return (covered ? NV_OK : NV_ERR_INVALID_ADDRESS);
 }
 
 /* ---- GPU VA spaces (03 section 3.1) ---- */
@@ -1546,6 +1682,7 @@ uvm_gvas_remove_locked(struct uvm_va_space *vas, struct uvm_gpu_va_space *gvas, 
 			uvm_ext_range_unmap_gpu(r, gvas->gpu);
 			break;
 		case UVM_RANGE_SEMA_POOL:
+		case UVM_RANGE_MANAGED:
 			TAILQ_FOREACH(m, &r->u.sema.gpus, link)
 				if (m->gpu == gvas->gpu)
 					break;
@@ -1579,7 +1716,7 @@ uvm_vas_map_sema_pools(struct uvm_va_space *vas, struct uvm_gpu_va_space *gvas)
 	NV_STATUS status = NV_OK;
 
 	for (r = uvm_range_first(vas); r != NULL; r = uvm_range_next(vas, r)) {
-		if (r->type != UVM_RANGE_SEMA_POOL)
+		if (r->type != UVM_RANGE_SEMA_POOL && r->type != UVM_RANGE_MANAGED)
 			continue;
 		status = uvm_sema_pool_map_gpu(r, gvas);
 		if (status != NV_OK)
@@ -2026,6 +2163,30 @@ uvm_va_space_destroy(struct uvm_va_space *vas)
 	sx_xlock(&uvm.lock);
 	TAILQ_REMOVE(&uvm.va_spaces, vas, link);
 	sx_xunlock(&uvm.lock);
+
+	/*
+	 * Managed ranges: the pager objects that map them may outlive this VA
+	 * space (at process exit the fd closes before the map is torn down).
+	 * Detach them all under the managed lock, which a pager dtor holds
+	 * while it destroys its range, so a range is torn down here or there
+	 * and never both; the teardown loop below then owns every range.
+	 */
+	sx_xlock(&uvm.managed_lock);
+	for (r = uvm_range_first(vas); r != NULL; r = uvm_range_next(vas, r)) {
+		enum uvm_mobj_state next_state;
+		struct uvm_managed_obj *obj;
+
+		if (r->type != UVM_RANGE_MANAGED)
+			continue;
+		obj = r->u.sema.obj;
+		KASSERT(obj != NULL && obj->range == r && obj->state == UVM_MOBJ_LINKED, ("managed range %p unlinked", r));
+		if (uvm_mobj_event_decide(obj->state, UVM_MOBJ_VAS_DESTROY, &next_state) == UVM_MOBJ_DO_DETACH) {
+			obj->range = NULL;
+			obj->state = next_state;
+			r->u.sema.obj = NULL;
+		}
+	}
+	sx_xunlock(&uvm.managed_lock);
 
 	/* the fd is closed: nothing else reaches this VA space except fault bottom halves via channels */
 	uvm_va_space_mm_shutdown(vas);

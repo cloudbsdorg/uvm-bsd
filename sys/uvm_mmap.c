@@ -5,12 +5,15 @@
  * uvm_mmap.c - mmap of /dev/nvidia-uvm.  uvm-spec r1, 01-user-abi.md
  * section 4 and 09-freebsd-facilities.md section 3.
  *
- * Phase-1 scope: the one mapping libcuda needs for cudaMalloc programs, the
- * CPU view of a semaphore pool (rule 8 of 01 section 4.1: an mmap whose
- * extent is exactly a semaphore pool range maps that range's memory; its
- * pages are inserted eagerly, a fault beyond them is SIGBUS).  Managed
- * ranges (cudaMallocManaged) are a later phase: an mmap of a free address
- * is refused with ENOSYS and logged, never created half-way.
+ * Two mappings: the CPU view of a semaphore pool (rule 8 of 01 section 4.1:
+ * an mmap whose extent is exactly a semaphore pool range maps that range's
+ * memory; a fault beyond it is SIGBUS), and a managed range
+ * (cudaMallocManaged), created by an mmap of a free address.  A managed
+ * range is for now CPU resident and mapped on every GPU (no migration, no
+ * fault servicing), backed by system memory like a pool.  The pager cannot
+ * see the virtual address of the mapping, so rule 4 (offset == address) is
+ * the UMD's guarantee (it maps with MAP_FIXED at the offset); likewise
+ * MAP_SHARED, which d_mmap_single is not told.
  *
  * The mapping is a device pager object keyed by the range, so every mmap
  * of the same pool in the process shares it; its fault handler answers
@@ -53,13 +56,11 @@ uvm_sema_pg_dtor(void *handle)
  * over the pool's memory, or SIGBUS (VM_PAGER_BAD) outside it.
  */
 static int
-uvm_sema_pg_fault(vm_object_t object, vm_ooffset_t offset, int prot, vm_page_t *mres)
+uvm_mem_pg_fault(vm_object_t object, struct uvm_sema_mem *mem, vm_ooffset_t offset, vm_page_t *mres)
 {
-	struct uvm_sema_mem *mem = object->handle;
 	vm_paddr_t paddr;
 	vm_page_t page;
 
-	(void)prot;
 	if (offset < mem->user_start || offset - mem->user_start >= mem->bytes)
 		return (VM_PAGER_BAD);
 	paddr = pmap_kextract((vm_offset_t)mem->kva + (vm_offset_t)(offset - mem->user_start));
@@ -77,11 +78,71 @@ uvm_sema_pg_fault(vm_object_t object, vm_ooffset_t offset, int prot, vm_page_t *
 	return (VM_PAGER_OK);
 }
 
+static int
+uvm_sema_pg_fault(vm_object_t object, vm_ooffset_t offset, int prot, vm_page_t *mres)
+{
+	(void)prot;
+	return (uvm_mem_pg_fault(object, object->handle, offset, mres));
+}
+
 static const struct cdev_pager_ops uvm_sema_pager_ops = {
 	.cdev_pg_ctor = uvm_sema_pg_ctor,
 	.cdev_pg_dtor = uvm_sema_pg_dtor,
 	.cdev_pg_fault = uvm_sema_pg_fault,
 };
+
+/*
+ * The pager of a managed range: the handle is the range's uvm_managed_obj.
+ * Its fault handler is the pool's (a fictitious page over the range's
+ * memory); its destructor, which runs on munmap of the last mapping or at
+ * process exit, destroys the range (uvm_managed_obj_release).  Touching
+ * the power-management lock keeps the GPU page-table writes of that
+ * teardown out of a suspend.
+ */
+static void
+uvm_managed_pg_dtor(void *handle)
+{
+	sx_slock(&uvm.pm_lock);
+	uvm_managed_obj_release(handle);
+	sx_sunlock(&uvm.pm_lock);
+}
+
+static int
+uvm_managed_pg_fault(vm_object_t object, vm_ooffset_t offset, int prot, vm_page_t *mres)
+{
+	struct uvm_managed_obj *obj = object->handle;
+
+	(void)prot;
+	return (uvm_mem_pg_fault(object, obj->mem, offset, mres));
+}
+
+static const struct cdev_pager_ops uvm_managed_pager_ops = {
+	.cdev_pg_ctor = uvm_sema_pg_ctor,
+	.cdev_pg_dtor = uvm_managed_pg_dtor,
+	.cdev_pg_fault = uvm_managed_pg_fault,
+};
+
+/* a managed range at [offset, offset+size): create it and its pager object; pm_lock is held shared */
+static int
+uvm_mmap_managed(struct uvm_va_space *vas, vm_ooffset_t *offset, vm_size_t size, vm_object_t *object, int nprot)
+{
+	struct uvm_managed_obj *mobj;
+	vm_object_t obj;
+	NV_STATUS status;
+
+	status = uvm_vas_create_managed(vas, *offset, size, &mobj);
+	if (status != NV_OK)
+		return (uvm_status_to_errno(status));
+	obj = cdev_pager_allocate(mobj, OBJT_DEVICE, &uvm_managed_pager_ops, *offset + size, nprot, *offset,
+	    curthread->td_ucred);
+	if (obj == NULL) {
+		uvm_managed_obj_release(mobj);	/* pm_lock is already held: not through the dtor */
+		return (EINVAL);
+	}
+	KASSERT(obj->handle == mobj && obj->ref_count == 1, ("managed pager object %p reused", obj));
+	*object = obj;
+	return (0);
+}
 
 int
 uvm_mmap_single(struct cdev *cdev, vm_ooffset_t *offset, vm_size_t size, vm_object_t *object, int nprot)
@@ -115,11 +176,11 @@ uvm_mmap_single(struct cdev *cdev, vm_ooffset_t *offset, vm_size_t size, vm_obje
 	sx_slock(&vas->lock);
 	r = uvm_range_find(vas, *offset);
 	if (r == NULL) {
+		/* a free address: a managed range (rule 8); a collision further up is ADDRESS_IN_USE there */
 		sx_sunlock(&vas->lock);
+		error = uvm_mmap_managed(vas, offset, size, object, nprot);
 		sx_sunlock(&uvm.pm_lock);
-		uvm_log_ratelimited("mmap of %#jx (%ju bytes) by pid %d: managed memory is a later phase (ENOSYS)",
-		    (uintmax_t)*offset, (uintmax_t)size, curproc->p_pid);
-		return (ENOSYS);
+		return (error);
 	}
 	if (r->type != UVM_RANGE_SEMA_POOL || r->core.start != *offset || r->core.end != *offset + size - 1) {
 		sx_sunlock(&vas->lock);

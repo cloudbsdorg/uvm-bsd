@@ -22,7 +22,7 @@ for src in "$REPO"/tests/unit/*_test.c; do
 	# a test of the core is built together with the core source it checks
 	extra=
 	case "$name" in
-	core_range_test)	extra="$REPO/sys/core/uvm_core_range.c" ;;
+	core_range_test|managed_state_test)	extra="$REPO/sys/core/uvm_core_range.c" ;;
 	core_group_test)	extra="$REPO/sys/core/uvm_core_group.c" ;;
 	core_device_test)	extra="$REPO/sys/core/uvm_core_device.c -lpthread" ;;
 	esac

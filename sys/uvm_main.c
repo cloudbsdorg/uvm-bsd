@@ -318,6 +318,7 @@ uvm_load(void)
 
 	sx_init(&uvm.pm_lock, "nvidia_uvm_pm");
 	sx_init(&uvm.lock, "nvidia_uvm_global");
+	sx_init(&uvm.managed_lock, "nvidia_uvm_managed");
 	mtx_init(&uvm.gpu_table_lock, "nvidia_uvm_gpus", NULL, MTX_SPIN);
 	TAILQ_INIT(&uvm.va_spaces);
 	uvm.fatal_error = NV_OK;
@@ -385,6 +386,7 @@ fail_session:
 	uvm.rm_session = NULL;
 fail_locks:
 	mtx_destroy(&uvm.gpu_table_lock);
+	sx_destroy(&uvm.managed_lock);
 	sx_destroy(&uvm.lock);
 	sx_destroy(&uvm.pm_lock);
 	return (error);
@@ -403,7 +405,8 @@ uvm_unload(void)
 			return (EBUSY);
 		}
 	}
-	if (!TAILQ_EMPTY(&uvm.va_spaces)) {
+	if (!TAILQ_EMPTY(&uvm.va_spaces) || atomic_load_int(&uvm.managed_objs) != 0) {
+		/* a managed mapping can outlive its VA space; its pager code lives in this module */
 		sx_sunlock(&uvm.lock);
 		return (EBUSY);
 	}
@@ -419,6 +422,7 @@ uvm_unload(void)
 	nvUvmInterfaceSessionDestroy(uvm.rm_session);
 	uvm.rm_session = NULL;
 	mtx_destroy(&uvm.gpu_table_lock);
+	sx_destroy(&uvm.managed_lock);
 	sx_destroy(&uvm.lock);
 	sx_destroy(&uvm.pm_lock);
 	uvm_log("unloaded");

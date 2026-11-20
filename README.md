@@ -25,7 +25,8 @@ Phases 0 and 1 of the specification's plan:
 | Semaphore pools with mmap | done |
 | Dynamic-parallelism regions | done |
 | Replayable faults | fetched, attributed and cancelled (no managed memory yet); non-replayable faults reported to RM |
-| Managed memory, policies, migration, range groups | later phase: requests on non-managed addresses answer `NV_ERR_INVALID_ADDRESS` as the spec says; groups are bookkeeping |
+| Managed memory | step 1: an mmap of a free address creates a managed range, CPU resident in zeroed system memory and mapped on every GPU (no fault servicing, no migration); it ends with the last unmap or the VA space, whichever is first |
+| Policies, migration, range groups | bookkeeping on managed ranges; on other addresses `NV_ERR_INVALID_ADDRESS` as the spec says |
 | Peer access, device P2P, access counters, tools trackers | later phases: `NV_ERR_NOT_SUPPORTED`, logged once |
 
 Nothing has been loaded or booted yet: see "First test boot" below.

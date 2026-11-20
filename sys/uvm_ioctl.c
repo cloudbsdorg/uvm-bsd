@@ -21,8 +21,9 @@
  * puts it.
  *
  * Requests whose feature is a later phase answer as the spec says for the
- * state that exists: policy and migration requests find no managed range
- * and return NV_ERR_INVALID_ADDRESS; peer access, device P2P and the tools
+ * state that exists: policy and migration requests succeed on managed
+ * ranges (bookkeeping only: they are CPU resident and mapped on every GPU)
+ * and return NV_ERR_INVALID_ADDRESS elsewhere; peer access, device P2P and the tools
  * trackers return NV_ERR_NOT_SUPPORTED, each with a rate-limited log line
  * naming the phase, never silently.
  */
@@ -279,7 +280,7 @@ uvm_h_alloc_semaphore_pool(struct uvm_fd *fd, struct uvm_va_space *vas, void *pa
 	return (uvm_vas_alloc_semaphore_pool(vas, params));
 }
 
-/* ---- 5.7 policy and migration: no managed range can exist in this phase ---- */
+/* ---- 5.7 policy and migration: managed ranges accept them, nothing moves yet ---- */
 
 static NV_STATUS
 uvm_h_managed_interval(struct uvm_fd *fd, struct uvm_va_space *vas, void *params, struct thread *td)
@@ -500,7 +501,7 @@ uvm_h_tools_process_memory(struct uvm_fd *fd, struct uvm_va_space *vas, void *pa
 	p->bytesRead = 0;
 	if (p->size == 0)
 		return (NV_OK);
-	/* only managed memory is reachable this way; none exists yet */
+	/* only managed memory is reachable this way; its bytes are not read yet (bytesRead 0) */
 	return (uvm_vas_check_managed_interval(vas, p->targetVa & ~(uint64_t)PAGE_MASK, PAGE_SIZE));
 }
 

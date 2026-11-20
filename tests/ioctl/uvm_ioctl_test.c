@@ -220,7 +220,7 @@ test_ranges(void)
 	NV_STATUS st;
 	const NvU64 base = 0x7f0000000000ULL;	/* a canonical user address well away from the heap */
 	int fd, r;
-	void *m;
+	void *m, *managed_left_mapped = NULL;
 
 	fd = open_main();
 	r = initialize(fd, 0, &st);
@@ -256,8 +256,69 @@ test_ranges(void)
 	/* mmap of the external range collides (ADDRINUSE); of a free address is a later phase (ENOSYS) */
 	m = mmap(NULL, 0x10000, PROT_READ | PROT_WRITE, MAP_SHARED, fd, (off_t)base);
 	CHECK(m == MAP_FAILED && errno == EADDRINUSE, "mmap over the external range: EADDRINUSE");
-	m = mmap(NULL, 0x10000, PROT_READ | PROT_WRITE, MAP_SHARED, fd, (off_t)(base + 0x100000));
-	CHECK(m == MAP_FAILED && (errno == ENOSYS || errno == EINVAL), "mmap of a free address: refused (%d)", errno);
+	/* a private mapping or one without read/write is refused before anything is created */
+	m = mmap(NULL, 0x10000, PROT_READ, MAP_SHARED, fd, (off_t)(base + 0x100000));
+	CHECK(m == MAP_FAILED && errno == EINVAL, "mmap read-only of a free address: EINVAL (%d)", errno);
+	/* a managed range: created by the mmap, found by the policy ioctls, gone with the mapping */
+	m = mmap((void *)(base + 0x100000), 0x10000, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED | MAP_EXCL, fd,
+	    (off_t)(base + 0x100000));
+	CHECK(m == (void *)(base + 0x100000), "mmap of a free address creates a managed range (%d)", errno);
+	if (m != MAP_FAILED) {
+		volatile unsigned *w = m;
+
+		CHECK(w[0] == 0 && w[0x3fff] == 0, "managed memory starts zeroed");
+		w[0x10] = 0x1234;
+		CHECK(w[0x10] == 0x1234, "the CPU reads back what it wrote");
+		vr.base = base + 0x100000;
+		vr.length = 0x10000;
+		r = uvm_ioctl(fd, UVM_VALIDATE_VA_RANGE, &vr);
+		CHECK(r == 0 && vr.rmStatus == NV_OK, "VALIDATE_VA_RANGE of the managed range: NV_OK (%#x)", vr.rmStatus);
+		memset(&pl, 0, sizeof(pl));
+		pl.requestedBase = base + 0x101000;
+		pl.length = 0x2000;
+		pl.preferredLocation = NV_PROCESSOR_UUID_CPU_DEFAULT;
+		pl.preferredCpuNumaNode = -1;
+		r = uvm_ioctl(fd, UVM_SET_PREFERRED_LOCATION, &pl);
+		CHECK(r == 0 && pl.rmStatus == NV_OK, "SET_PREFERRED_LOCATION inside a managed range: NV_OK (%#x)",
+		    pl.rmStatus);
+		pl.requestedBase = base + 0x10f000;
+		pl.length = 0x2000;	/* runs past the end of the range: a gap */
+		r = uvm_ioctl(fd, UVM_SET_PREFERRED_LOCATION, &pl);
+		CHECK(r == 0 && pl.rmStatus == NV_ERR_INVALID_ADDRESS, "SET_PREFERRED_LOCATION across the end: INVALID_ADDRESS (%#x)",
+		    pl.rmStatus);
+		memset(&mig, 0, sizeof(mig));
+		mig.base = base + 0x100000;
+		mig.length = 0x10000;
+		mig.destinationUuid = NV_PROCESSOR_UUID_CPU_DEFAULT;
+		mig.cpuNumaNode = -1;
+		r = uvm_ioctl(fd, UVM_MIGRATE, &mig);
+		CHECK(r == 0 && mig.rmStatus == NV_OK, "MIGRATE of a managed interval to the CPU: NV_OK (%#x)", mig.rmStatus);
+		/* a second mapping over the same addresses collides; UVM_FREE does not free managed memory */
+		{
+			void *m2 = mmap(NULL, 0x4000, PROT_READ | PROT_WRITE, MAP_SHARED, fd, (off_t)(base + 0x104000));
+
+			CHECK(m2 == MAP_FAILED && errno == EADDRINUSE, "mmap inside a managed range: EADDRINUSE (%d)", errno);
+		}
+		memset(&fr, 0, sizeof(fr));
+		fr.base = base + 0x100000;
+		fr.length = 0x10000;
+		r = uvm_ioctl(fd, UVM_FREE, &fr);
+		CHECK(r == 0 && fr.rmStatus == NV_ERR_INVALID_ADDRESS, "UVM_FREE of a managed range: INVALID_ADDRESS (%#x)",
+		    fr.rmStatus);
+		CHECK(munmap(m, 0x10000) == 0, "munmap of the managed range");
+		r = uvm_ioctl(fd, UVM_VALIDATE_VA_RANGE, &vr);
+		CHECK(r == 0 && vr.rmStatus == NV_ERR_INVALID_ADDRESS, "VALIDATE after munmap: INVALID_ADDRESS (%#x)", vr.rmStatus);
+		/* the range is free again: a new mapping works, and survives the close of the fd (detached object) */
+		m = mmap((void *)(base + 0x100000), 0x10000, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED | MAP_EXCL, fd,
+		    (off_t)(base + 0x100000));
+		CHECK(m == (void *)(base + 0x100000), "the address is reusable after munmap (%d)", errno);
+		if (m != MAP_FAILED) {
+			volatile unsigned *w2 = m;
+
+			w2[1] = 77;
+			managed_left_mapped = m;
+		}
+	}
 
 	/* policy and migration on a non-managed interval: INVALID_ADDRESS */
 	memset(&pl, 0, sizeof(pl));
@@ -343,11 +404,19 @@ test_ranges(void)
 	fr.length = 0x10000;
 	r = uvm_ioctl(fd, UVM_FREE, &fr);
 	CHECK(r == 0 && fr.rmStatus == NV_OK, "FREE of the external range: NV_OK");
-	r = uvm_ioctl(fd, UVM_VALIDATE_VA_RANGE, &vr);
+	vr.base = base;
 	vr.length = 0x10000;
 	r = uvm_ioctl(fd, UVM_VALIDATE_VA_RANGE, &vr);
 	CHECK(r == 0 && vr.rmStatus == NV_ERR_INVALID_ADDRESS, "VALIDATE after FREE: INVALID_ADDRESS");
 	close(fd);
+	if (managed_left_mapped != NULL) {
+		/* the VA space is gone; the mapping stays readable and writable (detached pager object), then unmaps */
+		volatile unsigned *w = managed_left_mapped;
+
+		CHECK(w[1] == 77, "a managed mapping outlives the closed fd and keeps its data");
+		w[2] = 5;
+		CHECK(munmap(managed_left_mapped, 0x10000) == 0, "munmap after the VA space is gone");
+	}
 }
 
 /* open/close many times, with forks: no leak the kernel's counters would show (vmstat -m nvidia_uvm) */
