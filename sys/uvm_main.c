@@ -56,6 +56,7 @@ struct uvm_global uvm = {
 
 /* ---- tunables and statistics: hw.nvidia_uvm.* (01 section 1, 09 section 1) ---- */
 
+/* CPD-OFF -- one declaration per tunable: the repetition is the list */
 SYSCTL_NODE(_hw, OID_AUTO, nvidia_uvm, CTLFLAG_RW | CTLFLAG_MPSAFE, 0, "NVIDIA UVM driver");
 SYSCTL_INT(_hw_nvidia_uvm, OID_AUTO, builtin_tests, CTLFLAG_RDTUN, &uvm.builtin_tests, 0,
     "built-in tests enabled (0: unknown request numbers fail with ENOSYS)");
@@ -73,10 +74,14 @@ SYSCTL_INT(_hw_nvidia_uvm, OID_AUTO, debug_push, CTLFLAG_RDTUN, &uvm.debug_push,
     "log the method stream, GPFIFO entry, GP_PUT and doorbell of the first N pushes (0: off, max 64)");
 SYSCTL_INT(_hw_nvidia_uvm, OID_AUTO, init_probe, CTLFLAG_RDTUN, &uvm.init_probe, 0,
     "staged channel initialisation (1: host-class semaphores only, then the copy engine) with a log line per stage");
+SYSCTL_INT(_hw_nvidia_uvm, OID_AUTO, init_probe_work, CTLFLAG_RDTUN, &uvm.init_probe_work, 0,
+    "with init_probe: bit mask of first-work probe stages on channel 0 (0: none; see nvidia-uvm(4))");
 SYSCTL_INT(_hw_nvidia_uvm, OID_AUTO, ce_bind_subch4, CTLFLAG_RDTUN, &uvm.ce_bind_subch4, 0,
     "also bind the copy class on subchannel 4 during channel initialisation (experiment, spec question Q-008)");
 SYSCTL_UINT(_hw_nvidia_uvm, OID_AUTO, fatal_error, CTLFLAG_RD, &uvm.fatal_error, 0,
     "the module-wide fatal status (0 = NV_OK)");
+
+/* CPD-ON */
 
 static int uvm_sysctl_gpus(SYSCTL_HANDLER_ARGS);
 SYSCTL_PROC(_hw_nvidia_uvm, OID_AUTO, gpus, CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, 0,

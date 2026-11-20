@@ -559,6 +559,130 @@ uvm_channel_probe_stage(struct uvm_channel *ch, const char *name, uint32_t subch
 }
 
 /*
+ * First-work probe (hw.nvidia_uvm.init_probe_work, a bit mask, channel 0
+ * only, after init-probe stages 0-4).  Each stage is one push that repeats a
+ * single difference between the proven semaphore pushes and the first real
+ * push (a page-table memset to physical system memory, Xid 71 in test boot
+ * 3), then a wait and a CPU check of the destination:
+ *   bit 0  virtual copy      8 bytes, inline data -> semaphore page (VA)
+ *   bit 1  virtual memset    8 bytes, remap enabled, semaphore page (VA)
+ *   bit 2  physical copy     8 bytes, inline data -> probe page, no remap
+ *   bit 3  physical memset   4096 bytes, remap, NO flush
+ *   bit 4  physical memset   4096 bytes, remap, flush (system)
+ *   bit 5  as bit 4, then host WFI
+ *   bit 6  as bit 4, then host WFI and MEMBAR: exactly the failing push
+ *   bit 7  as bit 4, then host WFI, completed by a HOST semaphore release
+ * Stages run in bit order.  Bits 0-2 and 7 end in a host WFI and a host
+ * semaphore release (the marker); 3-6 end in the copy-engine release the
+ * real pushes use (so the stage is the real push).
+ */
+#define	UVM_PROBE_OFF_COPY	0x800u
+#define	UVM_PROBE_OFF_SET	0x808u
+#define	UVM_PROBE_FILL		0xa5u
+#define	UVM_PROBE_VALUE		0x1122334455667788ull
+
+struct uvm_probe_page {
+	void		*kva;
+	bus_dmamap_t	map;
+	bus_addr_t	bus;
+};
+
+static NV_STATUS
+uvm_probe_work_stage(struct uvm_channel *ch, struct uvm_probe_page *pp, unsigned bit, const char *name)
+{
+	struct uvm_gpu *gpu = ch->mgr->gpu;
+	struct uvm_push push;
+	struct uvm_gpu_address dst, src;
+	NV_STATUS status;
+	uint64_t data = UVM_PROBE_VALUE, src_va;
+	uint32_t *w;
+	volatile uint64_t *vdst;
+	bool phys = bit >= 2, host_marker = bit <= 2 || bit == 7;
+	uvm_membar_t membar = bit == 3 ? UVM_MEMBAR_NONE : UVM_MEMBAR_SYS;
+
+	status = uvm_push_begin_on(ch, &push, NULL);
+	if (status != NV_OK)
+		return (status);
+	dst.is_virtual = !phys;
+	dst.aperture = UVM_APERTURE_SYS;
+	if (phys)
+		dst.address = uvm_gpu_dma_address(gpu, pp->bus);
+	else
+		dst.address = ch->mgr->sema_gpu_va + (bit == 0 ? UVM_PROBE_OFF_COPY : UVM_PROBE_OFF_SET);
+	if (bit == 0 || bit == 2) {
+		uvm_push_inline_data(&push, &data, sizeof(data), &src_va);
+		src.address = src_va;
+		src.is_virtual = 1;
+		src.aperture = UVM_APERTURE_SYS;
+		w = uvm_push_space(&push, uvm_ce_memcopy_words(sizeof(data)));
+		push.next = w + uvm_ce_memcopy(w, &dst, &src, sizeof(data), membar, 0);
+	} else {
+		uint64_t size = bit == 1 ? 8 : PAGE_SIZE;
+
+		w = uvm_push_space(&push, UVM_CE_MEMSET_MAX_WORDS(size));
+		push.next = w + uvm_ce_memset_8(w, &dst, data, size, membar);
+	}
+	if (bit <= 2 || bit >= 5)
+		UVM_PUSH(&push, uvm_host_wfi);
+	if (bit == 6)
+		UVM_PUSH(&push, uvm_host_membar, UVM_MEMBAR_SYS);
+	uvm_log("ch%u probe work: stage %u '%s' sent", ch->index, bit, name);
+	if (host_marker)
+		uvm_push_end_host_sem(&push);
+	else
+		uvm_push_end(&push);
+	status = uvm_push_wait(&push);
+	if (status != NV_OK) {
+		uvm_log("ch%u probe work: stage %u '%s' FAILED: %s", ch->index, bit, name, uvm_status_name(status));
+		return (status);
+	}
+	if (phys)
+		bus_dmamap_sync(gpu->dmat, pp->map, BUS_DMASYNC_POSTREAD);
+	vdst = phys ? (volatile uint64_t *)pp->kva :
+	    (volatile uint64_t *)(ch->mgr->sema_cpu + (bit == 0 ? UVM_PROBE_OFF_COPY : UVM_PROBE_OFF_SET));
+	if (*vdst != UVM_PROBE_VALUE)
+		uvm_log("ch%u probe work: stage %u '%s' completed but the data is %#jx, expected %#jx", ch->index,
+		    bit, name, (uintmax_t)*vdst, (uintmax_t)UVM_PROBE_VALUE);
+	else
+		uvm_log("ch%u probe work: stage %u '%s' completed, data verified", ch->index, bit, name);
+	if (phys) {
+		memset(pp->kva, UVM_PROBE_FILL, PAGE_SIZE);
+		bus_dmamap_sync(gpu->dmat, pp->map, BUS_DMASYNC_PREREAD | BUS_DMASYNC_PREWRITE);
+	}
+	return (NV_OK);
+}
+
+static NV_STATUS
+uvm_probe_work(struct uvm_channel *ch)
+{
+	static const char *const names[8] = {
+		"virtual copy", "virtual memset", "physical sysmem copy", "physical sysmem memset, no flush",
+		"physical sysmem memset, flush", "physical memset, flush, host WFI",
+		"physical memset, flush, host WFI + MEMBAR (the failing push)",
+		"physical memset, flush, host WFI, host semaphore marker"
+	};
+	struct uvm_gpu *gpu = ch->mgr->gpu;
+	struct uvm_probe_page pp;
+	NV_STATUS status = NV_OK;
+	unsigned bit;
+
+	if (uvm_gpu_sysmem_alloc(gpu, PAGE_SIZE, &pp.kva, &pp.map, &pp.bus) != NV_OK) {
+		uvm_log("ch%u probe work: no system memory for the probe page", ch->index);
+		return (NV_ERR_NO_MEMORY);
+	}
+	memset(pp.kva, UVM_PROBE_FILL, PAGE_SIZE);
+	bus_dmamap_sync(gpu->dmat, pp.map, BUS_DMASYNC_PREREAD | BUS_DMASYNC_PREWRITE);
+	uvm_log("ch%u probe work: probe page bus %#jx, GPU address %#jx, mask %#x", ch->index,
+	    (uintmax_t)pp.bus, (uintmax_t)uvm_gpu_dma_address(gpu, pp.bus), (unsigned)uvm.init_probe_work);
+	for (bit = 0; bit < 8 && status == NV_OK; bit++)
+		if (((unsigned)uvm.init_probe_work >> bit) & 1u)
+			status = uvm_probe_work_stage(ch, &pp, bit, names[bit]);
+	if (status == NV_OK)
+		uvm_gpu_sysmem_free(gpu, pp.kva, pp.map, PAGE_SIZE);	/* on error the GPU may still write it: leak */
+	return (status);
+}
+
+/*
  * uvm_channel_init_probe - hw.nvidia_uvm.init_probe=1: the same work as
  * uvm_channel_init_push, split so the first stage that makes the GPU raise
  * an error is known: (0) nothing but a host semaphore release, which proves
@@ -596,6 +720,8 @@ uvm_channel_init_probe(struct uvm_channel *ch)
 	else
 		uvm_log("ch%u init probe: stage '4 copy-engine semaphore release' FAILED: %s", ch->index,
 		    uvm_status_name(status));
+	if (status == NV_OK && uvm.init_probe_work != 0 && ch->index == 0)
+		status = uvm_probe_work(ch);
 	return (status);
 }
 

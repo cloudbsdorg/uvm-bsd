@@ -667,6 +667,7 @@ struct uvm_global {
 	/* Xid 71 diagnostics (default off, no behaviour change unless set) */
 	int			debug_push;	/* log the first N pushes, GPFIFO entries, PUT and doorbell */
 	int			init_probe;	/* staged channel initialisation probe (see uvm_channel.c) */
+	int			init_probe_work; /* bit mask of first-work probe stages on channel 0 (see uvm_channel.c) */
 	int			ce_bind_subch4;	/* also SET_OBJECT the copy class on subchannel 4 (Q-008) */
 };
 
