@@ -1,0 +1,1 @@
+- (uvm-2272 2026-11-20) -Wcast-qual on a %p log of a volatile pointer: cast to (volatile void *), never (void *); the qualifier stays, nothing is silenced. amd64 cross-check catches it, the arm64 module build does not. On FreeBSD, sed -i needs an explicit '' suffix or it leaves a file named x-e.

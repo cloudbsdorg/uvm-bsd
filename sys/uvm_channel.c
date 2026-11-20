@@ -79,11 +79,13 @@ uvm_debug_log_channel(const struct uvm_channel *ch)
 	uvm_log("debug_push: ch%u hw runlist %u channel %u class %#x: GPFIFO va %#jx (cpu %p, %u entries), "
 	    "GP_PUT va %#jx (cpu %p), GP_GET va %#jx, doorbell va %#jx cpu %p token %#x, dummy BAR1 %p",
 	    ch->index, i->hwRunlistId, i->hwChannelId, i->channelClassNum, (uintmax_t)i->gpFifoGpuVa,
-	    (void *)i->gpFifoEntries, i->numGpFifoEntries, (uintmax_t)i->gpPutGpuVa, (void *)i->gpPut,
+	    (volatile void *)i->gpFifoEntries, i->numGpFifoEntries, (uintmax_t)i->gpPutGpuVa,
+	    (volatile void *)i->gpPut,
 	    (uintmax_t)i->gpGetGpuVa, (uintmax_t)i->workSubmissionOffsetGpuVa,
-	    (void *)i->workSubmissionOffset, i->workSubmissionToken, (void *)i->dummyBar1Mapping);
+	    (volatile void *)i->workSubmissionOffset, i->workSubmissionToken,
+	    (volatile void *)i->dummyBar1Mapping);
 	uvm_log("debug_push: ch%u tracking semaphore va %#jx cpu %p; pushbuffer va %#jx cpu %p size %#x; "
-	    "GPFIFO in %s memory", ch->index, (uintmax_t)ch->sema_gpu_va, (const void *)ch->sema_cpu,
+	    "GPFIFO in %s memory", ch->index, (uintmax_t)ch->sema_gpu_va, (volatile void *)ch->sema_cpu,
 	    (uintmax_t)ch->mgr->pb.gpu_va, (void *)ch->mgr->pb.cpu, UVM_PUSHBUFFER_SIZE,
 	    uvm.sysmem_gpfifo ? "system" : "video");
 }
@@ -495,7 +497,7 @@ uvm_push_end_common(struct uvm_push *push, bool host_sem)
 	if (dbg) {
 		uvm_log("debug_push: ch%u GP_PUT <- %u (%s release value %ju), doorbell %p <- %#x", ch->index,
 		    ch->cpu_put, host_sem ? "host" : "copy-engine", (uintmax_t)value,
-		    (void *)ch->info.workSubmissionOffset, ch->info.workSubmissionToken);
+		    (volatile void *)ch->info.workSubmissionOffset, ch->info.workSubmissionToken);
 		uvm_debug_pushes_logged++;
 	}
 	*ch->info.workSubmissionOffset = ch->info.workSubmissionToken;
