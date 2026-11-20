@@ -95,7 +95,10 @@ uvm_h_mm_initialize(struct uvm_fd *fd, struct uvm_va_space *unused, void *params
 	struct file *fp;
 	struct uvm_fd *other;
 	struct uvm_va_space *vas;
+	enum uvm_mm_caller caller;
 	cap_rights_t rights;
+	uintptr_t state;
+	NV_STATUS status;
 	int error;
 
 	(void)unused;
@@ -111,16 +114,38 @@ uvm_h_mm_initialize(struct uvm_fd *fd, struct uvm_va_space *unused, void *params
 	/* the other file's per-open state, as devfs keeps it for its own d_ioctl */
 	other = fp->f_cdevpriv != NULL ? fp->f_cdevpriv->cdpd_data : NULL;
 	vas = other != NULL ? uvm_fd_va_space(other) : NULL;
+	if (vas != NULL)
+		uvm_va_space_ref(vas);	/* ours if the fd becomes an MM fd; the open file cannot close under us */
 	fdrop(fp, td);
 	if (vas == NULL)
 		return (NV_ERR_INVALID_ARGUMENT);
+
 	/*
-	 * Design choice allowed by 01 section 3.4: this phase has no managed
-	 * memory whose CPU pages the GPU could touch during process exit, so
-	 * the secondary fd binds nothing and the user may close it.
+	 * 01 section 3.4: bind a secondary fd to the process's memory map so
+	 * that its release runs the mm shutdown while the map still exists.
+	 * The calling fd moves uninitialised -> initialising -> MM by the
+	 * same compare-and-swap as UVM_INITIALIZE (3.2).
 	 */
-	(void)fd;
-	return (NV_WARN_NOTHING_TO_DO);
+	if (atomic_cmpset_ptr(&fd->state, 0, UVM_FD_INITIALIZING)) {
+		caller = UVM_MM_CALLER_UNINIT;
+	} else {
+		state = atomic_load_acq_ptr(&fd->state);
+		if (state == UVM_FD_INITIALIZING)
+			caller = UVM_MM_CALLER_INITIALISING;
+		else if ((state & UVM_FD_TAG_MM) != 0)
+			caller = UVM_MM_CALLER_MM;
+		else
+			caller = UVM_MM_CALLER_VA_SPACE;
+	}
+	status = uvm_va_space_mm_bind(vas, caller);
+	if (status == NV_OK) {
+		atomic_store_rel_ptr(&fd->state, (uintptr_t)vas | UVM_FD_TAG_MM);
+		return (NV_OK);
+	}
+	if (caller == UVM_MM_CALLER_UNINIT)
+		atomic_store_rel_ptr(&fd->state, 0);
+	uvm_va_space_unref(vas);
+	return (status);
 }
 
 static NV_STATUS

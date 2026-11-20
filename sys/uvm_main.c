@@ -143,7 +143,8 @@ uvm_fd_dtor(void *arg)
 		/* VA-space fd: the whole teardown (01 section 3.5) */
 		uvm_va_space_unref(vas);
 	} else if ((vas = uvm_fd_mm_va_space(fd)) != NULL) {
-		/* MM fd: drop the reference on the primary fd's VA space */
+		/* MM fd (01 section 3.5): the mm shutdown, the map's users reference, then the primary's VA space */
+		uvm_va_space_mm_release(vas);
 		uvm_va_space_unref(vas);
 	}
 	free(fd, M_NVIDIA_UVM);

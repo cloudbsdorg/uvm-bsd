@@ -17,7 +17,7 @@ Phases 0 and 1 of the specification's plan:
 |---|---|
 | `nvidia.ko` glue (phase 0) | in the `nvidia-gb10-freebsd` repository, branch `agent/uvm-phase0`: `nvidia.ko` exports the 60 `nvUvmInterface*` entry points, runs UVM's interrupt top half before RM's own service, and hands UVM the fault-buffer stacks |
 | Device nodes, ioctl dispatch, fd state machine | done: raw Linux request numbers through the Linuxulator, a native encoding for FreeBSD callers, every structure copied in and out whole, `rmStatus` carries the result |
-| `UVM_INITIALIZE`, `UVM_MM_INITIALIZE`, teardown | done; the secondary fd answers `NV_WARN_NOTHING_TO_DO` in this phase (no managed memory to protect at exit) |
+| `UVM_INITIALIZE`, `UVM_MM_INITIALIZE`, teardown | done; the secondary fd holds a users reference on the bound map and its release runs the mm shutdown (01 section 3.4, 03 section 2.1); answers `NV_OK` |
 | GPU registration through RM | done: device, address space, fault buffers, interrupt ownership, PMA object, copy-engine channels; Blackwell GB20x has the HAL, other generations are refused at registration |
 | GPU VA space registration (page directory hand-over) | done, page tables in system memory written by the copy engine |
 | Channel registration with resource mapping | done |

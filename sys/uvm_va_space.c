@@ -1893,6 +1893,127 @@ uvm_vas_processor_uuid_table(struct uvm_va_space *vas, NvU64 user_ptr, bool v2)
 	return (error == 0 ? NV_OK : NV_ERR_INVALID_ADDRESS);
 }
 
+/* ---- the bound memory map: MM fd binding and the mm shutdown (01 section 3.4, 03 section 2.1) ---- */
+
+/*
+ * uvm_va_space_mm_bind - UVM_MM_INITIALIZE on an uninitialised fd: take the
+ * users reference on the bound map and mark the binding ALIVE.  NV_OK
+ * means the caller's fd becomes an MM fd that owns the reference; it must
+ * call uvm_va_space_mm_release when that fd is released.
+ *
+ * FreeBSD: vm_refcnt is the users count (vmspace_free drops it, the last
+ * drop tears the map down).  The exit path closes the process's files
+ * (fdescfree, kern_exit.c) before it releases the vmspace (vmspace_exit),
+ * so the MM fd's release callback runs while the map still exists; our own
+ * reference keeps it past that point even for a closer in another process.
+ */
+NV_STATUS
+uvm_va_space_mm_bind(struct uvm_va_space *vas, enum uvm_mm_caller caller)
+{
+	NV_STATUS status;
+
+	sx_xlock(&vas->lock);
+	status = uvm_mm_initialize_decide(true, caller, vas->vm != NULL, vas->mm_state);
+	if (status == NV_OK) {
+		if (!refcount_acquire_if_not_zero(&vas->vm->vm_refcnt)) {
+			status = NV_ERR_PAGE_TABLE_NOT_AVAIL;
+		} else {
+			vas->mm_users_vm = vas->vm;
+			vas->mm_state = UVM_MM_ALIVE;
+		}
+	}
+	sx_xunlock(&vas->lock);
+	return (status);
+}
+
+/*
+ * uvm_va_space_mm_shutdown - the mm shutdown of 03 section 2.1, in its
+ * order: refuse new registrations; stop the user channels; detach them;
+ * flush the replayable fault buffer of every GPU with a GPU VA space (so no
+ * stale fault is attributed to a reused address); unset each page
+ * directory; mark the binding RELEASED; release the detached channels.
+ * After it no GPU issues accesses in this VA space's address spaces.  Runs
+ * once: from the MM fd's release, or from destroy when no MM fd was used.
+ * There are no retainers of the map yet (the fault servicing of managed
+ * memory is the first), so there is nothing to wait for.
+ */
+static void
+uvm_va_space_mm_shutdown(struct uvm_va_space *vas)
+{
+	struct uvm_user_channel *ch, **detached;
+	unsigned nch = 0, ndetached = 0, i;
+
+	sx_xlock(&vas->serialize);
+	sx_xlock(&vas->lock);
+	if (!uvm_mm_shutdown_needed(vas->mm_state)) {
+		sx_xunlock(&vas->lock);
+		sx_xunlock(&vas->serialize);
+		return;
+	}
+	vas->disallow_new_registers = true;
+	sx_downgrade(&vas->lock);
+	for (i = UVM_ID_GPU_FIRST; i <= UVM_ID_GPU_LAST; i++) {
+		if (vas->gvas[i] == NULL)
+			continue;
+		vas->gvas[i]->disallow_new_channels = true;
+		TAILQ_FOREACH(ch, &vas->gvas[i]->channels, link) {
+			uvm_user_channel_stop(ch);
+			nch++;
+		}
+	}
+	vas->user_channels_stopped = true;
+	sx_sunlock(&vas->lock);
+
+	detached = malloc(sizeof(*detached) * (nch + 1), M_NVIDIA_UVM, M_WAITOK);
+	sx_xlock(&vas->lock);
+	for (i = UVM_ID_GPU_FIRST; i <= UVM_ID_GPU_LAST; i++) {
+		if (vas->gvas[i] == NULL)
+			continue;
+		while (ndetached < nch && (ch = TAILQ_FIRST(&vas->gvas[i]->channels)) != NULL) {
+			uvm_user_channel_detach(ch);
+			detached[ndetached++] = ch;
+		}
+	}
+	sx_xunlock(&vas->lock);
+
+	/* the serialisation lock keeps every GPU VA space in place across the RM calls */
+	for (i = UVM_ID_GPU_FIRST; i <= UVM_ID_GPU_LAST; i++) {
+		if (vas->gvas[i] != NULL && !vas->gvas[i]->dead)
+			uvm_gpu_fault_buffer_flush(vas->gvas[i]->gpu);
+	}
+	for (i = UVM_ID_GPU_FIRST; i <= UVM_ID_GPU_LAST; i++) {
+		struct uvm_gpu_va_space *gvas = vas->gvas[i];
+
+		if (gvas != NULL && gvas->page_dir_set) {
+			(void)nvUvmInterfaceUnsetPageDirectory(gvas->rm_as);
+			gvas->page_dir_set = false;
+		}
+	}
+	sx_xlock(&vas->lock);
+	vas->mm_state = UVM_MM_RELEASED;
+	sx_xunlock(&vas->lock);
+	sx_xunlock(&vas->serialize);
+
+	for (i = 0; i < ndetached; i++)
+		uvm_user_channel_unref(detached[i]);
+	free(detached, M_NVIDIA_UVM);
+}
+
+/* the MM fd is released: shut down, then give back the users reference */
+void
+uvm_va_space_mm_release(struct uvm_va_space *vas)
+{
+	struct vmspace *vm;
+
+	uvm_va_space_mm_shutdown(vas);
+	sx_xlock(&vas->lock);
+	vm = vas->mm_users_vm;
+	vas->mm_users_vm = NULL;
+	sx_xunlock(&vas->lock);
+	if (vm != NULL)
+		vmspace_free(vm);
+}
+
 /* ---- destroy (03 section 2.2, 01 section 3.5) ---- */
 
 void
@@ -1900,7 +2021,6 @@ uvm_va_space_destroy(struct uvm_va_space *vas)
 {
 	struct uvm_range *r, *next;
 	struct uvm_core_group *g;
-	struct uvm_user_channel *ch;
 	int i;
 
 	sx_xlock(&uvm.lock);
@@ -1908,18 +2028,7 @@ uvm_va_space_destroy(struct uvm_va_space *vas)
 	sx_xunlock(&uvm.lock);
 
 	/* the fd is closed: nothing else reaches this VA space except fault bottom halves via channels */
-	sx_xlock(&vas->serialize);
-	sx_slock(&vas->lock);
-	for (i = UVM_ID_GPU_FIRST; i <= UVM_ID_GPU_LAST; i++) {
-		if (vas->gvas[i] == NULL)
-			continue;
-		TAILQ_FOREACH(ch, &vas->gvas[i]->channels, link)
-			uvm_user_channel_stop(ch);
-	}
-	vas->user_channels_stopped = true;
-	vas->disallow_new_registers = true;
-	sx_sunlock(&vas->lock);
-	sx_xunlock(&vas->serialize);
+	uvm_va_space_mm_shutdown(vas);
 
 	for (i = UVM_ID_GPU_FIRST; i <= UVM_ID_GPU_LAST; i++) {
 		if (vas->gpus[i] != NULL)

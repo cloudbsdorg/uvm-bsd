@@ -46,6 +46,7 @@
 #include "nvidia_uvm_rm.h"
 #include "uvm_hal_methods.h"
 #include "uvm_pte.h"
+#include "uvm_mm_state.h"
 
 MALLOC_DECLARE(M_NVIDIA_UVM);
 
@@ -534,13 +535,12 @@ struct uvm_gpu_va_space {
 	u_int			refs;
 };
 
-enum uvm_mm_state { UVM_MM_UNINITIALIZED = 0, UVM_MM_ALIVE, UVM_MM_RELEASED };
-
 struct uvm_va_space {
 	TAILQ_ENTRY(uvm_va_space) link;
 	struct sx		lock;		/* the VA space lock */
 	struct sx		serialize;	/* writer serialisation (08 order 7) */
 	struct vmspace		*vm;		/* the bound address space (a reference) */
+	struct vmspace		*mm_users_vm;	/* the MM fd's users reference on it (03 section 2.1), or NULL */
 	pid_t			owner_pid;
 	uint64_t		init_flags;
 	struct uvm_core_range_tree	ranges;
@@ -612,6 +612,8 @@ NV_STATUS uvm_va_space_create(uint64_t flags, struct uvm_va_space **out);
 void	uvm_va_space_destroy(struct uvm_va_space *vas);
 void	uvm_va_space_ref(struct uvm_va_space *vas);
 void	uvm_va_space_unref(struct uvm_va_space *vas);
+NV_STATUS uvm_va_space_mm_bind(struct uvm_va_space *vas, enum uvm_mm_caller caller);
+void	uvm_va_space_mm_release(struct uvm_va_space *vas);
 NV_STATUS uvm_range_create(struct uvm_va_space *vas, enum uvm_range_type type, uint64_t start, uint64_t end,
     struct uvm_range **out);
 void	uvm_range_destroy(struct uvm_range *r);

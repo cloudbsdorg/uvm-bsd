@@ -161,8 +161,26 @@ test_fd_states(void)
 	memset(&mm, 0, sizeof(mm));
 	mm.uvmFd = fd;
 	r = uvm_ioctl(fd2, UVM_MM_INITIALIZE, &mm);
-	CHECK(r == 0 && (mm.rmStatus == NV_WARN_NOTHING_TO_DO || mm.rmStatus == NV_OK),
-	    "MM_INITIALIZE on a VA-space fd: NOTHING_TO_DO or NV_OK (%#x)", mm.rmStatus);
+	CHECK(r == 0 && mm.rmStatus == NV_OK, "MM_INITIALIZE on a VA-space fd: NV_OK (%#x)", mm.rmStatus);
+	/* the fd is MM now: asking again on it, or on the VA-space fd itself, is IN_USE (01 section 3.4) */
+	mm.uvmFd = fd;
+	r = uvm_ioctl(fd2, UVM_MM_INITIALIZE, &mm);
+	CHECK(r == 0 && mm.rmStatus == NV_ERR_IN_USE, "MM_INITIALIZE on an MM fd: IN_USE (%#x)", mm.rmStatus);
+	r = uvm_ioctl(fd, UVM_MM_INITIALIZE, &mm);
+	CHECK(r == 0 && mm.rmStatus == NV_ERR_IN_USE, "MM_INITIALIZE on a VA-space fd: IN_USE (%#x)", mm.rmStatus);
+	/* the binding is ALIVE: a second MM fd for the same VA space is INVALID_STATE */
+	{
+		int fd4 = open_main();
+
+		r = uvm_ioctl(fd4, UVM_MM_INITIALIZE, &mm);
+		CHECK(r == 0 && mm.rmStatus == NV_ERR_INVALID_STATE, "second MM fd: INVALID_STATE (%#x)", mm.rmStatus);
+		close(fd4);
+	}
+	/* an MM fd accepts no VA-space ioctl */
+	memset(&pma, 0, sizeof(pma));
+	r = uvm_ioctl(fd2, UVM_PAGEABLE_MEM_ACCESS, &pma);
+	CHECK(r == 0 && pma.rmStatus == NV_ERR_ILLEGAL_ACTION, "VA-space ioctl on an MM fd: ILLEGAL_ACTION (%#x)",
+	    pma.rmStatus);
 	/* with a bad fd */
 	mm.uvmFd = -1;
 	r = uvm_ioctl(fd2, UVM_MM_INITIALIZE, &mm);
