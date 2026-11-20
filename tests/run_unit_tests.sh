@@ -70,6 +70,13 @@ else
 	echo "FAIL uvm_stress.sh -T (the kernel log filter)"
 	rc=1
 fi
+if sh "$REPO/tests/stress/uvm_stress_selftest.sh" >"$T/selftest.out" 2>&1; then
+	echo "ok   uvm_stress_selftest.sh (fake-mode runs of the stress script)"
+else
+	cat "$T/selftest.out"
+	echo "FAIL uvm_stress_selftest.sh"
+	rc=1
+fi
 if sh -n "$REPO/tests/stress/uvm_stress.sh"; then
 	echo "ok   uvm_stress.sh parses (run it with the modules loaded)"
 else

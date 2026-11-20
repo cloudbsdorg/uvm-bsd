@@ -123,7 +123,11 @@ From a one-shot boot environment, as root:
    kernel log (for instance "hw.nvidia_uvm.gpus could not be registered");
    `hw.nvidia_uvm.gpus` missing after a reload (a loop reads it all through
    the run, to race the unload); no worker finishing OK; and a final idle
-   unload that does not happen.  `-T` self-tests the kernel log filter.  `-H hold|free` picks one
+   unload that does not happen; a churn or sysctl loop still running 30 s
+   after the load stops.  New "GPU lookup by UUID failed" lines are a WARN
+   (counted against the start), not a FAIL.  `-T` self-tests the kernel log
+   filter; `tests/stress/uvm_stress_selftest.sh` runs the script in fake mode
+   (blind fstat, early failure, WARN lines).  `-H hold|free` picks one
    probe kind; `-h` lists every option.  The panic capture settings for a test
    BE are in `docs/panic-capture.md`.
 
