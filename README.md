@@ -65,6 +65,12 @@ make lint                              # mandoc -T lint man/nvidia-uvm.4
 depends on `nvidia` (with the UVM glue), `linux64elf` (arm64) or `linux`
 (amd64), and `linux_common`.
 
+The module is linked with the base toolchain (`/usr/bin/ld`, LLD) whatever
+`PATH` says, and the build refuses a `.ko` that LLD did not link.  binutils'
+GNU ld (in `/usr/local/bin`, first in the default `PATH`) links a module the
+kernel cannot load ("symbol nvUvmInterfaceChannelDestroy undefined").
+`sh tests/toolchain_test.sh` proves both with a hostile `PATH`.
+
 ## Tunables
 
 `hw.nvidia_uvm.builtin_tests` (0), `enable_va_space_mm` (1),

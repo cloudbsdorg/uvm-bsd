@@ -24,4 +24,19 @@ CWARNFLAGS+=	-Wall -Wextra -Wno-unused-parameter -Wmissing-prototypes -Wstrict-p
 # the core's directory holds sources only
 .PATH: ${.CURDIR}/core
 
+# The base toolchain only.  A PATH with /usr/local/bin first picks up
+# binutils' GNU ld and objcopy, and GNU ld links a .ko that the kernel's
+# link_elf cannot resolve ("symbol nvUvmInterfaceChannelDestroy undefined");
+# that cost three test boots on amp001 (2026-11-19/20).
+LD=		/usr/bin/ld
+OBJCOPY=	/usr/bin/objcopy
+
 .include <bsd.kmod.mk>
+
+# refuse a module that base lld did not link, whatever PATH or LD said
+all: toolchain-check
+toolchain-check: ${PROG}
+	@if ! readelf -p .comment ${PROG} 2>/dev/null | grep -q 'Linker: LLD'; then \
+		echo "${PROG}: not linked by the base lld (/usr/bin/ld); check PATH and LD" >&2; \
+		rm -f ${PROG}; exit 1; \
+	fi
