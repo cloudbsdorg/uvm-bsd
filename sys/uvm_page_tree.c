@@ -525,13 +525,50 @@ uvm_page_tree_clear_ptes(struct uvm_page_tree *tree, struct uvm_pt_range *range,
  * size, one per table the run touches (a table covers 2M of 4K or 64K
  * pages, 512M of 2M pages).
  */
+struct uvm_pt_vec_kctx {
+	struct uvm_page_tree	*tree;
+	struct uvm_pt_range_vec	*vec;
+	uint64_t		page_size;
+};
+
+static NV_STATUS
+uvm_pt_vec_kget(void *ctx, unsigned n, uint64_t va, uint64_t piece)
+{
+	struct uvm_pt_vec_kctx *k = ctx;
+
+	return (uvm_page_tree_get_ptes(k->tree, k->page_size, va, piece, &k->vec->ranges[n]));
+}
+
+static void
+uvm_pt_vec_kput(void *ctx, unsigned n)
+{
+	struct uvm_pt_vec_kctx *k = ctx;
+
+	uvm_page_tree_put_ptes(k->tree, &k->vec->ranges[n]);
+}
+
+static NV_STATUS
+uvm_pt_vec_kyield(void *ctx, bool intr)
+{
+	(void)ctx;
+	return (uvm_pt_yield(intr));
+}
+
+static const struct uvm_pt_vec_ops uvm_pt_vec_kops = { uvm_pt_vec_kget, uvm_pt_vec_kput, uvm_pt_vec_kyield };
+
+/*
+ * `intr`: stop on a pending signal (NV_ERR_SIGNAL_PENDING) after the first
+ * table.  Pass false where the caller cannot undo a half-done operation,
+ * such as the split of a partial unmap.
+ */
 NV_STATUS
-uvm_pt_range_vec_init(struct uvm_page_tree *tree, uint64_t va, uint64_t size, uint64_t page_size,
+uvm_pt_range_vec_init(struct uvm_page_tree *tree, uint64_t va, uint64_t size, uint64_t page_size, bool intr,
     struct uvm_pt_range_vec *vec)
 {
 	uint64_t table_span = page_size == UVM_PAGE_SIZE_2M ? (1ULL << 29) : (1ULL << 21);
-	uint64_t cur = va, end = va + size;
-	unsigned n = 0, i;
+	uint64_t end = va + size;
+	struct uvm_pt_vec_kctx k = { tree, vec, page_size };
+	unsigned n = 0;
 	NV_STATUS status;
 
 	memset(vec, 0, sizeof(*vec));
@@ -543,27 +580,14 @@ uvm_pt_range_vec_init(struct uvm_page_tree *tree, uint64_t va, uint64_t size, ui
 	vec->count = (unsigned)(((end - 1) / table_span) - (va / table_span) + 1);
 	vec->ranges = malloc(sizeof(*vec->ranges) * vec->count, M_NVIDIA_UVM, M_WAITOK | M_ZERO);
 	sx_xlock(&tree->lock);
-	while (cur < end) {
-		uint64_t table_end = (cur / table_span + 1) * table_span;
-		uint64_t piece = (table_end < end ? table_end : end) - cur;
-
-		status = uvm_pt_yield(true);
-		if (status == NV_OK)
-			status = uvm_page_tree_get_ptes(tree, page_size, cur, piece, &vec->ranges[n]);
-		if (status != NV_OK) {
-			for (i = 0; i < n; i++)
-				uvm_page_tree_put_ptes(tree, &vec->ranges[i]);
-			sx_xunlock(&tree->lock);
-			free(vec->ranges, M_NVIDIA_UVM);
-			vec->ranges = NULL;
-			vec->count = 0;
-			return (status);
-		}
-		n++;
-		cur += piece;
-	}
+	status = uvm_pt_vec_build(&uvm_pt_vec_kops, &k, va, size, table_span, intr, &n);
 	sx_xunlock(&tree->lock);
-	return (NV_OK);
+	if (status != NV_OK) {
+		free(vec->ranges, M_NVIDIA_UVM);
+		vec->ranges = NULL;
+		vec->count = 0;
+	}
+	return (status);
 }
 
 void

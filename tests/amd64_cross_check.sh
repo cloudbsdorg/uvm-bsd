@@ -30,7 +30,9 @@ for h in opt_global.h opt_acpi.h; do : > "$T/$h"; done
 # the interface headers a module build generates (bsd.kmod.mk does the same)
 (cd "$T" && awk -f "$SYSDIR/tools/makeobjops.awk" "$SYSDIR/kern/bus_if.m" -h \
     && awk -f "$SYSDIR/tools/makeobjops.awk" "$SYSDIR/kern/device_if.m" -h \
-    && awk -f "$SYSDIR/tools/vnode_if.awk" "$SYSDIR/kern/vnode_if.src" -h)
+    && awk -f "$SYSDIR/tools/vnode_if.awk" "$SYSDIR/kern/vnode_if.src" -h \
+    && awk -f "$SYSDIR/tools/vnode_if.awk" "$SYSDIR/kern/vnode_if.src" -q \
+    && awk -f "$SYSDIR/tools/vnode_if.awk" "$SYSDIR/kern/vnode_if.src" -p)
 
 CFLAGS="-target x86_64-unknown-freebsd16.0 -fsyntax-only -O2 -pipe -fno-strict-aliasing -Werror -D_KERNEL \
 -DKLD_MODULE -nostdinc -I$T -I$REPO/sys -I$SYSDIR -I$SYSDIR/contrib/ck/include -include $T/opt_global.h \

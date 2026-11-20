@@ -48,6 +48,7 @@
 #include "uvm_hal_methods.h"
 #include "uvm_pte.h"
 #include "uvm_mm_state.h"
+#include "uvm_pt_loop.h"
 
 MALLOC_DECLARE(M_NVIDIA_UVM);
 
@@ -61,20 +62,16 @@ MALLOC_DECLARE(M_NVIDIA_UVM);
 	if (ppsratecheck(&__lasttv, &__curpps, 4))			\
 		uvm_log(fmt, ##__VA_ARGS__);				\
 } while (0)
-/* at most one line per call site every 10 seconds: for messages a client can provoke in a loop (#2295) */
+/* at most one line per call site every UVM_LOG_SLOW_SECS: for messages a client can provoke in a loop (#2295) */
 #define	uvm_log_slow(fmt, ...) do {					\
 	static struct timeval __slowtv;					\
-	static const struct timeval __slowint = { 10, 0 };		\
-	if (ratecheck(&__slowtv, &__slowint))				\
+	static const struct timeval __slowint = { UVM_LOG_SLOW_SECS, 0 };	\
+	struct timeval __slownow;					\
+									\
+	getmicrouptime(&__slownow);					\
+	if (uvm_ratelimit_ok(&__slowtv, &__slowint, &__slownow))	\
 		uvm_log(fmt, ##__VA_ARGS__);				\
 } while (0)
-
-/*
- * The GPU's DMA tag is as large as its largest allocation and no larger:
- * bus_dmamem_alloc allocates the tag's maxsize, so a bigger tag turns every
- * page table into a huge contiguous allocation (#2295).
- */
-#define	UVM_GPU_DMA_MAXSIZE	PAGE_SIZE
 
 /* processor ids: 0 is the CPU, GPUs are 1..UVM_MAX_GPUS (03 section 1) */
 typedef uint16_t uvm_gpu_id_t;
@@ -305,7 +302,7 @@ struct uvm_pt_range_vec {
 };
 
 NV_STATUS uvm_pt_range_vec_init(struct uvm_page_tree *tree, uint64_t va, uint64_t size, uint64_t page_size,
-    struct uvm_pt_range_vec *vec);
+    bool intr, struct uvm_pt_range_vec *vec);
 void	uvm_pt_range_vec_deinit(struct uvm_page_tree *tree, struct uvm_pt_range_vec *vec);
 NV_STATUS uvm_pt_range_vec_write(struct uvm_page_tree *tree, struct uvm_pt_range_vec *vec, const uint64_t *ptes,
     uvm_membar_t membar, struct uvm_tracker *tracker);

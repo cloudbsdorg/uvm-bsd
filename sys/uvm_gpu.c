@@ -39,7 +39,7 @@ uvm_gpu_sysmem_alloc(struct uvm_gpu *gpu, size_t bytes, void **kva, bus_dmamap_t
 {
 	int error;
 
-	if (bytes == 0 || bytes > UVM_GPU_DMA_MAXSIZE)
+	if (!uvm_sysmem_size_ok(bytes))
 		return (NV_ERR_INVALID_ARGUMENT);
 	error = bus_dmamem_alloc(gpu->dmat, kva, BUS_DMA_WAITOK | BUS_DMA_ZERO | BUS_DMA_COHERENT, map);
 	if (error != 0)
