@@ -39,6 +39,8 @@ uvm_gpu_sysmem_alloc(struct uvm_gpu *gpu, size_t bytes, void **kva, bus_dmamap_t
 {
 	int error;
 
+	if (bytes == 0 || bytes > UVM_GPU_DMA_MAXSIZE)
+		return (NV_ERR_INVALID_ARGUMENT);
 	error = bus_dmamem_alloc(gpu->dmat, kva, BUS_DMA_WAITOK | BUS_DMA_ZERO | BUS_DMA_COHERENT, map);
 	if (error != 0)
 		return (NV_ERR_NO_MEMORY);
@@ -235,7 +237,7 @@ uvm_gpu_add(const NvProcessorUuid *uuid, const UvmGpuClientInfo *client, struct 
 	/* 1. the glue: find the device, reference it, get the DMA window */
 	status = nvUvmInterfaceRegisterGpu(uuid, &gpu->platform);
 	if (status != NV_OK) {
-		uvm_log("GPU lookup by UUID failed: %s", uvm_status_name(status));
+		uvm_log_slow("GPU lookup by UUID failed: %s", uvm_status_name(status));
 		goto fail_free;
 	}
 	/* 2. describe it, select the HAL */
@@ -250,7 +252,7 @@ uvm_gpu_add(const NvProcessorUuid *uuid, const UvmGpuClientInfo *client, struct 
 		goto fail_unregister;
 
 	error = bus_dma_tag_create(bus_get_dma_tag((device_t)gpu->platform.dev), PAGE_SIZE, 0,
-	    gpu->platform.dma_addressable_limit, BUS_SPACE_MAXADDR, NULL, NULL, 64u << 20, 1, 64u << 20, 0,
+	    gpu->platform.dma_addressable_limit, BUS_SPACE_MAXADDR, NULL, NULL, UVM_GPU_DMA_MAXSIZE, 1, UVM_GPU_DMA_MAXSIZE, 0,
 	    NULL, NULL, &gpu->dmat);
 	if (error != 0) {
 		uvm_log("%s: DMA tag creation failed: %d", gpu->name, error);

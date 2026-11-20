@@ -57,8 +57,33 @@ their requests answer
 .Dv NV_ERR_INVALID_ADDRESS
 or
 .Dv NV_ERR_NOT_SUPPORTED
-as the specification prescribes and log the phase once.
+as the specification prescribes and log the phase at most once every ten seconds.
+The same limit applies to the message for a failed GPU lookup by UUID and
+to the logged
+.Va rmStatus
+of a failing request, so a client that retries in a loop cannot fill the
+kernel message buffer.
 Other GPU generations report themselves unsupported at registration.
+.Pp
+The Linuxulator runs a registered ioctl handler with Giant held.
+The driver releases Giant for the duration of each Linux ioctl and relies on
+it nowhere: its locks are
+.Xr sx 9
+and
+.Xr mutex 9
+locks of its own, and its task queues are not bound to Giant.
+Giant users such as USB enumeration therefore do not wait behind a long
+GPU mapping.
+The loops that build page tables yield the CPU between tables, and a
+mapping request stops with
+.Dv NV_ERR_SIGNAL_PENDING
+when the calling thread has a signal pending, after releasing the page
+tables it had taken.
+Unmapping does not stop early.
+Page tables and the probe page are single-page DMA allocations; the
+GPU DMA tag is one page in size, as
+.Xr bus_dma 9
+allocates the whole tag size per allocation.
 .Sh LOADER TUNABLES
 .Bl -tag -width indent
 .It Va hw.nvidia_uvm.builtin_tests

@@ -51,4 +51,7 @@ else
 	echo "FAIL uvm_ioctl_test does not compile"
 	rc=1
 fi
+for t in dma_tag_size_test giant_yield_log_test; do
+	if sh "$REPO/tests/$t.sh"; then :; else rc=1; fi
+done
 exit $rc

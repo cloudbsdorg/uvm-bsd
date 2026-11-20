@@ -61,6 +61,20 @@ MALLOC_DECLARE(M_NVIDIA_UVM);
 	if (ppsratecheck(&__lasttv, &__curpps, 4))			\
 		uvm_log(fmt, ##__VA_ARGS__);				\
 } while (0)
+/* at most one line per call site every 10 seconds: for messages a client can provoke in a loop (#2295) */
+#define	uvm_log_slow(fmt, ...) do {					\
+	static struct timeval __slowtv;					\
+	static const struct timeval __slowint = { 10, 0 };		\
+	if (ratecheck(&__slowtv, &__slowint))				\
+		uvm_log(fmt, ##__VA_ARGS__);				\
+} while (0)
+
+/*
+ * The GPU's DMA tag is as large as its largest allocation and no larger:
+ * bus_dmamem_alloc allocates the tag's maxsize, so a bigger tag turns every
+ * page table into a huge contiguous allocation (#2295).
+ */
+#define	UVM_GPU_DMA_MAXSIZE	PAGE_SIZE
 
 /* processor ids: 0 is the CPU, GPUs are 1..UVM_MAX_GPUS (03 section 1) */
 typedef uint16_t uvm_gpu_id_t;
@@ -368,7 +382,7 @@ struct uvm_gpu {
 	const struct uvm_hal_generation *gen;
 	uint32_t		mmu_version;
 	uint64_t		max_channel_va;
-	bus_dma_tag_t		dmat;		/* 4K page tables and buffers the GPU reads */
+	bus_dma_tag_t		dmat;		/* one-page tag: page tables and buffers the GPU reads */
 	struct uvm_channel_manager *chmgr;
 	struct taskqueue	*bh_tq;		/* bottom halves */
 	struct taskqueue	*kill_tq;	/* report non-replayable faults to RM */

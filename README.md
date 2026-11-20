@@ -29,6 +29,13 @@ Phases 0 and 1 of the specification's plan:
 | Policies, migration, range groups | bookkeeping on managed ranges; on other addresses `NV_ERR_INVALID_ADDRESS` as the spec says |
 | Peer access, device P2P, access counters, tools trackers | later phases: `NV_ERR_NOT_SUPPORTED`, logged once |
 
+Locking, memory and logging (Track #2295):
+
+- The Linuxulator calls a registered ioctl handler with Giant held. `uvm_linux_ioctl` drops Giant around `kern_ioctl` (`DROP_GIANT`/`PICKUP_GIANT`); nothing in the module relies on Giant (our `sx` and `mtx` locks, task queues not bound to Giant).
+- Page tables and probe pages come from a one-page DMA tag (`UVM_GPU_DMA_MAXSIZE`), because `bus_dmamem_alloc` allocates the tag's whole `maxsize`. `tests/dma_tag_size_test.sh` fails if a tag is larger than its allocations.
+- The long page-table loops call `maybe_yield()`; the map loop also stops with `NV_ERR_SIGNAL_PENDING` on a pending signal and unwinds its page-table references. Unmap yields but does not stop early.
+- "GPU lookup by UUID failed", the "not available yet" messages and the failing-request `rmStatus` line are limited to one per call site per ten seconds (`uvm_log_slow`).
+
 Nothing has been loaded or booted yet: see "First test boot" below.
 
 ## Layout

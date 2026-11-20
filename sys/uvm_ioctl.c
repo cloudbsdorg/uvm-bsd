@@ -51,7 +51,7 @@ struct uvm_request {
 };
 
 #define	UVM_NOT_YET(what, phase)						\
-	uvm_log_ratelimited("%s is not available yet (%s); answering NV_ERR_NOT_SUPPORTED", what, phase)
+	uvm_log_slow("%s is not available yet (%s); answering NV_ERR_NOT_SUPPORTED", what, phase)
 
 /*
  * CPD-OFF -- one adapter per request between the table's uniform handler
@@ -702,7 +702,7 @@ uvm_ioctl_dispatch(struct uvm_fd *fd, bool tools_node, uint32_t request, void *u
 			status = req->handler(fd, vas, params, td);
 		*uvm_rm_status_field(params, req->rm_status_offset) = status;
 		if (status != NV_OK)
-			uvm_log_ratelimited("%s: rmStatus 0x%x", req->name, (unsigned)status);
+			uvm_log_slow("%s: rmStatus 0x%x", req->name, (unsigned)status);
 	}
 	if (copyout(params, user_ptr, req->size) != 0)
 		error = EFAULT;
