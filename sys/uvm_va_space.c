@@ -246,7 +246,7 @@ uvm_channel_range_map(struct uvm_range *r, const UvmGpuChannelResourceInfo *res)
 
 	if (page_size != UVM_PAGE_SIZE_4K && page_size != UVM_PAGE_SIZE_64K && page_size != UVM_PAGE_SIZE_2M)
 		page_size = UVM_PAGE_SIZE_4K;
-	status = uvm_pt_range_vec_init(gvas->tree, r->core.start, size, page_size, &r->u.chan.ptes);
+	status = uvm_pt_range_vec_init(gvas->tree, r->core.start, size, page_size, true, &r->u.chan.ptes);
 	if (status != NV_OK)
 		return (status);
 	npages = size / page_size;
@@ -617,7 +617,7 @@ uvm_sema_pool_map_gpu(struct uvm_range *r, struct uvm_gpu_va_space *gvas)
 	m = malloc(sizeof(*m), M_NVIDIA_UVM, M_WAITOK | M_ZERO);
 	m->gpu = gvas->gpu;
 	m->cached = cached;
-	status = uvm_pt_range_vec_init(gvas->tree, r->core.start, size, UVM_PAGE_SIZE_4K, &m->ptes);
+	status = uvm_pt_range_vec_init(gvas->tree, r->core.start, size, UVM_PAGE_SIZE_4K, true, &m->ptes);
 	if (status != NV_OK) {
 		free(m, M_NVIDIA_UVM);
 		return (status);
@@ -1138,7 +1138,7 @@ uvm_ext_mapping_split_part(struct uvm_ext_mapping *m, struct uvm_gpu_va_space *g
 	if (p->handle != NULL)
 		refcount_acquire(&p->handle->refs);
 	uvm_tracker_init(&p->tracker);
-	status = uvm_pt_range_vec_init(gvas->tree, p->start, end - start + 1, m->ptes.page_size, &p->ptes);
+	status = uvm_pt_range_vec_init(gvas->tree, p->start, end - start + 1, m->ptes.page_size, false, &p->ptes);
 	if (status != NV_OK) {
 		uvm_tracker_deinit(&p->tracker);
 		uvm_ext_handle_unref(p->gpu, p->handle);
@@ -1277,7 +1277,7 @@ uvm_ext_map_one(struct uvm_va_space *vas, struct uvm_range *r, const UvmGpuMappi
 	m->handle = h;
 	m->is_sysmem = meminfo.sysmem != 0;
 	uvm_tracker_init(&m->tracker);
-	status = uvm_pt_range_vec_init(gvas->tree, m->start, p->length, page_size, &m->ptes);
+	status = uvm_pt_range_vec_init(gvas->tree, m->start, p->length, page_size, true, &m->ptes);
 	if (status == NV_OK)
 		status = uvm_ext_mapping_write(gvas, m, a, p->offset, p->length, page_size);
 	if (status == NV_OK)
@@ -1394,7 +1394,7 @@ uvm_vas_map_external_sparse(struct uvm_va_space *vas, UVM_MAP_EXTERNAL_SPARSE_PA
 	m->end = p->base + p->length - 1;
 	m->gpu = gpu;
 	uvm_tracker_init(&m->tracker);
-	status = uvm_pt_range_vec_init(gvas->tree, m->start, p->length, UVM_PAGE_SIZE_64K, &m->ptes);
+	status = uvm_pt_range_vec_init(gvas->tree, m->start, p->length, UVM_PAGE_SIZE_64K, true, &m->ptes);
 	if (status == NV_OK)
 		status = uvm_pt_range_vec_write_same(gvas->tree, &m->ptes, uvm_page_tree_sparse_pte(gvas->tree),
 		    UVM_MEMBAR_GPU, &m->tracker);
@@ -1503,7 +1503,7 @@ uvm_vas_map_dynamic_parallelism(struct uvm_va_space *vas, UVM_MAP_DYNAMIC_PARALL
 	r->u.sked.gpu = gpu;
 	sx_downgrade(&vas->lock);
 	uvm_tracker_init(&tracker);
-	status = uvm_pt_range_vec_init(gvas->tree, p->base, p->length, page_size, &r->u.sked.ptes);
+	status = uvm_pt_range_vec_init(gvas->tree, p->base, p->length, page_size, true, &r->u.sked.ptes);
 	if (status == NV_OK)
 		status = uvm_pt_range_vec_write_same(gvas->tree, &r->u.sked.ptes, uvm_page_tree_sked_pte(gvas->tree),
 		    UVM_MEMBAR_GPU, &tracker);

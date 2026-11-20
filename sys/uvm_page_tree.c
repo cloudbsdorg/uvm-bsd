@@ -22,6 +22,7 @@
  */
 
 #include "uvm.h"
+#include <sys/signalvar.h>
 #include "uvm_pt_refs.h"
 
 static inline uvm_aperture_t
@@ -83,6 +84,23 @@ struct uvm_pt_inval {
 	uint64_t	size;		/* 0: everything below the root */
 	uvm_membar_t	membar;
 };
+
+/*
+ * uvm_pt_yield - called between units of a long page-table loop (#2295).
+ * Always lets other threads run; with `intr` it also reports a pending
+ * signal (NV_ERR_SIGNAL_PENDING, the EINTR/ERESTART of sig_intr()), so a
+ * map that cannot finish stops and the caller unwinds its page-table
+ * references.  Clears and unmaps pass intr = false: stopping one would
+ * leave PTEs pointing at memory the caller is about to free.
+ */
+static NV_STATUS
+uvm_pt_yield(bool intr)
+{
+	maybe_yield();
+	if (intr && sig_intr() != 0)
+		return (NV_ERR_SIGNAL_PENDING);
+	return (NV_OK);
+}
 
 /*
  * uvm_pt_write - copy `bytes` of entry data to offset `off` of a table
@@ -457,6 +475,7 @@ uvm_page_tree_write_ptes(struct uvm_page_tree *tree, struct uvm_pt_range *range,
 		return (NV_ERR_INVALID_ARGUMENT);
 	buf = malloc(max_entries * esize, M_NVIDIA_UVM, M_WAITOK);
 	while (done < count) {
+		(void)uvm_pt_yield(false);
 		chunk = count - done;
 		if (chunk > max_entries)
 			chunk = max_entries;
@@ -506,13 +525,50 @@ uvm_page_tree_clear_ptes(struct uvm_page_tree *tree, struct uvm_pt_range *range,
  * size, one per table the run touches (a table covers 2M of 4K or 64K
  * pages, 512M of 2M pages).
  */
+struct uvm_pt_vec_kctx {
+	struct uvm_page_tree	*tree;
+	struct uvm_pt_range_vec	*vec;
+	uint64_t		page_size;
+};
+
+static NV_STATUS
+uvm_pt_vec_kget(void *ctx, unsigned n, uint64_t va, uint64_t piece)
+{
+	struct uvm_pt_vec_kctx *k = ctx;
+
+	return (uvm_page_tree_get_ptes(k->tree, k->page_size, va, piece, &k->vec->ranges[n]));
+}
+
+static void
+uvm_pt_vec_kput(void *ctx, unsigned n)
+{
+	struct uvm_pt_vec_kctx *k = ctx;
+
+	uvm_page_tree_put_ptes(k->tree, &k->vec->ranges[n]);
+}
+
+static NV_STATUS
+uvm_pt_vec_kyield(void *ctx, bool intr)
+{
+	(void)ctx;
+	return (uvm_pt_yield(intr));
+}
+
+static const struct uvm_pt_vec_ops uvm_pt_vec_kops = { uvm_pt_vec_kget, uvm_pt_vec_kput, uvm_pt_vec_kyield };
+
+/*
+ * `intr`: stop on a pending signal (NV_ERR_SIGNAL_PENDING) after the first
+ * table.  Pass false where the caller cannot undo a half-done operation,
+ * such as the split of a partial unmap.
+ */
 NV_STATUS
-uvm_pt_range_vec_init(struct uvm_page_tree *tree, uint64_t va, uint64_t size, uint64_t page_size,
+uvm_pt_range_vec_init(struct uvm_page_tree *tree, uint64_t va, uint64_t size, uint64_t page_size, bool intr,
     struct uvm_pt_range_vec *vec)
 {
 	uint64_t table_span = page_size == UVM_PAGE_SIZE_2M ? (1ULL << 29) : (1ULL << 21);
-	uint64_t cur = va, end = va + size;
-	unsigned n = 0, i;
+	uint64_t end = va + size;
+	struct uvm_pt_vec_kctx k = { tree, vec, page_size };
+	unsigned n = 0;
 	NV_STATUS status;
 
 	memset(vec, 0, sizeof(*vec));
@@ -524,25 +580,14 @@ uvm_pt_range_vec_init(struct uvm_page_tree *tree, uint64_t va, uint64_t size, ui
 	vec->count = (unsigned)(((end - 1) / table_span) - (va / table_span) + 1);
 	vec->ranges = malloc(sizeof(*vec->ranges) * vec->count, M_NVIDIA_UVM, M_WAITOK | M_ZERO);
 	sx_xlock(&tree->lock);
-	while (cur < end) {
-		uint64_t table_end = (cur / table_span + 1) * table_span;
-		uint64_t piece = (table_end < end ? table_end : end) - cur;
-
-		status = uvm_page_tree_get_ptes(tree, page_size, cur, piece, &vec->ranges[n]);
-		if (status != NV_OK) {
-			for (i = 0; i < n; i++)
-				uvm_page_tree_put_ptes(tree, &vec->ranges[i]);
-			sx_xunlock(&tree->lock);
-			free(vec->ranges, M_NVIDIA_UVM);
-			vec->ranges = NULL;
-			vec->count = 0;
-			return (status);
-		}
-		n++;
-		cur += piece;
-	}
+	status = uvm_pt_vec_build(&uvm_pt_vec_kops, &k, va, size, table_span, intr, &n);
 	sx_xunlock(&tree->lock);
-	return (NV_OK);
+	if (status != NV_OK) {
+		free(vec->ranges, M_NVIDIA_UVM);
+		vec->ranges = NULL;
+		vec->count = 0;
+	}
+	return (status);
 }
 
 void
@@ -572,6 +617,7 @@ uvm_pt_range_vec_write(struct uvm_page_tree *tree, struct uvm_pt_range_vec *vec,
 
 	sx_xlock(&tree->lock);
 	for (i = 0; i < vec->count && status == NV_OK; i++) {
+		(void)uvm_pt_yield(false);
 		status = uvm_page_tree_write_ptes(tree, &vec->ranges[i], 0, ptes + done, vec->ranges[i].count,
 		    membar, tracker);
 		done += vec->ranges[i].count;
@@ -589,8 +635,11 @@ uvm_pt_range_vec_write_same(struct uvm_page_tree *tree, struct uvm_pt_range_vec 
 	NV_STATUS status;
 
 	ptes = malloc(sizeof(uint64_t) * n, M_NVIDIA_UVM, M_WAITOK);
-	for (i = 0; i < n; i++)
+	for (i = 0; i < n; i++) {
+		if ((i & 0xfff) == 0)
+			(void)uvm_pt_yield(false);
 		ptes[i] = pte;
+	}
 	status = uvm_pt_range_vec_write(tree, vec, ptes, membar, tracker);
 	free(ptes, M_NVIDIA_UVM);
 	return (status);
@@ -604,8 +653,10 @@ uvm_pt_range_vec_clear(struct uvm_page_tree *tree, struct uvm_pt_range_vec *vec,
 	NV_STATUS status = NV_OK;
 
 	sx_xlock(&tree->lock);
-	for (i = 0; i < vec->count && status == NV_OK; i++)
+	for (i = 0; i < vec->count && status == NV_OK; i++) {
+		(void)uvm_pt_yield(false);
 		status = uvm_page_tree_clear_ptes(tree, &vec->ranges[i], membar, tracker);
+	}
 	sx_xunlock(&tree->lock);
 	return (status);
 }
@@ -648,6 +699,7 @@ uvm_pt_range_vec_clear_sub(struct uvm_page_tree *tree, struct uvm_pt_range_vec *
 
 		if (lo > hi)
 			continue;
+		(void)uvm_pt_yield(false);
 		count = (uint32_t)(hi - lo + 1);
 		ptes = malloc(sizeof(uint64_t) * count, M_NVIDIA_UVM, M_WAITOK);
 		for (j = 0; j < count; j++)

@@ -257,7 +257,17 @@ uvm_linux_ioctl(struct thread *td, struct linux_ioctl_args *args)
 	 * IOC_VOID with a zero size: the kernel hands the driver the pointer
 	 * to the argument word, so the parameter pointer travels unchanged.
 	 */
-	return (kern_ioctl(td, args->fd, native, (caddr_t)&arg));
+	/*
+	 * The Linuxulator takes Giant around every registered handler.  Nothing
+	 * below needs it (the handlers use sx, mutex and sleep locks of ours;
+	 * the task queues are not Giant-bound), and an ioctl can run for a
+	 * long time, so run it off Giant: USB enumeration and the other Giant
+	 * users must not wait behind a GPU mapping (#2295).
+	 */
+	DROP_GIANT();
+	error = kern_ioctl(td, args->fd, native, (caddr_t)&arg);
+	PICKUP_GIANT();
+	return (error);
 }
 
 static struct linux_ioctl_handler uvm_linux_handler = {

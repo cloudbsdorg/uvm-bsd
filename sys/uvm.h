@@ -49,6 +49,7 @@
 #include "uvm_pte.h"
 #include "uvm_mm_state.h"
 #include "uvm_unload_state.h"
+#include "uvm_pt_loop.h"
 
 MALLOC_DECLARE(M_NVIDIA_UVM);
 
@@ -60,6 +61,16 @@ MALLOC_DECLARE(M_NVIDIA_UVM);
 	static struct timeval __lasttv;					\
 	static int __curpps;						\
 	if (ppsratecheck(&__lasttv, &__curpps, 4))			\
+		uvm_log(fmt, ##__VA_ARGS__);				\
+} while (0)
+/* at most one line per call site every UVM_LOG_SLOW_SECS: for messages a client can provoke in a loop (#2295) */
+#define	uvm_log_slow(fmt, ...) do {					\
+	static struct timeval __slowtv;					\
+	static const struct timeval __slowint = { UVM_LOG_SLOW_SECS, 0 };	\
+	struct timeval __slownow;					\
+									\
+	getmicrouptime(&__slownow);					\
+	if (uvm_ratelimit_ok(&__slowtv, &__slowint, &__slownow))	\
 		uvm_log(fmt, ##__VA_ARGS__);				\
 } while (0)
 
@@ -292,7 +303,7 @@ struct uvm_pt_range_vec {
 };
 
 NV_STATUS uvm_pt_range_vec_init(struct uvm_page_tree *tree, uint64_t va, uint64_t size, uint64_t page_size,
-    struct uvm_pt_range_vec *vec);
+    bool intr, struct uvm_pt_range_vec *vec);
 void	uvm_pt_range_vec_deinit(struct uvm_page_tree *tree, struct uvm_pt_range_vec *vec);
 NV_STATUS uvm_pt_range_vec_write(struct uvm_page_tree *tree, struct uvm_pt_range_vec *vec, const uint64_t *ptes,
     uvm_membar_t membar, struct uvm_tracker *tracker);
@@ -369,7 +380,7 @@ struct uvm_gpu {
 	const struct uvm_hal_generation *gen;
 	uint32_t		mmu_version;
 	uint64_t		max_channel_va;
-	bus_dma_tag_t		dmat;		/* 4K page tables and buffers the GPU reads */
+	bus_dma_tag_t		dmat;		/* one-page tag: page tables and buffers the GPU reads */
 	struct uvm_channel_manager *chmgr;
 	struct taskqueue	*bh_tq;		/* bottom halves */
 	struct taskqueue	*kill_tq;	/* report non-replayable faults to RM */
