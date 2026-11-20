@@ -22,6 +22,7 @@
  */
 
 #include "uvm.h"
+#include "uvm_pt_refs.h"
 
 static inline uvm_aperture_t
 uvm_pt_aperture(void)
@@ -284,14 +285,18 @@ uvm_pt_child(struct uvm_page_tree *tree, struct uvm_page_table *parent, uint32_t
 	return (child);
 }
 
-/* drop one reference; a table with none left is unlinked, its PDE cleared, and freed */
+/*
+ * drop one reference; a table with none left is unlinked, its PDE cleared,
+ * and freed.  The root is counted down like any table (a freed child gives
+ * back the reference it held on its parent) but is never freed here.
+ */
 static void
 uvm_pt_put(struct uvm_page_tree *tree, struct uvm_page_table *t)
 {
 	struct uvm_page_table *parent;
 
-	while (t != NULL && t != tree->root) {
-		if (--t->refs > 0)
+	while (t != NULL) {
+		if (!uvm_pt_ref_release(&t->refs, t == tree->root))
 			return;
 		parent = t->parent;
 		parent->children[t->parent_half >= 0 ? 2 * t->parent_index + t->parent_half : t->parent_index] =
