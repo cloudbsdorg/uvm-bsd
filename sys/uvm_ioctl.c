@@ -675,6 +675,8 @@ uvm_ioctl_dispatch(struct uvm_fd *fd, bool tools_node, uint32_t request, void *u
 		else
 			status = req->handler(fd, vas, params, td);
 		*uvm_rm_status_field(params, req->rm_status_offset) = status;
+		if (status != NV_OK)
+			uvm_log_ratelimited("%s: rmStatus 0x%x", req->name, (unsigned)status);
 	}
 	if (copyout(params, user_ptr, req->size) != 0)
 		error = EFAULT;

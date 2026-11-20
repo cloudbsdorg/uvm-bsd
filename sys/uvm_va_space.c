@@ -19,6 +19,7 @@
 #include <sys/refcount.h>
 
 #include "uvm_ext_split.h"
+#include "uvm_ext_pte.h"
 
 /* ---- the range tree (03 section 4): the core's interval tree ---- */
 
@@ -248,7 +249,8 @@ uvm_channel_range_map(struct uvm_range *r, const UvmGpuChannelResourceInfo *res)
 	if (status != NV_OK)
 		return (status);
 	npages = size / page_size;
-	ptes = malloc(sizeof(uint64_t) * chunk, M_NVIDIA_UVM, M_WAITOK);
+	/* RM writes 16-byte entries for a 2M page (uvm_ext_pte.h): room for the larger */
+	ptes = malloc(uvm_ext_pte_entry_size(page_size) * chunk, M_NVIDIA_UVM, M_WAITOK);
 	while (done < npages) {
 		uint64_t want = npages - done;
 		unsigned i;
@@ -256,17 +258,18 @@ uvm_channel_range_map(struct uvm_range *r, const UvmGpuChannelResourceInfo *res)
 		if (want > chunk)
 			want = chunk;
 		memset(&info, 0, sizeof(info));
-		info.pteBufferSize = want * sizeof(uint64_t);
+		info.pteBufferSize = (uint64_t)want * uvm_ext_pte_entry_size(page_size);
 		info.pteBuffer = ptes;
-		info.mappingPageSize = page_size;
 		status = nvUvmInterfaceGetChannelResourcePtes(gvas->rm_as, res->resourceDescriptor, offset,
 		    want * page_size, &info);
 		if (status != NV_OK)
 			break;
-		if (info.pteSize != 8 || info.numWrittenPtes == 0 || info.numWrittenPtes > want) {
+		if (!uvm_ext_pte_size_ok(page_size, info.pteSize) || info.numWrittenPtes == 0 ||
+		    info.numWrittenPtes > want) {
 			status = NV_ERR_INVALID_STATE;
 			break;
 		}
+		uvm_ext_pte_compact(ptes, info.pteSize, info.numWrittenPtes);
 		sx_xlock(&gvas->tree->lock);
 		for (i = 0; i < r->u.chan.ptes.count && status == NV_OK; i++) {
 			struct uvm_pt_range *pr = &r->u.chan.ptes.ranges[i];
@@ -885,7 +888,8 @@ uvm_ext_mapping_write(struct uvm_gpu_va_space *gvas, struct uvm_ext_mapping *m, 
 	NV_STATUS status = NV_OK;
 	const uint32_t chunk = 512;
 
-	ptes = malloc(sizeof(uint64_t) * chunk, M_NVIDIA_UVM, M_WAITOK);
+	/* RM writes 16-byte entries for a 2M page (uvm_ext_pte.h): room for the larger */
+	ptes = malloc(uvm_ext_pte_entry_size(page_size) * chunk, M_NVIDIA_UVM, M_WAITOK);
 	while (done < npages) {
 		uint64_t want = npages - done;
 		unsigned i;
@@ -898,17 +902,19 @@ uvm_ext_mapping_write(struct uvm_gpu_va_space *gvas, struct uvm_ext_mapping *m, 
 		info.formatType = a->gpuFormatType;
 		info.elementBits = a->gpuElementBits;
 		info.compressionType = a->gpuCompressionType;
-		info.pteBufferSize = want * sizeof(uint64_t);
+		info.pteBufferSize = (uint64_t)want * uvm_ext_pte_entry_size(page_size);
 		info.pteBuffer = ptes;
 		info.mappingPageSize = page_size;
 		status = nvUvmInterfaceGetExternalAllocPtes(gvas->rm_as, m->handle->dup, offset + done * page_size,
 		    want * page_size, &info);
 		if (status != NV_OK)
 			break;
-		if (info.pteSize != 8 || info.numWrittenPtes == 0 || info.numWrittenPtes > want) {
+		if (!uvm_ext_pte_size_ok(page_size, info.pteSize) || info.numWrittenPtes == 0 ||
+		    info.numWrittenPtes > want) {
 			status = NV_ERR_INVALID_STATE;
 			break;
 		}
+		uvm_ext_pte_compact(ptes, info.pteSize, info.numWrittenPtes);
 		m->l2_invalidate_at_unmap |= info.bNeedL2InvalidateAtUnmap != 0;
 		sx_xlock(&gvas->tree->lock);
 		for (i = 0; i < m->ptes.count && status == NV_OK; i++) {
@@ -1351,8 +1357,9 @@ uvm_vas_map_dynamic_parallelism(struct uvm_va_space *vas, UVM_MAP_DYNAMIC_PARALL
 	struct uvm_gpu_va_space *gvas;
 	struct uvm_tracker tracker;
 	NV_STATUS status;
+	uint64_t page_size = uvm_sked_page_size(p->base, p->length);
 
-	if (!uvm_interval_ok(p->base, p->length, UVM_PAGE_SIZE_64K))
+	if (page_size == 0 || !uvm_interval_ok(p->base, p->length, UVM_PAGE_SIZE_4K))
 		return (NV_ERR_INVALID_ADDRESS);
 	sx_xlock(&vas->serialize);
 	sx_xlock(&vas->lock);
@@ -1372,7 +1379,7 @@ uvm_vas_map_dynamic_parallelism(struct uvm_va_space *vas, UVM_MAP_DYNAMIC_PARALL
 	r->u.sked.gpu = gpu;
 	sx_downgrade(&vas->lock);
 	uvm_tracker_init(&tracker);
-	status = uvm_pt_range_vec_init(gvas->tree, p->base, p->length, UVM_PAGE_SIZE_64K, &r->u.sked.ptes);
+	status = uvm_pt_range_vec_init(gvas->tree, p->base, p->length, page_size, &r->u.sked.ptes);
 	if (status == NV_OK)
 		status = uvm_pt_range_vec_write_same(gvas->tree, &r->u.sked.ptes, uvm_page_tree_sked_pte(gvas->tree),
 		    UVM_MEMBAR_GPU, &tracker);
