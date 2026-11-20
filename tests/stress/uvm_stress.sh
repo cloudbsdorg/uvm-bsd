@@ -28,6 +28,8 @@
 #               $GB10_WORK/logs/uvm-stress-<time>/, scratch to $GB10_WORK/tmp
 #   RUN_CUDA    the run script (default
 #               $GB10_WORK/nvidia-gb10-freebsd-uvm0/scripts/run-linux-cuda.sh)
+#   UVM_KO      the module file the -U probe reloads (default
+#               /boot/modules.nvtest/nvidia-uvm.ko)
 #   UVM_STRESS_NO_DEVICE_CHECK  set to 1 to skip the /dev/nvidia-uvm check
 #               (self test with a fake RUN_CUDA)
 # Run as the ordinary user, with nvidia.ko and nvidia-uvm.ko loaded.
@@ -93,6 +95,7 @@ cleanup() {
 	for p in $(cat "$T"/w/*.pid "$T"/c/*.pid 2>/dev/null); do
 		kill -9 "$p" 2>/dev/null
 	done
+	[ -n "${HOLDER:-}" ] && kill "$HOLDER" 2>/dev/null
 	rm -rf "$T"
 }
 trap cleanup EXIT
@@ -228,23 +231,41 @@ churn_loop() {
 	echo $! >"$T/c/$1.pid"
 }
 
-# try to unload the module under load; EBUSY is the right answer
+# try to unload the module under load; EBUSY is the right answer.  With -U a
+# holder process keeps /dev/nvidia-uvm open for the whole run, so a refusal
+# is certain to be owed: an unload that succeeds while the holder lives is a
+# failure of the unload gate (Track #2272), whatever the workers are doing.
+# The loaded file is nvidia-uvm.ko (a hyphen), so kldunload names the file;
+# the reload uses UVM_KO, because the module may live outside module_path.
+UVM_KO=${UVM_KO:-/boot/modules.nvtest/nvidia-uvm.ko}
+holder_start() {
+	sh -c 'exec 3</dev/nvidia-uvm; exec sleep 86400' &
+	HOLDER=$!
+	sleep 1
+}
+holder_alive() {
+	[ -n "${HOLDER:-}" ] && kill -0 "$HOLDER" 2>/dev/null
+}
 unload_probe() {
-	if ! doas kldunload nvidia_uvm >"$T/unload.out" 2>&1; then
+	if ! doas kldunload nvidia-uvm >"$T/unload.out" 2>&1; then
 		UNLOAD_REFUSED=$((UNLOAD_REFUSED + 1))
 		return 0
 	fi
 	UNLOAD_DONE=$((UNLOAD_DONE + 1))
-	if [ "$(live_workers)" -gt 0 ]; then
+	if holder_alive; then
+		log "FAIL: nvidia-uvm unloaded while a holder kept /dev/nvidia-uvm open (the unload gate did not hold)"
+		RESULT=1
+	elif [ "$(live_workers)" -gt 0 ]; then
 		log "unload succeeded with $(live_workers) workers recorded; reloading (workers may have been between runs)"
 	fi
-	doas kldload nvidia_uvm >>"$LOGDIR/run.log" 2>&1 || {
-		log "FAIL: kldload nvidia_uvm after an unload failed"
+	doas kldload "$UVM_KO" >>"$LOGDIR/run.log" 2>&1 || {
+		log "FAIL: kldload $UVM_KO after an unload failed"
 		RESULT=1
 	}
 }
 
 log "start: $MINUTES min, $JOBS workers, $CHURN churn loops, seed $SEED, unload probe $UNLOAD, logs $LOGDIR"
+[ "$UNLOAD" -eq 1 ] && holder_start
 i=1
 while [ "$i" -le "$CHURN" ]; do
 	churn_loop "$i"
