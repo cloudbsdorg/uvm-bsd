@@ -215,6 +215,7 @@ int	uvm_channel_manager_create(struct uvm_gpu *gpu);
 void	uvm_channel_manager_destroy(struct uvm_gpu *gpu);
 NV_STATUS uvm_push_begin(struct uvm_gpu *gpu, struct uvm_push *push, const struct uvm_tracker *acquire);
 void	uvm_push_end(struct uvm_push *push);
+void	uvm_push_end_host_sem(struct uvm_push *push);
 NV_STATUS uvm_push_wait(struct uvm_push *push);
 NV_STATUS uvm_push_end_and_wait(struct uvm_push *push);
 void	uvm_push_inline_data(struct uvm_push *push, const void *data, size_t bytes, uint64_t *gpu_va_out);
@@ -663,6 +664,10 @@ struct uvm_global {
 	int			fault_batch_count;
 	int			wait_timeout_ms;
 	int			sysmem_gpfifo;
+	/* Xid 71 diagnostics (default off, no behaviour change unless set) */
+	int			debug_push;	/* log the first N pushes, GPFIFO entries, PUT and doorbell */
+	int			init_probe;	/* staged channel initialisation probe (see uvm_channel.c) */
+	int			ce_bind_subch4;	/* also SET_OBJECT the copy class on subchannel 4 (Q-008) */
 };
 
 extern struct uvm_global uvm;

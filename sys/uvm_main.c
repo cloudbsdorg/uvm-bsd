@@ -69,6 +69,12 @@ SYSCTL_INT(_hw_nvidia_uvm, OID_AUTO, wait_timeout_ms, CTLFLAG_RWTUN, &uvm.wait_t
     "milliseconds a wait on GPU work may take before it is a fatal error");
 SYSCTL_INT(_hw_nvidia_uvm, OID_AUTO, sysmem_gpfifo, CTLFLAG_RDTUN, &uvm.sysmem_gpfifo, 0,
     "place the GPFIFO ring and PUT word in system memory (1) or video memory (0)");
+SYSCTL_INT(_hw_nvidia_uvm, OID_AUTO, debug_push, CTLFLAG_RDTUN, &uvm.debug_push, 0,
+    "log the method stream, GPFIFO entry, GP_PUT and doorbell of the first N pushes (0: off, max 64)");
+SYSCTL_INT(_hw_nvidia_uvm, OID_AUTO, init_probe, CTLFLAG_RDTUN, &uvm.init_probe, 0,
+    "staged channel initialisation (1: host-class semaphores only, then the copy engine) with a log line per stage");
+SYSCTL_INT(_hw_nvidia_uvm, OID_AUTO, ce_bind_subch4, CTLFLAG_RDTUN, &uvm.ce_bind_subch4, 0,
+    "also bind the copy class on subchannel 4 during channel initialisation (experiment, spec question Q-008)");
 SYSCTL_UINT(_hw_nvidia_uvm, OID_AUTO, fatal_error, CTLFLAG_RD, &uvm.fatal_error, 0,
     "the module-wide fatal status (0 = NV_OK)");
 

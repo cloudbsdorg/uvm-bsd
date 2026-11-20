@@ -76,6 +76,19 @@ error; default 30000.
 .It Va hw.nvidia_uvm.sysmem_gpfifo
 Place the GPFIFO ring and PUT word in system memory (1, the default) or
 video memory (0).
+.It Va hw.nvidia_uvm.debug_push
+Log the method stream, GPFIFO entry, GP_PUT and doorbell value of the first
+N pushes (at most 64), and the GPU addresses of each channel's GPFIFO,
+GP_PUT, doorbell, pushbuffer and tracking semaphore; default 0 (off).
+.It Va hw.nvidia_uvm.init_probe
+Run channel initialisation in stages, each followed by a host-class semaphore
+release and a log line, with the copy engine first used in the last stage;
+default 0.
+Diagnostic for a copy-engine error during the first push.
+.It Va hw.nvidia_uvm.ce_bind_subch4
+Also bind the copy class on subchannel 4 during channel initialisation;
+default 0.
+Diagnostic, see spec question Q-008.
 .El
 .Sh SYSCTL VARIABLES
 .Bl -tag -width indent

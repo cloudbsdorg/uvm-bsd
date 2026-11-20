@@ -25,10 +25,68 @@
  */
 
 #include "uvm.h"
+#include "uvm_debug.h"
 
 #include <sys/sbuf.h>
 
 #define	UVM_CHANNEL_INIT_WORDS	16
+
+/*
+ * hw.nvidia_uvm.debug_push diagnostics: the method stream, GPFIFO entry,
+ * GP_PUT and doorbell of the first N pushes, and the GPU VAs involved.
+ * Reads state only; it never changes what is sent to the GPU.
+ */
+static unsigned uvm_debug_pushes_logged;
+
+static bool
+uvm_debug_push_enabled(void)
+{
+	return (uvm.debug_push > 0 && uvm_debug_pushes_logged < (unsigned)uvm.debug_push &&
+	    uvm_debug_pushes_logged < UVM_DEBUG_PUSH_MAX);
+}
+
+static void
+uvm_debug_log_stream(const struct uvm_channel *ch, const struct uvm_push *push, uint32_t words)
+{
+	char line[200];
+	uint32_t pos = 0;
+	size_t used;
+
+	uvm_log("debug_push: ch%u push #%u: pushbuffer slot %d va %#jx, %u words", ch->index,
+	    uvm_debug_pushes_logged, push->slot, (uintmax_t)push->gpu_va, words);
+	while (pos < words) {
+		used = uvm_debug_describe_method(line, sizeof(line), push->begin + pos, words - pos);
+		uvm_log("debug_push:   +%#06x  %s", pos * 4, line);
+		pos += (uint32_t)used;
+	}
+}
+
+static void
+uvm_debug_log_gpfifo(const struct uvm_channel *ch, uint32_t index, uint64_t entry)
+{
+	char line[200];
+
+	uvm_debug_describe_gpfifo(line, sizeof(line), entry);
+	uvm_log("debug_push: ch%u GPFIFO[%u] @cpu %p = %s", ch->index, index,
+	    (const void *)&ch->info.gpFifoEntries[index], line);
+}
+
+static void
+uvm_debug_log_channel(const struct uvm_channel *ch)
+{
+	const UvmGpuChannelInfo *i = &ch->info;
+
+	uvm_log("debug_push: ch%u hw runlist %u channel %u class %#x: GPFIFO va %#jx (cpu %p, %u entries), "
+	    "GP_PUT va %#jx (cpu %p), GP_GET va %#jx, doorbell va %#jx cpu %p token %#x, dummy BAR1 %p",
+	    ch->index, i->hwRunlistId, i->hwChannelId, i->channelClassNum, (uintmax_t)i->gpFifoGpuVa,
+	    (void *)i->gpFifoEntries, i->numGpFifoEntries, (uintmax_t)i->gpPutGpuVa, (void *)i->gpPut,
+	    (uintmax_t)i->gpGetGpuVa, (uintmax_t)i->workSubmissionOffsetGpuVa,
+	    (void *)i->workSubmissionOffset, i->workSubmissionToken, (void *)i->dummyBar1Mapping);
+	uvm_log("debug_push: ch%u tracking semaphore va %#jx cpu %p; pushbuffer va %#jx cpu %p size %#x; "
+	    "GPFIFO in %s memory", ch->index, (uintmax_t)ch->sema_gpu_va, (const void *)ch->sema_cpu,
+	    (uintmax_t)ch->mgr->pb.gpu_va, (void *)ch->mgr->pb.cpu, UVM_PUSHBUFFER_SIZE,
+	    uvm.sysmem_gpfifo ? "system" : "video");
+}
 
 static inline void
 uvm_doorbell_barrier(void)
@@ -389,23 +447,30 @@ uvm_push_inline_data(struct uvm_push *push, const void *data, size_t bytes, uint
 }
 
 /*
- * uvm_push_end - append the tracking semaphore release, write the GPFIFO
- * entry, PUT and the doorbell (04 section 1.2 and 2.2).
+ * uvm_push_end_common - append the tracking semaphore release, write the
+ * GPFIFO entry, PUT and the doorbell (04 section 1.2 and 2.2).  The release
+ * is a copy-engine release (the spec's end-of-push); the probe variant uses
+ * a host-class release so a channel can be exercised without any copy-engine
+ * method (hw.nvidia_uvm.init_probe).
  */
-void
-uvm_push_end(struct uvm_push *push)
+static void
+uvm_push_end_common(struct uvm_push *push, bool host_sem)
 {
 	struct uvm_channel *ch = push->channel;
 	struct uvm_gpfifo_entry_state *e;
 	uint64_t value, entry;
 	uint32_t *w, words;
 	size_t n;
+	bool dbg = uvm_debug_push_enabled();
 
 	mtx_lock(&ch->lock);
 	value = ++ch->queued_value;
 	push->end = push->begin + UVM_PUSH_MAX_WORDS;
 	w = uvm_push_space(push, UVM_CE_SEM_MAX_WORDS);
-	n = uvm_ce_semaphore_release(w, ch->sema_gpu_va, (uint32_t)value, UVM_MEMBAR_SYS);
+	if (host_sem)
+		n = uvm_host_semaphore_release(w, ch->sema_gpu_va, (uint32_t)value);
+	else
+		n = uvm_ce_semaphore_release(w, ch->sema_gpu_va, (uint32_t)value, UVM_MEMBAR_SYS);
 	push->next = w + n;
 	words = (uint32_t)(push->next - push->begin);
 
@@ -414,6 +479,10 @@ uvm_push_end(struct uvm_push *push)
 	e->pb_slot = push->slot;
 	entry = uvm_gpfifo_entry(push->gpu_va, words);
 	ch->info.gpFifoEntries[ch->cpu_put] = entry;
+	if (dbg) {
+		uvm_debug_log_stream(ch, push, words);
+		uvm_debug_log_gpfifo(ch, ch->cpu_put, entry);
+	}
 	wmb();
 	ch->cpu_put = (ch->cpu_put + 1) % ch->num_gpfifo;
 	*ch->info.gpPut = ch->cpu_put;
@@ -423,10 +492,28 @@ uvm_push_end(struct uvm_push *push)
 	if (ch->info.dummyBar1Mapping != NULL)
 		(void)*ch->info.dummyBar1Mapping;
 	uvm_doorbell_barrier();
+	if (dbg) {
+		uvm_log("debug_push: ch%u GP_PUT <- %u (%s release value %ju), doorbell %p <- %#x", ch->index,
+		    ch->cpu_put, host_sem ? "host" : "copy-engine", (uintmax_t)value,
+		    (void *)ch->info.workSubmissionOffset, ch->info.workSubmissionToken);
+		uvm_debug_pushes_logged++;
+	}
 	*ch->info.workSubmissionOffset = ch->info.workSubmissionToken;
 	uvm_doorbell_barrier();
 	mtx_unlock(&ch->lock);
 	push->value = value;
+}
+
+void
+uvm_push_end(struct uvm_push *push)
+{
+	uvm_push_end_common(push, false);
+}
+
+void
+uvm_push_end_host_sem(struct uvm_push *push)
+{
+	uvm_push_end_common(push, true);
 }
 
 NV_STATUS
@@ -445,9 +532,79 @@ uvm_push_end_and_wait(struct uvm_push *push)
 /* ---- channel manager (04 section 2) ---- */
 
 /*
+ * uvm_channel_probe_stage - one stage of the staged initialisation: the
+ * methods `fn` adds (may be NULL for none), a host-class semaphore release,
+ * a wait.  The log line names the stage so a later Xid 71 in the system log
+ * can be matched to the last stage that did not complete.
+ */
+static NV_STATUS
+uvm_channel_probe_stage(struct uvm_channel *ch, const char *name, uint32_t subch, uint32_t class_num)
+{
+	struct uvm_push push;
+	NV_STATUS status;
+
+	status = uvm_push_begin_on(ch, &push, NULL);
+	if (status != NV_OK)
+		return (status);
+	if (class_num != 0)
+		UVM_PUSH(&push, uvm_host_set_object, subch, class_num);
+	uvm_log("ch%u init probe: stage '%s' sent (host-class semaphore release follows it)", ch->index, name);
+	uvm_push_end_host_sem(&push);
+	status = uvm_push_wait(&push);
+	if (status == NV_OK)
+		uvm_log("ch%u init probe: stage '%s' completed", ch->index, name);
+	else
+		uvm_log("ch%u init probe: stage '%s' FAILED: %s", ch->index, name, uvm_status_name(status));
+	return (status);
+}
+
+/*
+ * uvm_channel_init_probe - hw.nvidia_uvm.init_probe=1: the same work as
+ * uvm_channel_init_push, split so the first stage that makes the GPU raise
+ * an error is known: (0) nothing but a host semaphore release, which proves
+ * the GPFIFO, PUT, doorbell, pushbuffer VA and the tracking semaphore VA
+ * without any class bound; (1) SET_OBJECT of the copy class on subchannel 0;
+ * (2) SET_OBJECT of the software class on subchannel 5; (3) when
+ * ce_bind_subch4 is set, SET_OBJECT of the copy class on subchannel 4;
+ * (4) the end-of-push copy-engine semaphore release, the first copy-engine
+ * method the module ever sends.
+ */
+static NV_STATUS
+uvm_channel_init_probe(struct uvm_channel *ch)
+{
+	struct uvm_push push;
+	NV_STATUS status;
+	uint32_t ce = ch->mgr->gpu->info.ceClass;
+
+	status = uvm_channel_probe_stage(ch, "0 host semaphore only", 0, 0);
+	if (status == NV_OK)
+		status = uvm_channel_probe_stage(ch, "1 SET_OBJECT copy class subch 0", UVM_SUBCH_HOST, ce);
+	if (status == NV_OK)
+		status = uvm_channel_probe_stage(ch, "2 SET_OBJECT software class subch 5", UVM_SUBCH_SW,
+		    UVM_SW_CLASS);
+	if (status == NV_OK && uvm.ce_bind_subch4)
+		status = uvm_channel_probe_stage(ch, "3 SET_OBJECT copy class subch 4", UVM_SUBCH_CE, ce);
+	if (status != NV_OK)
+		return (status);
+	status = uvm_push_begin_on(ch, &push, NULL);
+	if (status != NV_OK)
+		return (status);
+	uvm_log("ch%u init probe: stage '4 copy-engine semaphore release' sent", ch->index);
+	status = uvm_push_end_and_wait(&push);
+	if (status == NV_OK)
+		uvm_log("ch%u init probe: stage '4 copy-engine semaphore release' completed", ch->index);
+	else
+		uvm_log("ch%u init probe: stage '4 copy-engine semaphore release' FAILED: %s", ch->index,
+		    uvm_status_name(status));
+	return (status);
+}
+
+/*
  * uvm_channel_init_push - the channel's first work: the pushbuffer segment
  * base control entry (Hopper and Blackwell), then SET_OBJECT of the copy
- * class on subchannel 0 and of the software class on subchannel 5.
+ * class on subchannel 0 and of the software class on subchannel 5 (04
+ * section 1.1).  With hw.nvidia_uvm.ce_bind_subch4 the copy class is also
+ * bound on subchannel 4, where every copy-engine method is issued (Q-008).
  */
 static NV_STATUS
 uvm_channel_init_push(struct uvm_channel *ch)
@@ -455,21 +612,31 @@ uvm_channel_init_push(struct uvm_channel *ch)
 	struct uvm_push push;
 	NV_STATUS status;
 
+	if (uvm.debug_push > 0)
+		uvm_debug_log_channel(ch);
 	if (ch->mgr->gpu->gen->needs_pb_segment_base) {
+		uint64_t entry = uvm_gpfifo_segment_base_entry(ch->mgr->pb.gpu_va);
+
 		mtx_lock(&ch->lock);
 		ch->entries[ch->cpu_put].tracking_value = 0;
 		ch->entries[ch->cpu_put].pb_slot = -1;
-		ch->info.gpFifoEntries[ch->cpu_put] = uvm_gpfifo_segment_base_entry(ch->mgr->pb.gpu_va);
+		ch->info.gpFifoEntries[ch->cpu_put] = entry;
+		if (uvm_debug_push_enabled())
+			uvm_debug_log_gpfifo(ch, ch->cpu_put, entry);
 		ch->cpu_put = (ch->cpu_put + 1) % ch->num_gpfifo;
 		ch->pending++;	/* retired with the first real push's value */
 		mtx_unlock(&ch->lock);
 	}
 	ch->initialised = true;
+	if (uvm.init_probe)
+		return (uvm_channel_init_probe(ch));
 	status = uvm_push_begin_on(ch, &push, NULL);
 	if (status != NV_OK)
 		return (status);
 	UVM_PUSH(&push, uvm_host_set_object, UVM_SUBCH_HOST, ch->mgr->gpu->info.ceClass);
 	UVM_PUSH(&push, uvm_host_set_object, UVM_SUBCH_SW, UVM_SW_CLASS);
+	if (uvm.ce_bind_subch4)
+		UVM_PUSH(&push, uvm_host_set_object, UVM_SUBCH_CE, ch->mgr->gpu->info.ceClass);
 	return (uvm_push_end_and_wait(&push));
 }
 

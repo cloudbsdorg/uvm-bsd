@@ -69,7 +69,7 @@ depends on `nvidia` (with the UVM glue), `linux64elf` (arm64) or `linux`
 
 `hw.nvidia_uvm.builtin_tests` (0), `enable_va_space_mm` (1),
 `gpfifo_entries` (1024), `fault_batch_count` (256), `wait_timeout_ms`
-(30000), `sysmem_gpfifo` (1). Read-only: `hw.nvidia_uvm.fatal_error`,
+(30000), `sysmem_gpfifo` (1); diagnostics, default 0: `debug_push`, `init_probe`, `ce_bind_subch4`. Read-only: `hw.nvidia_uvm.fatal_error`,
 `hw.nvidia_uvm.gpus`. See `nvidia-uvm(4)`.
 
 ## First test boot
