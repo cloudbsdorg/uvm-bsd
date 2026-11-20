@@ -554,7 +554,7 @@ uvm_ce_memcopy(uint32_t *w, const struct uvm_gpu_address *dst, const struct uvm_
  * elements.
  */
 /* probe-only memset variants (hw.nvidia_uvm.init_probe_work); defaults use none */
-#define	UVM_CE_MEMSET_X_SRC_PITCH	0x1u	/* LAUNCH_DMA source layout PITCH (bit 7) */
+#define	UVM_CE_MEMSET_X_BLOCKLINEAR	0x1u	/* probe only: source layout block-linear (raised Xid 71) */
 #define	UVM_CE_MEMSET_X_EXPLICIT_REMAP	0x2u	/* remap DST_Z and DST_W NO_WRITE */
 #define	UVM_CE_MEMSET_X_LINE_COUNT	0x4u	/* LINE_COUNT = 1 before the launch */
 
@@ -575,7 +575,12 @@ uvm_ce_memset_8_x(uint32_t *w, const struct uvm_gpu_address *dst, uint64_t value
 	w[n++] = uvm_method_header(UVM_METHOD_INCR, UVM_SUBCH_CE, UVM_CE_SET_REMAP_CONST_A, 3);
 	w[n++] = (uint32_t)value;
 	w[n++] = (uint32_t)(value >> 32);
-	if (xflags & UVM_CE_MEMSET_X_SRC_PITCH)
+	/*
+	 * Source layout PITCH on every memset (test boot 5, Q-010): left at the
+	 * hardware default, block-linear, the engine raised Xid 71 even with a
+	 * virtual destination; with PITCH set the same memset completes.
+	 */
+	if (!(xflags & UVM_CE_MEMSET_X_BLOCKLINEAR))
 		base |= UVM_CE_LAUNCH_SRC_PITCH;
 	/* X from const A, Y from const B, 4-byte components, two destination components */
 	w[n++] = 4u | (5u << 4) | (3u << 16) | (1u << 24);

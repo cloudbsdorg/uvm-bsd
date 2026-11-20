@@ -578,6 +578,13 @@ uvm_channel_probe_stage(struct uvm_channel *ch, const char *name, uint32_t subch
  */
 #define	UVM_PROBE_OFF_COPY	0x800u
 #define	UVM_PROBE_OFF_SET	0x808u
+/*
+ * CPU address of a BYTE offset in the semaphore page.  sema_cpu is a
+ * uint32_t pointer: adding a byte offset to it directly scales by 4 (the
+ * boot-4/5 probe read and wrote four times too far, past the page, which is
+ * why "the CPU saw no copy-engine write").
+ */
+#define	UVM_PROBE_SLOT(ch, off)	((volatile uint8_t *)(ch)->mgr->sema_cpu + (off))
 #define	UVM_PROBE_FILL		0xa5u
 #define	UVM_PROBE_VALUE		0x1122334455667788ull
 
@@ -587,15 +594,36 @@ struct uvm_probe_page {
 	bus_addr_t	bus;
 };
 
+static void uvm_probe_c_check(struct uvm_channel *ch, struct uvm_probe_page *pp, unsigned bit,
+    const char *name, volatile uint8_t *cpu, bool word32, uint64_t want);
+
+static void
+uvm_probe_a_build(struct uvm_push *push, struct uvm_gpu_address *dst, unsigned bit, uvm_membar_t membar)
+{
+	struct uvm_gpu_address src;
+	uint64_t data = UVM_PROBE_VALUE, src_va, size = bit == 1 ? 8 : PAGE_SIZE;
+	uint32_t *w;
+
+	if (bit == 0 || bit == 2) {
+		uvm_push_inline_data(push, &data, sizeof(data), &src_va);
+		src.address = src_va;
+		src.is_virtual = 1;
+		src.aperture = UVM_APERTURE_SYS;
+		w = uvm_push_space(push, uvm_ce_memcopy_words(sizeof(data)));
+		push->next = w + uvm_ce_memcopy(w, dst, &src, sizeof(data), membar, 0);
+	} else {
+		w = uvm_push_space(push, UVM_CE_MEMSET_MAX_WORDS(size));
+		push->next = w + uvm_ce_memset_8(w, dst, data, size, membar);
+	}
+}
+
 static NV_STATUS
 uvm_probe_work_stage(struct uvm_channel *ch, struct uvm_probe_page *pp, unsigned bit, const char *name)
 {
 	struct uvm_gpu *gpu = ch->mgr->gpu;
 	struct uvm_push push;
-	struct uvm_gpu_address dst, src;
+	struct uvm_gpu_address dst;
 	NV_STATUS status;
-	uint64_t data = UVM_PROBE_VALUE, src_va;
-	uint32_t *w;
 	volatile uint64_t *vdst;
 	bool phys = bit >= 2, host_marker = bit <= 2 || bit == 7;
 	uvm_membar_t membar = bit == 3 ? UVM_MEMBAR_NONE : UVM_MEMBAR_SYS;
@@ -609,19 +637,7 @@ uvm_probe_work_stage(struct uvm_channel *ch, struct uvm_probe_page *pp, unsigned
 		dst.address = uvm_gpu_dma_address(gpu, pp->bus);
 	else
 		dst.address = ch->mgr->sema_gpu_va + (bit == 0 ? UVM_PROBE_OFF_COPY : UVM_PROBE_OFF_SET);
-	if (bit == 0 || bit == 2) {
-		uvm_push_inline_data(&push, &data, sizeof(data), &src_va);
-		src.address = src_va;
-		src.is_virtual = 1;
-		src.aperture = UVM_APERTURE_SYS;
-		w = uvm_push_space(&push, uvm_ce_memcopy_words(sizeof(data)));
-		push.next = w + uvm_ce_memcopy(w, &dst, &src, sizeof(data), membar, 0);
-	} else {
-		uint64_t size = bit == 1 ? 8 : PAGE_SIZE;
-
-		w = uvm_push_space(&push, UVM_CE_MEMSET_MAX_WORDS(size));
-		push.next = w + uvm_ce_memset_8(w, &dst, data, size, membar);
-	}
+	uvm_probe_a_build(&push, &dst, bit, membar);
 	if (bit <= 2 || bit >= 5)
 		UVM_PUSH(&push, uvm_host_wfi);
 	if (bit == 6)
@@ -636,19 +652,9 @@ uvm_probe_work_stage(struct uvm_channel *ch, struct uvm_probe_page *pp, unsigned
 		uvm_log("ch%u probe work: stage %u '%s' FAILED: %s", ch->index, bit, name, uvm_status_name(status));
 		return (status);
 	}
-	if (phys)
-		bus_dmamap_sync(gpu->dmat, pp->map, BUS_DMASYNC_POSTREAD);
 	vdst = phys ? (volatile uint64_t *)pp->kva :
-	    (volatile uint64_t *)(ch->mgr->sema_cpu + (bit == 0 ? UVM_PROBE_OFF_COPY : UVM_PROBE_OFF_SET));
-	if (*vdst != UVM_PROBE_VALUE)
-		uvm_log("ch%u probe work: stage %u '%s' completed but the data is %#jx, expected %#jx", ch->index,
-		    bit, name, (uintmax_t)*vdst, (uintmax_t)UVM_PROBE_VALUE);
-	else
-		uvm_log("ch%u probe work: stage %u '%s' completed, data verified", ch->index, bit, name);
-	if (phys) {
-		memset(pp->kva, UVM_PROBE_FILL, PAGE_SIZE);
-		bus_dmamap_sync(gpu->dmat, pp->map, BUS_DMASYNC_PREREAD | BUS_DMASYNC_PREWRITE);
-	}
+	    (volatile uint64_t *)(UVM_PROBE_SLOT(ch, bit == 0 ? UVM_PROBE_OFF_COPY : UVM_PROBE_OFF_SET));
+	uvm_probe_c_check(ch, phys ? pp : NULL, bit, name, (volatile uint8_t *)vdst, false, UVM_PROBE_VALUE);
 	return (NV_OK);
 }
 
@@ -686,8 +692,8 @@ uvm_probe_work_stage_b(struct uvm_channel *ch, unsigned bit, const char *name)
 	src.address = ch->mgr->sema_gpu_va + 0x828;
 	src.is_virtual = 1;
 	src.aperture = UVM_APERTURE_SYS;
-	*(volatile uint64_t *)(ch->mgr->sema_cpu + 0x828) = UVM_PROBE_VALUE;
-	*(volatile uint64_t *)(ch->mgr->sema_cpu + off) = 0;
+	*(volatile uint64_t *)(UVM_PROBE_SLOT(ch, 0x828)) = UVM_PROBE_VALUE;
+	*(volatile uint64_t *)(UVM_PROBE_SLOT(ch, off)) = 0;
 	status = uvm_push_begin_on(ch, &push, NULL);
 	if (status != NV_OK)
 		return (status);
@@ -701,8 +707,8 @@ uvm_probe_work_stage_b(struct uvm_channel *ch, unsigned bit, const char *name)
 	} else {
 		if (bit == 11 || bit == 13)
 			xf |= UVM_CE_MEMSET_X_EXPLICIT_REMAP | UVM_CE_MEMSET_X_LINE_COUNT;
-		if (bit == 11 || bit == 12)
-			xf |= UVM_CE_MEMSET_X_SRC_PITCH;
+		if (bit == 13)
+			xf |= UVM_CE_MEMSET_X_BLOCKLINEAR;
 		w = uvm_push_space(&push, UVM_CE_MEMSET_MAX_WORDS(8));
 		push.next = w + uvm_ce_memset_8_x(w, &dst, UVM_PROBE_VALUE, 8, UVM_MEMBAR_SYS, xf);
 	}
@@ -714,7 +720,7 @@ uvm_probe_work_stage_b(struct uvm_channel *ch, unsigned bit, const char *name)
 		uvm_log("ch%u probe work: stage %u '%s' FAILED: %s", ch->index, bit, name, uvm_status_name(status));
 		return (status);
 	}
-	got = bit == 8 ? *(volatile uint32_t *)(ch->mgr->sema_cpu + off) : *(volatile uint64_t *)(ch->mgr->sema_cpu + off);
+	got = bit == 8 ? *(volatile uint32_t *)(UVM_PROBE_SLOT(ch, off)) : *(volatile uint64_t *)(UVM_PROBE_SLOT(ch, off));
 	if (got != want)
 		uvm_log("ch%u probe work: stage %u '%s' completed but the data is %#jx, expected %#jx", ch->index,
 		    bit, name, (uintmax_t)got, (uintmax_t)want);
@@ -723,17 +729,149 @@ uvm_probe_work_stage_b(struct uvm_channel *ch, unsigned bit, const char *name)
 	return (NV_OK);
 }
 
+/*
+ * Boot-6 stages, bits 14-21 of init_probe_work: why does the CPU read nothing
+ * a copy-engine write put in the semaphore page (boot 5: stages 8-12 all read
+ * 0, while the copy-engine semaphore that ends every push IS seen)?  Suspect:
+ * a host-class release after host WFI is not ordered after the copy engine's
+ * work, so the CPU looked too early.  After every stage that ends in a host
+ * marker the slot is read at once and again after 100 ms.
+ *   bit 14  CONTROL  host semaphore release 0x6001 to slot 0x860, host marker
+ *   bit 15  CE semaphore release to slot 0x868, copy-engine marker (as pushes 4, 9)
+ *   bit 16  CE semaphore release to slot 0x870, host WFI + host marker, read now and +100 ms
+ *   bit 17  virtual copy page to page (slot 0x878 -> 0x880), copy-engine marker
+ *   bit 18  virtual memset (default words, source pitch) to slot 0x888, copy-engine marker
+ *   bit 19  memset to slot 0x890, host WFI + host MEMBAR + host marker, read now and +100 ms
+ *   bit 20  physical sysmem memset of the probe page (default words), copy-engine marker
+ *   bit 21  as 20 plus host WFI and MEMBAR (the page-table zeroing push), copy-engine marker
+ * Bits 20 and 21 are last: they are the physical-write hypothesis again.
+ */
+/* the data methods of a boot-6 stage; returns the value the destination must hold */
+static uint64_t
+uvm_probe_c_build(struct uvm_push *push, const struct uvm_gpu_address *dst, const struct uvm_gpu_address *src,
+    unsigned bit)
+{
+	uint32_t *w;
+	uint64_t size = bit >= 20 ? PAGE_SIZE : 8;
+
+	if (bit == 14) {
+		w = uvm_push_space(push, UVM_HOST_SEM_MAX_WORDS);
+		push->next = w + uvm_host_semaphore_release(w, dst->address, 0x6001u);
+		return (0x6001u);
+	}
+	if (bit == 15 || bit == 16) {
+		w = uvm_push_space(push, UVM_CE_SEM_MAX_WORDS);
+		push->next = w + uvm_ce_semaphore_release(w, dst->address, UVM_PROBE_SEMA_PAYLOAD, UVM_MEMBAR_SYS);
+		return (UVM_PROBE_SEMA_PAYLOAD);
+	}
+	if (bit == 17) {
+		w = uvm_push_space(push, uvm_ce_memcopy_words(8));
+		push->next = w + uvm_ce_memcopy(w, dst, src, 8, UVM_MEMBAR_SYS, 0);
+		return (UVM_PROBE_VALUE);
+	}
+	w = uvm_push_space(push, UVM_CE_MEMSET_MAX_WORDS(size));
+	push->next = w + uvm_ce_memset_8(w, dst, UVM_PROBE_VALUE, size, UVM_MEMBAR_SYS);
+	return (UVM_PROBE_VALUE);
+}
+
+static uint64_t
+uvm_probe_c_read(volatile uint8_t *cpu, bool word32)
+{
+	return (word32 ? *(volatile uint32_t *)cpu : *(volatile uint64_t *)cpu);
+}
+
+/* read the destination at once and, if wrong, again after 100 ms; log both; refill a physical page */
+static void
+uvm_probe_c_check(struct uvm_channel *ch, struct uvm_probe_page *pp, unsigned bit, const char *name,
+    volatile uint8_t *cpu, bool word32, uint64_t want)
+{
+	struct uvm_gpu *gpu = ch->mgr->gpu;
+	uint64_t got;
+
+	if (pp != NULL)
+		bus_dmamap_sync(gpu->dmat, pp->map, BUS_DMASYNC_POSTREAD);
+	got = uvm_probe_c_read(cpu, word32);
+	if (got == want) {
+		uvm_log("ch%u probe work: stage %u '%s' completed, data verified at once", ch->index, bit, name);
+	} else {
+		pause_sbt("uvmprb", SBT_1MS * 100, 0, C_HARDCLOCK);
+		if (pp != NULL)
+			bus_dmamap_sync(gpu->dmat, pp->map, BUS_DMASYNC_POSTREAD);
+		uvm_log("ch%u probe work: stage %u '%s' completed, data %#jx at once, %#jx after 100 ms, expected %#jx",
+		    ch->index, bit, name, (uintmax_t)got, (uintmax_t)uvm_probe_c_read(cpu, word32), (uintmax_t)want);
+	}
+	if (pp != NULL) {
+		memset(pp->kva, UVM_PROBE_FILL, PAGE_SIZE);
+		bus_dmamap_sync(gpu->dmat, pp->map, BUS_DMASYNC_PREREAD | BUS_DMASYNC_PREWRITE);
+	}
+}
+
+static void
+uvm_probe_c_addrs(struct uvm_channel *ch, const struct uvm_probe_page *pp, bool phys, uint32_t off,
+    struct uvm_gpu_address *dst, struct uvm_gpu_address *src)
+{
+	dst->is_virtual = !phys;
+	dst->aperture = UVM_APERTURE_SYS;
+	dst->address = phys ? uvm_gpu_dma_address(ch->mgr->gpu, pp->bus) : ch->mgr->sema_gpu_va + off;
+	src->address = ch->mgr->sema_gpu_va + 0x878;
+	src->is_virtual = 1;
+	src->aperture = UVM_APERTURE_SYS;
+}
+
+static NV_STATUS
+uvm_probe_work_stage_c(struct uvm_channel *ch, struct uvm_probe_page *pp, unsigned bit, const char *name)
+{
+	static const uint32_t soff[22] = { [14] = 0x860, [15] = 0x868, [16] = 0x870, [17] = 0x880, [18] = 0x888,
+	    [19] = 0x890 };
+	struct uvm_push push;
+	struct uvm_gpu_address dst, src;
+	NV_STATUS status;
+	uint64_t want;
+	bool word32 = bit >= 14 && bit <= 16, phys = bit >= 20;
+	volatile uint8_t *cpu = phys ? (volatile uint8_t *)pp->kva : UVM_PROBE_SLOT(ch, soff[bit]);
+
+	uvm_probe_c_addrs(ch, pp, phys, soff[bit], &dst, &src);
+	*(volatile uint64_t *)UVM_PROBE_SLOT(ch, 0x878) = UVM_PROBE_VALUE;
+	if (!phys)
+		*(volatile uint64_t *)cpu = 0;
+	status = uvm_push_begin_on(ch, &push, NULL);
+	if (status != NV_OK)
+		return (status);
+	want = uvm_probe_c_build(&push, &dst, &src, bit);
+	if (bit == 16 || bit == 19 || bit == 21)
+		UVM_PUSH(&push, uvm_host_wfi);
+	if (bit == 19 || bit == 21)
+		UVM_PUSH(&push, uvm_host_membar, UVM_MEMBAR_SYS);
+	uvm_log("ch%u probe work: stage %u '%s' sent (VA %#jx)", ch->index, bit, name, (uintmax_t)dst.address);
+	if (bit == 14 || bit == 16 || bit == 19)
+		uvm_push_end_host_sem(&push);
+	else
+		uvm_push_end(&push);
+	status = uvm_push_wait(&push);
+	if (status != NV_OK) {
+		uvm_log("ch%u probe work: stage %u '%s' FAILED: %s", ch->index, bit, name, uvm_status_name(status));
+		return (status);
+	}
+	uvm_probe_c_check(ch, phys ? pp : NULL, bit, name, cpu, word32, want);
+	return (NV_OK);
+}
+
 static NV_STATUS
 uvm_probe_work(struct uvm_channel *ch)
 {
-	static const char *const names[14] = {
+	static const char *const names[22] = {
 		"virtual copy", "virtual memset", "physical sysmem copy", "physical sysmem memset, no flush",
 		"physical sysmem memset, flush", "physical memset, flush, host WFI",
 		"physical memset, flush, host WFI + MEMBAR (the failing push)",
 		"physical memset, flush, host WFI, host semaphore marker",
 		"CE semaphore release to semaphore page slot", "virtual copy page to page",
 		"virtual copy page to page, LINE_COUNT 1", "memset: SRC pitch, explicit remap, LINE_COUNT",
-		"memset: stage 1 plus SRC pitch only", "memset: explicit remap, source block-linear"
+		"memset (default words, source pitch)", "memset: explicit remap, source block-linear",
+		"control: host semaphore release", "CE semaphore release, CE marker",
+		"CE semaphore release, host WFI + host marker", "virtual copy, CE marker",
+		"virtual memset, CE marker", "memset, host WFI + MEMBAR + host marker",
+		"physical memset of the probe page, CE marker",
+		"physical memset, host WFI + MEMBAR, CE marker (page-table zero push)"
 	};
 	struct uvm_gpu *gpu = ch->mgr->gpu;
 	struct uvm_probe_page pp;
@@ -748,10 +886,16 @@ uvm_probe_work(struct uvm_channel *ch)
 	bus_dmamap_sync(gpu->dmat, pp.map, BUS_DMASYNC_PREREAD | BUS_DMASYNC_PREWRITE);
 	uvm_log("ch%u probe work: probe page (used by the physical stages 2-7 only) bus %#jx, GPU address %#jx, mask %#x", ch->index,
 	    (uintmax_t)pp.bus, (uintmax_t)uvm_gpu_dma_address(gpu, pp.bus), (unsigned)uvm.init_probe_work);
-	for (bit = 0; bit < 14 && status == NV_OK; bit++)
-		if (((unsigned)uvm.init_probe_work >> bit) & 1u)
-			status = bit < 8 ? uvm_probe_work_stage(ch, &pp, bit, names[bit]) :
-			    uvm_probe_work_stage_b(ch, bit, names[bit]);
+	for (bit = 0; bit < 22 && status == NV_OK; bit++) {
+		if (!(((unsigned)uvm.init_probe_work >> bit) & 1u))
+			continue;
+		if (bit < 8)
+			status = uvm_probe_work_stage(ch, &pp, bit, names[bit]);
+		else if (bit < 14)
+			status = uvm_probe_work_stage_b(ch, bit, names[bit]);
+		else
+			status = uvm_probe_work_stage_c(ch, &pp, bit, names[bit]);
+	}
 	if (status == NV_OK)
 		uvm_gpu_sysmem_free(gpu, pp.kva, pp.map, PAGE_SIZE);	/* on error the GPU may still write it: leak */
 	return (status);

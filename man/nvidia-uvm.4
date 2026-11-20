@@ -96,9 +96,12 @@ memset without flush, 16 the same with flush, 32 plus a host wait for idle,
 host-class semaphore release;
 256 a copy-engine semaphore release into the semaphore page, 512 a virtual copy
 page to page, 1024 the same with LINE_COUNT 1, 2048 a memset with source pitch,
-explicit remap and LINE_COUNT, 4096 the virtual memset of value 2 plus
-source pitch only, 8192 as
-2048 with a block-linear source.
+explicit remap and LINE_COUNT, 4096 a memset with the default words, 8192 as
+2048 with a block-linear source (raises Xid 71);
+16384 to 2097152 (bits 14 to 21) a second series on copy-engine write
+visibility: host semaphore control, copy-engine semaphore with a copy-engine
+or host marker, copy, memset, memset with host WFI and MEMBAR, and physical
+memsets of a probe page.
 Default 0.
 Diagnostic.
 .It Va hw.nvidia_uvm.ce_bind_subch4

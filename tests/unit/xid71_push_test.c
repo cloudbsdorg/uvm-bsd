@@ -46,8 +46,10 @@ check_push10_words(const uint32_t *w, size_t n)
 	unsigned i;
 
 	CHECK(n == 20, "push is %zu words, expected 20 before the release", n);
+	/* word 12 is LAUNCH_DMA: boot 5 (Q-010) added SRC_MEMORY_LAYOUT PITCH, bit 7, to every memset */
 	for (i = 0; i < 20 && i < n; i++)
-		CHECK(w[i] == golden[i], "word %u: %08x, observed in boot 3 %08x", i, w[i], golden[i]);
+		CHECK(w[i] == (i == 12 ? golden[i] | 0x80u : golden[i]), "word %u: %08x, observed in boot 3 %08x", i,
+		    w[i], golden[i]);
 }
 
 /* SET_DST_PHYS_MODE 0x264: TARGET 1:0 = COHERENT_SYSMEM (1); PEER_ID 8:6 and FLA 9 clear */
@@ -94,7 +96,7 @@ check_launch_bits(const uint32_t *w)
 	CHECK(FIELD(launch, 1, 0) == 2, "DATA_TRANSFER_TYPE NON_PIPELINED");
 	CHECK(FIELD(launch, 2, 2) == 1, "FLUSH_ENABLE");
 	CHECK(FIELD(launch, 4, 3) == 0, "no semaphore");
-	CHECK(FIELD(launch, 7, 7) == 0, "src layout (unused with remap, left block)");
+	CHECK(FIELD(launch, 7, 7) == 1, "SRC_MEMORY_LAYOUT PITCH (boot 5: block-linear raised Xid 71, Q-010)");
 	CHECK(FIELD(launch, 8, 8) == 1, "DST_MEMORY_LAYOUT PITCH");
 	CHECK(FIELD(launch, 9, 9) == 0, "MULTI_LINE_ENABLE FALSE");
 	CHECK(FIELD(launch, 10, 10) == 1, "REMAP_ENABLE");
@@ -103,7 +105,7 @@ check_launch_bits(const uint32_t *w)
 	CHECK(FIELD(launch, 25, 25) == 0, "FLUSH_TYPE SYS");
 	CHECK(FIELD(launch, 26, 26) == 1, "DISABLE_PLC");
 	CHECK(FIELD(launch, 27, 27) == 0, "payload size ONE_WORD");
-	CHECK(launch == 0x04002506u, "LAUNCH_DMA %08x", launch);
+	CHECK(launch == 0x04002586u, "LAUNCH_DMA %08x", launch);
 }
 
 /* host: WFI 0x78 on subchannel 0; MEM_OP_A..D 0x28..0x34, D bits 31:27 = 5 (MEMBAR), C bits 2:0 = 0 (system) */
@@ -127,10 +129,10 @@ check_explicit_memset(uint32_t launch, struct uvm_gpu_address *dst)
 	uint32_t w[64];
 	size_t n;
 
-	CHECK(FIELD(launch, 7, 7) == 0, "default memset: source layout block-linear (open question Q-010)");
+	CHECK(FIELD(launch, 7, 7) == 1, "default memset: source layout pitch (boot 5, Q-010)");
 	dst->is_virtual = 1;
 	n = uvm_ce_memset_8_x(w, dst, 0x1122334455667788ULL, 8, UVM_MEMBAR_SYS,
-	    UVM_CE_MEMSET_X_SRC_PITCH | UVM_CE_MEMSET_X_EXPLICIT_REMAP | UVM_CE_MEMSET_X_LINE_COUNT);
+	    UVM_CE_MEMSET_X_EXPLICIT_REMAP | UVM_CE_MEMSET_X_LINE_COUNT);
 	/* const A/B (3 words), offsets out (3), line length (2), line count (2), launch (2) */
 	CHECK(n == 4 + 3 + 2 + 2 + 2, "explicit memset is %zu words", n);
 	CHECK(w[0] == 0x200381c0 && w[1] == 0x55667788 && w[2] == 0x11223344, "const A/B");
@@ -138,7 +140,7 @@ check_explicit_memset(uint32_t launch, struct uvm_gpu_address *dst)
 	    FIELD(w[3], 6, 4) == 5 && FIELD(w[3], 17, 16) == 3 && FIELD(w[3], 21, 20) == 0 &&
 	    FIELD(w[3], 25, 24) == 1, "explicit remap components %08x", w[3]);
 	CHECK(FIELD(w[9], 11, 0) == (0x41cu >> 2) && w[10] == 1, "LINE_COUNT 1");
-	CHECK(w[12] == (0x04000506u | (1u << 7)) && FIELD(w[12], 13, 13) == 0, "launch %08x", w[12]);
+	CHECK(w[12] == 0x04000586u && FIELD(w[12], 13, 13) == 0, "launch %08x", w[12]);
 }
 
 static void
@@ -150,7 +152,7 @@ check_default_memset(struct uvm_gpu_address *dst)
 	dst->is_virtual = 1;
 	n = uvm_ce_memset_8(w, dst, 0, 8, UVM_MEMBAR_SYS);
 	CHECK(n == 4 + 3 + 2 + 2, "default memset size changed: %zu", n);
-	CHECK(w[n - 1] == 0x04000506u, "default virtual memset launch %08x", w[n - 1]);
+	CHECK(w[n - 1] == 0x04000586u, "default virtual memset launch %08x", w[n - 1]);
 }
 
 int
