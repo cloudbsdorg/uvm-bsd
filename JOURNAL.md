@@ -18,3 +18,6 @@
 
 ## 2026-11-20T10:20Z
 - All review findings fixed in the tree (pager_ref.h, sysctl ctx, unload comment/pause, mmap comment, stress script, README, tests with call-site pins). Gates green. Next: commit, push, Track comment. Resume: git status; commit.
+
+## 2026-11-20T10:50Z
+- Re-review fixes 1-7 done in the tree (quiesce, filter regex + -T self-test, sysctl loop + pins, bounded worker excuse, no-arg drops_ref, docs, holder FAIL not exit 2). Next: gate, commit, push, Track.

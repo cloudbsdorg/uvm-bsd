@@ -20,16 +20,19 @@
 #   free  no holder: the unload may be refused (workers, or the maps of
 #         killed workers still tearing down) or may succeed, and then the
 #         module is loaded again from UVM_KO and the health check runs.
+# Churn loops are paused around a free probe, and a loop reads
+# hw.nvidia_uvm.gpus throughout (the unload must drain that handler).
 # Any other kldunload failure (doas, a wrong name) is a FAIL, never a
 # refusal.  After the load stops a last probe must unload the idle module.
 #
-# Usage: uvm_stress.sh [-n MINUTES] [-j JOBS] [-c CHURN] [-s SEED] [-U] [-H MODE] [-h]
+# Usage: uvm_stress.sh [-n MINUTES] [-j JOBS] [-c CHURN] [-s SEED] [-U] [-H MODE] [-T] [-h]
 #   -n  run time in minutes (default 10)
 #   -j  concurrent CUDA workers (default 4)
 #   -c  concurrent churn loops (default 2)
 #   -s  seed of the random choices (default: the time)
 #   -U  also try to unload the module under load (needs doas)
 #   -H  with -U, the probe kind: hold, free or alternate (default alternate)
+#   -T  self-test the kernel log filter against known lines and exit
 # Environment:
 #   GB10_WORK   work root (default $HOME/work/gb10); logs go to
 #               $GB10_WORK/logs/uvm-stress-<time>/, scratch to $GB10_WORK/tmp
@@ -41,8 +44,11 @@
 #               (self test with a fake RUN_CUDA)
 # Run as the ordinary user, with nvidia.ko and nvidia-uvm.ko loaded.
 # Exit status: 0 the run was clean; 1 a worker failed other than by kill -9
-# (a worker that was alive when a "free" unload succeeded is excused, and
-# logged), a worker was still alive 120 s after the load stopped, the dmesg
+# (a worker whose log shows a failed open of the device, across a "free"
+# unload that succeeded, is excused and logged), no worker finished OK, a
+# churn loop failed, the kernel log has a new "nvidia-uvm: ... failed",
+# "error" or "could not" line, hw.nvidia_uvm.gpus is missing after a reload,
+# the holder could not be started, a worker was still alive 120 s after the load stopped, the dmesg
 # or fatal check fired, an unload succeeded while the holder had the device
 # open, an unload failed for any reason but "Device busy", a reload failed,
 # or the final idle unload did not happen; 2 usage, a missing prerequisite or
@@ -60,12 +66,48 @@ CHURN=2
 SEED=$(date +%s)
 UNLOAD=0
 HMODE=alternate
+SELFTEST=0
+# the kernel-log lines that mean trouble.  The module logs as "nvidia-uvm: ..."
+# (UVM_NAME in sys/uvm.h); -T checks this expression against such lines.
+TROUBLE_RE='Xid|FATAL|panic|Fatal|nvidia[-_]uvm: .*(failed|error|could not)'
+
+# -T: the filter must catch the module's own failure lines and let its normal ones pass
+selftest_filter() {
+	bad=0
+	while IFS= read -r line; do
+		if printf '%s\n' "$line" | grep -qE "$TROUBLE_RE"; then
+			echo "selftest: caught:  $line"
+		else
+			echo "selftest: MISSED:  $line"
+			bad=1
+		fi
+	done <<'EOT'
+nvidia-uvm: RM session creation failed: NV_ERR_GENERIC
+nvidia-uvm: hw.nvidia_uvm.gpus could not be registered
+nvidia-uvm: FATAL: channel timeout (NV_ERR_TIMEOUT); every later request fails
+NVRM: Xid (PCI:0000:01:00): 31, pid=1
+nvidia_uvm: an error line
+EOT
+	while IFS= read -r line; do
+		if printf '%s\n' "$line" | grep -qE "$TROUBLE_RE"; then
+			echo "selftest: FALSE ALARM: $line"
+			bad=1
+		else
+			echo "selftest: passed:  $line"
+		fi
+	done <<'EOT'
+nvidia-uvm: loaded: /dev/nvidia-uvm and /dev/nvidia-uvm-tools (spec r1, phase 1)
+nvidia-uvm: unload refused: 1 open files, 0 pager objects, a GPU or a VA space is still in use
+nvidia-uvm: unloaded
+EOT
+	return $bad
+}
 
 usage() {
 	sed -n '/^# Usage:/,/^# Run as/p' "$0" | sed 's/^# \{0,1\}//'
 }
 
-while getopts n:j:c:s:UH:h opt; do
+while getopts n:j:c:s:UH:Th opt; do
 	case $opt in
 	n) MINUTES=$OPTARG ;;
 	j) JOBS=$OPTARG ;;
@@ -73,10 +115,15 @@ while getopts n:j:c:s:UH:h opt; do
 	s) SEED=$OPTARG ;;
 	U) UNLOAD=1 ;;
 	H) HMODE=$OPTARG ;;
+	T) SELFTEST=1 ;;
 	h) usage; exit 0 ;;
 	*) usage >&2; exit 2 ;;
 	esac
 done
+if [ "$SELFTEST" -eq 1 ]; then
+	selftest_filter
+	exit $?
+fi
 case $HMODE in
 hold | free | alternate) ;;
 *) echo "uvm_stress: -H is hold, free or alternate, not $HMODE" >&2; exit 2 ;;
@@ -162,9 +209,8 @@ kernlog() {
 	/sbin/dmesg 2>/dev/null || doas -n /sbin/dmesg 2>/dev/null || tail -n 20000 /var/log/messages 2>/dev/null
 }
 
-# the log lines that mean trouble; the same line is the same line on every look
 trouble() {
-	kernlog | sed -e 's/^[A-Z][a-z][a-z] [ 0-9][0-9] [0-9:]* [^ ]* kernel: //' | grep -E 'Xid|FATAL|panic|Fatal|nvidia_uvm: .*(failed|error)' | sort -u
+	kernlog | sed -e 's/^[A-Z][a-z][a-z] [ 0-9][0-9] [0-9:]* [^ ]* kernel: //' | grep -E "$TROUBLE_RE" | sort -u
 }
 trouble >"$T/dmesg.base"
 FATAL0=$(sysctl -n hw.nvidia_uvm.fatal_error 2>/dev/null || echo 0)
@@ -200,9 +246,9 @@ reap() {
 			:
 		elif [ "$rc" -eq 0 ]; then
 			OK=$((OK + 1))
-		elif [ -e "$T/w/$id.gap" ]; then
+		elif [ -e "$T/w/$id.gap" ] && grep -qE 'No such file or directory|Device not configured|No such device|ENXIO|ENOENT' "$LOGDIR/w$id.log" 2>/dev/null; then
 			EXCUSED=$((EXCUSED + 1))
-			log "worker $id ($(cat "$T/w/$id.name")) exited $rc across an unload that succeeded: excused; see $LOGDIR/w$id.log"
+			log "worker $id ($(cat "$T/w/$id.name")) exited $rc across an unload that succeeded, on a failed open of the device: excused; see $LOGDIR/w$id.log"
 		else
 			FAILED=$((FAILED + 1))
 			log "FAIL: worker $id ($(cat "$T/w/$id.name")) exited $rc; see $LOGDIR/w$id.log"
@@ -249,11 +295,53 @@ kill_one() {
 churn_loop() {
 	(
 		while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+			# busy first, then the quiesce check, so a probe that sets the flag and
+			# then sees no busy file knows no iteration is, or will be, in flight
+			: >"$T/c/$1.busy"
+			if [ -e "$T/quiesce" ]; then
+				rm -f "$T/c/$1.busy"
+				sleep 0.2
+				continue
+			fi
 			"$T/uvm_ioctl_test" >>"$LOGDIR/churn$1.log" 2>&1 || echo "churn $1 failed" >>"$LOGDIR/churn$1.fail"
 			echo x >>"$LOGDIR/churn$1.count"
+			rm -f "$T/c/$1.busy"
 		done
 	) &
 	echo $! >"$T/c/$1.pid"
+}
+
+# a loop that reads hw.nvidia_uvm.gpus all the time: the handler takes
+# uvm.lock, and an unload must drain it before the lock is destroyed.  It
+# fails when the file is missing during the unload window; that is expected
+# and not counted.
+sysctl_loop() {
+	(
+		while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+			sysctl -n hw.nvidia_uvm.gpus >/dev/null 2>&1
+			sleep 0.05
+		done
+	) &
+	echo $! >"$T/c/sysctl.pid"
+}
+
+# stop the churn loops between iterations (free rounds): the module is
+# briefly absent, and an iteration that meets the gap would fail on its own
+quiesce_churn() {
+	: >"$T/quiesce"
+	n=0
+	while ls "$T"/c/*.busy >/dev/null 2>&1; do
+		n=$((n + 1))
+		if [ "$n" -gt 300 ]; then
+			log "FAIL: the churn loops did not go idle in 60 s"
+			RESULT=1
+			return 1
+		fi
+		sleep 0.2
+	done
+}
+resume_churn() {
+	rm -f "$T/quiesce"
 }
 
 # try to unload the module under load.  The loaded file is nvidia-uvm.ko (a
@@ -271,12 +359,15 @@ holder_start() {
 	HOLDER=$!
 	sleep 1
 	if ! holder_alive; then
-		echo "uvm_stress: the holder exited: /dev/nvidia-uvm could not be opened" >&2
-		exit 2
+		log "FAIL: the holder exited: /dev/nvidia-uvm could not be opened"
+		RESULT=1
+		HOLDER=
+		return 1
 	fi
 	if ! fstat -p "$HOLDER" 2>/dev/null | grep -q 'nvidia-uvm'; then
-		echo "uvm_stress: the holder (pid $HOLDER) does not show /dev/nvidia-uvm in fstat" >&2
-		exit 2
+		log "FAIL: the holder (pid $HOLDER) does not show /dev/nvidia-uvm in fstat"
+		RESULT=1
+		return 1
 	fi
 }
 holder_stop() {
@@ -307,6 +398,7 @@ unload_probe() {
 			return 1
 		}
 		[ -c /dev/nvidia-uvm ] || { log "FAIL: /dev/nvidia-uvm is missing after the reload"; RESULT=1; }
+		sysctl -N hw.nvidia_uvm.gpus >/dev/null 2>&1 || { log "FAIL: hw.nvidia_uvm.gpus does not exist after the reload"; RESULT=1; }
 		check_health
 		return 1
 	fi
@@ -329,13 +421,19 @@ probe_round() {
 	*) if [ $((PROBES % 2)) -eq 1 ]; then kind=hold; else kind=free; fi ;;
 	esac
 	if [ "$kind" = hold ]; then
-		holder_start
-	else
-		holder_stop
+		holder_start || return 0
+		unload_probe || true
+		return 0
 	fi
+	holder_stop
+	quiesce_churn || return 0
 	unload_probe || true
+	resume_churn
 }
 
+if [ "$UNLOAD" -eq 1 ] && [ "$HMODE" != hold ]; then
+	sysctl_loop
+fi
 log "start: $MINUTES min, $JOBS workers, $CHURN churn loops, seed $SEED, unload probe $UNLOAD, logs $LOGDIR"
 i=1
 while [ "$i" -le "$CHURN" ]; do
@@ -382,6 +480,10 @@ for p in $(cat "$T"/c/*.pid 2>/dev/null); do wait "$p" 2>/dev/null; done
 for f in "$LOGDIR"/churn*.fail; do
 	[ -e "$f" ] && { log "FAIL: $(basename "$f") (see its log)"; RESULT=1; }
 done
+if [ "$OK" -eq 0 ] && [ "$SPAWNED" -gt "$KILLED" ]; then
+	log "FAIL: no worker finished OK ($SPAWNED spawned, $KILLED killed, $EXCUSED excused): the run proved nothing"
+	RESULT=1
+fi
 CHURNS=$(cat "$LOGDIR"/churn*.count 2>/dev/null | wc -l | tr -d ' ')
 check_health
 if [ "$UNLOAD" -eq 1 ]; then

@@ -111,7 +111,12 @@ From a one-shot boot environment, as root:
    fails other than by `kill -9` (excused only across a successful unload); a
    worker hung 120 s after the load stops; an unload that succeeds under the
    holder; a `kldunload` failure other than "Device busy"; a failed reload;
-   and a final idle unload that does not happen.  `-H hold|free` picks one
+   a churn loop failure (`churnN.fail`; the churn loops are quiesced around a
+   free probe); a line with `nvidia-uvm: ... failed|error|could not` in the
+   kernel log (for instance "hw.nvidia_uvm.gpus could not be registered");
+   `hw.nvidia_uvm.gpus` missing after a reload (a loop reads it all through
+   the run, to race the unload); no worker finishing OK; and a final idle
+   unload that does not happen.  `-T` self-tests the kernel log filter.  `-H hold|free` picks one
    probe kind; `-h` lists every option.  The panic capture settings for a test
    BE are in `docs/panic-capture.md`.
 

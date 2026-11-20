@@ -12,7 +12,7 @@
  * reference and runs the constructor.  The mapper holds a memory reference
  * from before the call.  The decisions come from uvm_pager_ref.h: how many
  * references the constructor takes, and whether the mapper drops its own
- * after the call (given the object reference count it saw).
+ * after the call .
  *
  * Invariant: the memory is never freed (references 0) while an object or
  * the range still uses it, and everything is released exactly once at the
@@ -81,7 +81,7 @@ mapper_step(struct st *s, int m)
 		s->a_seen[m] = s->obj_refs;
 		return (1);
 	case 2:		/* after the call */
-		if (uvm_pager_mapper_drops_ref((unsigned)s->obj_refs))
+		if (uvm_pager_mapper_drops_ref())
 			mem_unref(s);
 		return (1);
 	default:
@@ -150,11 +150,8 @@ explore(void)
 static void
 check_rule(void)
 {
-	unsigned seen;
-
 	CHECK(uvm_pager_ctor_mem_refs() == 1, "the constructor takes the object's one reference");
-	for (seen = 0; seen < 8; seen++)
-		CHECK(uvm_pager_mapper_drops_ref(seen), "the mapper drops its reference after seeing %u", seen);
+	CHECK(uvm_pager_mapper_drops_ref(), "the mapper drops its reference after the call");
 }
 
 int

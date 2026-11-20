@@ -227,7 +227,7 @@ uvm_mmap_single(struct cdev *cdev, vm_ooffset_t *offset, vm_size_t size, vm_obje
 	 * own: a new object's constructor took it, an existing object already
 	 * had it.  Either way ours goes now.
 	 */
-	if (uvm_pager_mapper_drops_ref(0))
+	if (uvm_pager_mapper_drops_ref())
 		uvm_sema_mem_unref(mem);
 	if (obj == NULL) {
 		sx_sunlock(&uvm.pm_lock);

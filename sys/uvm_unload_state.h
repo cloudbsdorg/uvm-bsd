@@ -15,7 +15,8 @@
  *   - a thread that is returning from one of those destructors.
  * The first two are counted; the third is the last thing a destructor does
  * (the counter is dropped after every other access to module state) and the
- * unload waits for it behind a barrier.
+ * unload waits for it with a pause, a heuristic: no kernel primitive drains
+ * the return of a pager destructor.
  *
  * An open that races with the unload would create new state after the check,
  * so the check and the "unloading" mark are one step under uvm.lock and
