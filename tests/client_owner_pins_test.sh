@@ -153,6 +153,17 @@ uvm_new_path(struct uvm_gpu *gpu, UVM_MAP_EXTERNAL_ALLOCATION_PARAMS *p)
 	return (nvUvmInterfaceDupMemory(gpu->rm_device, p->hClient, p->hMemory, 0, 0));
 }'
 
+# the probe keeps its control rows: without them a module that refuses everyone would pass
+probe_rows() {	# probe_rows <probe source>: prints each missing row
+	for row in "own fd, own handle (owner)" "a dup of own fd, own handle (the same file)" "a dup of own fd, the other's handle" \
+	    "a dup of own fd with an EMPTY ioctl list, own handle" "the other's nvidiactl file passed to us"; do
+		grep -qF -- "$row" "$1" || echo "uvm_owner_probe.c lost the row: $row"
+	done
+}
+if [ -z "$(probe_rows "$REPO/tests/ioctl/uvm_owner_probe.c")" ]; then echo "ok   the probe keeps its control rows"; else echo "FAIL probe rows:"; probe_rows "$REPO/tests/ioctl/uvm_owner_probe.c"; rc=1; fi
+grep -v 'own fd, own handle (owner)' "$REPO/tests/ioctl/uvm_owner_probe.c" > "$T/probe.mut"
+if [ -z "$(probe_rows "$T/probe.mut")" ]; then echo "FAIL plant probe-owner-row-dropped stays green"; rc=1; else echo "ok   plant probe-owner-row-dropped is red"; fi
+
 # the rule itself: the pure test must go red on a weakened rule
 model_plant() {	# model_plant <name> <sed>
 	mkdir -p "$T/m-$1"

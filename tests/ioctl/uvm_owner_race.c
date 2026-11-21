@@ -68,7 +68,7 @@ typedef struct { race_nvos33 params; int fd; } race_nvos33_fd;
 static int json, seconds = 10;
 static atomic_int stop, progress, bad;
 static atomic_uint cur_handle;
-static atomic_long iters_a, iters_b, refused, other, ioctl_failed;
+static atomic_long iters_a, iters_b, refused, other, ioctl_failed, open_failed;
 
 static int uvm_ioctl(int fd, unsigned long raw, void *p) { return (ioctl(fd, UVM_IOCTL_NATIVE(raw), p)); }
 
@@ -207,13 +207,18 @@ t_map_close(void *arg)
 {
 	struct ctx *c = arg;
 	race_nvos33_fd m;
-	int fd;
+	int fd, old;
 
 	while (!atomic_load(&stop)) {
 		fd = open("/dev/nvidiactl", O_RDWR);
-		if (fd < 0)
+		if (fd < 0) {
+			atomic_fetch_add(&open_failed, 1);	/* counted, not silent; the closer frees descriptors */
+			sched_yield();
 			continue;
-		atomic_store(&pub_fd, fd);
+		}
+		old = atomic_exchange(&pub_fd, fd);
+		if (old >= 0 && old != fd)	/* the closer takes its descriptor by exchange too, so each is closed once */
+			close(old);	/* the closer did not get to it: never leak a descriptor */
 		memset(&m, 0, sizeof(m));
 		m.params.hClient = atomic_load(&cur_handle);
 		m.fd = fd;
@@ -275,16 +280,16 @@ report(int loop, const char *what)
 
 	if (json)
 		printf("{\"schema\":\"uvm-owner-race/1\",\"loop\":%d,\"what\":\"%s\",\"seconds\":%d,\"iterations_a\":%ld,"
-		    "\"iterations_b\":%ld,\"refused\":%ld,\"other_status\":%ld,\"ioctl_failed\":%ld,\"ok\":%s}\n",
+		    "\"iterations_b\":%ld,\"refused\":%ld,\"other_status\":%ld,\"ioctl_failed\":%ld,\"open_failed\":%ld,\"ok\":%s}\n",
 		    loop, what, seconds, a, b, (long)atomic_load(&refused), (long)atomic_load(&other),
-		    (long)atomic_load(&ioctl_failed), atomic_load(&bad) ? "false" : "true");
+		    (long)atomic_load(&ioctl_failed), (long)atomic_load(&open_failed), atomic_load(&bad) ? "false" : "true");
 	else
-		printf("%s loop %d (%s): %ld + %ld iterations, %ld refused, %ld other statuses, %ld ioctl failures\n",
+		printf("%s loop %d (%s): %ld + %ld iterations, %ld refused, %ld other statuses, %ld ioctl failures, %ld open failures\n",
 		    atomic_load(&bad) ? "FAIL" : "ok  ", loop, what, a, b, (long)atomic_load(&refused),
-		    (long)atomic_load(&other), (long)atomic_load(&ioctl_failed));
+		    (long)atomic_load(&other), (long)atomic_load(&ioctl_failed), (long)atomic_load(&open_failed));
 	fflush(stdout);
 	atomic_store(&iters_a, 0); atomic_store(&iters_b, 0); atomic_store(&refused, 0);
-	atomic_store(&other, 0); atomic_store(&ioctl_failed, 0);
+	atomic_store(&other, 0); atomic_store(&ioctl_failed, 0); atomic_store(&open_failed, 0);
 }
 
 static int
@@ -433,6 +438,8 @@ loop4(void)
 	atomic_store(&cur_handle, rm_alloc_client(c.ctl));
 	atomic_store(&pub_fd, -1);
 	run_threads(t_map_close, t_closer, &c);
+	if (atomic_load(&pub_fd) >= 0)
+		close(atomic_exchange(&pub_fd, -1));	/* the descriptor still published when the loop stopped */
 	waitpid(pid, &s, 0);
 	if (!WIFEXITED(s) || WEXITSTATUS(s) != 0)
 		atomic_store(&bad, 1);

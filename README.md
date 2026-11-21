@@ -117,13 +117,13 @@ only from the process that holds the `/dev/nvidiactl` file the client was alloca
 - **Which requests:** `UVM_REGISTER_GPU` (with a client handle or an SMC reference),
   `UVM_REGISTER_GPU_VASPACE`, `UVM_REGISTER_CHANNEL`, `UVM_MAP_EXTERNAL_ALLOCATION` and
   `UVM_ALLOC_DEVICE_P2P` carry an `rmCtrlFd` and a handle. Before any RM call the module resolves
-  `rmCtrlFd` (the `CAP_IOCTL` right only, and no `cap_ioctls_limit` list on it) and asks `nvidia.ko` (`nvUvmInterfaceClientHold`, released
+  `rmCtrlFd` (`CAP_IOCTL` is the only right required, and the descriptor must carry no `cap_ioctls_limit` list, not even an empty one) and asks `nvidia.ko` (`nvUvmInterfaceClientHold`, released
   with `nvUvmInterfaceClientRelease` when the request ends) whether that file owns the handle.
 - **What a caller sees:** `rmStatus = NV_ERR_INSUFFICIENT_PERMISSIONS` (0x1B) for a closed fd, an
   fd without the right or with a limited ioctl list, a file that is not nvidiactl, or a handle that file does not own. The
   console logs which of these it was (rate limited).
-- **Dependency:** the `nvidia.ko` of nvidia-gb10-freebsd branch `agent/2373-nv-client-owner` or
-  later (module version 2; this module depends on exactly that). With an older one,
+- **Dependency:** the `nvidia.ko` of nvidia-gb10-freebsd branch `agent/2373-nv-client-owner`
+  (module version 2; this module depends on exactly that version, so a later `MODULE_VERSION` needs this module's `MODULE_DEPEND` updated and rebuilt). With an older one,
   `kldload nvidia-uvm` fails with a version mismatch or `symbol nvUvmInterfaceClientHold
   undefined`, and an older `nvidia-uvm.ko` (version 1 dependency) refuses the new `nvidia.ko`.
 - **Files and tests:** the rule is `sys/uvm_client_owner.h`; `tests/unit/client_owner_test.c`

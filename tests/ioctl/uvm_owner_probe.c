@@ -237,6 +237,20 @@ expect(const char *who, const char *what, int which, NvU32 got, int refused)
 		    (unsigned)got);
 }
 
+/* a row that cannot run is a FAIL row, in JSON too */
+static void
+fail_row(const char *who, const char *msg, int which)
+{
+	rows++;
+	fails++;
+	if (json)
+		printf("{\"schema\":\"uvm-owner-probe/1\",\"who\":\"%s\",\"row\":\"%s\",\"request\":\"%s\",\"ok\":false}\n",
+		    who, msg, names[which]);
+	else
+		printf("FAIL %s, %s, %s\n", who, msg, names[which]);
+	fflush(stdout);
+}
+
 static void
 skipped(const char *who, const char *what, int which)
 {
@@ -282,25 +296,28 @@ attack(const char *who, struct side *me, NvU32 other_client, int passed_fd)
 		if (passed_fd >= 0)
 			expect(who, "the other's nvidiactl file passed to us (the capability), the other's handle", w,
 			    request(me->uvm, w, passed_fd, other_client), 0);
-		else {
-			fails++;
-			rows++;
-			printf("FAIL %s, the other's nvidiactl file was not passed to us: the capability row cannot run\n", who);
-		}
-		{	/* a descriptor whose ioctl list is limited (cap_ioctls_limit): refused, the list does not bind this path */
-			int limfd = dup(me->ctl);
+		else
+			fail_row(who, "the other's nvidiactl file was not passed to us: the capability row cannot run", w);
+		{	/* descriptors whose ioctl list is limited or EMPTY (cap_ioctls_limit): refused, the list does not bind this path */
 			unsigned long one = 0;
+			int k, limfd;
 
-			if (limfd >= 0 && cap_ioctls_limit(limfd, &one, 1) == 0)
-				expect(who, "a dup of own fd with a limited ioctl list, own handle", w,
-				    request(me->uvm, w, limfd, me->client), 1);
-			else {
-				fails++;
-				rows++;
-				printf("FAIL %s, cannot build the limited-ioctl descriptor: %s\n", who, strerror(errno));
+			for (k = 0; k < 2; k++) {
+				limfd = dup(me->ctl);
+				if (limfd >= 0 && (k == 0 ? cap_ioctls_limit(limfd, &one, 1) : cap_ioctls_limit(limfd, NULL, 0)) == 0)
+					expect(who, k == 0 ? "a dup of own fd with a limited ioctl list, own handle" :
+					    "a dup of own fd with an EMPTY ioctl list, own handle", w,
+					    request(me->uvm, w, limfd, me->client), 1);
+				else {
+					char msg[160];
+
+					snprintf(msg, sizeof(msg), "cannot build the %s descriptor: %s", k == 0 ? "limited-ioctl-list" :
+					    "empty-ioctl-list", limfd < 0 ? "dup failed" : strerror(errno));
+					fail_row(who, msg, w);
+				}
+				if (limfd >= 0)
+					close(limfd);
 			}
-			if (limfd >= 0)
-				close(limfd);
 		}
 		expect(who, "own fd, own handle (owner)", w, request(me->uvm, w, me->ctl, me->client), 0);
 		expect(who, "a dup of own fd, own handle (the same file)", w, request(me->uvm, w, dupfd, me->client), 0);

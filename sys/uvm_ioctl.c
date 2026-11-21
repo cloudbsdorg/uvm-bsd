@@ -216,7 +216,8 @@ uvm_client_hold(struct thread *td, enum uvm_owner_request req, NvS32 rmCtrlFd, N
 	 * escapes must not be able to drive the client through the kernel instead.
 	 * Fail closed on any limited descriptor.
 	 */
-	limited = caps.fc_ioctls != NULL;
+	/* -1 is the only value for "no list"; an empty list (cap_ioctls_limit(fd, NULL, 0)) is NULL with 0 */
+	limited = caps.fc_nioctls != -1;
 	filecaps_free(&caps);
 	if (limited) {
 		uvm_log_slow("client ownership: rmCtrlFd %d has a limited ioctl list (cap_ioctls_limit)", (int)rmCtrlFd);

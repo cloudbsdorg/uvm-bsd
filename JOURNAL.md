@@ -40,3 +40,8 @@
 
 ## 2026-11-21T07:13:10Z
 - uvm gate round 1 receipt 9e2a08f5 fixed (fget_cap + limited ioctl list refusal, race loops rewritten with assertions and watchdog, probe fixes, boot script, stress baseline, man). Round 2 running (gate-u2-2.log). Module rebuilt with base LLD.
+
+## 2026-11-21T07:42:11Z (#2373 follow-up commits)
+- Orchestrator: no round 3 on old commits. New uvm commit: empty ioctl list (fc_nioctls != -1, harness case, old-form mutant, probe row), race loop 4 fd leak, -j FAIL rows, README wording. Then nv commit (tombstone, stranger EPERM, 64-bit gen, rows+mutants), commit staged JOURNAL in wt-nv-2373, re-merge into phase0. Each 2 rounds.
+
+- round 1 receipt 79929d93: restored probe control rows (my splice dropped them), enum, open_failed, README. Round 2 running.

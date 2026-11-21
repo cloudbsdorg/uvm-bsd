@@ -38,14 +38,17 @@ static NV_STATUS hold_answer;
 static int needs_hold;			/* the request under test must hold before the VA-space work */
 
 static cap_rights_t *cap_rights_init_one(cap_rights_t *r, unsigned right) { r->m = right; return (r); }
-struct filecaps { void *fc_ioctls; };
-static int caps_limited;
+struct filecaps { void *fc_ioctls; int fc_nioctls; };
+enum caps_mode { CAPS_NONE, CAPS_LIST_OF_ONE, CAPS_EMPTY_LIST };
+static int caps_mode;
 static void filecaps_free(struct filecaps *c) { (void)c; }
 static int
 fget_cap(struct thread *td, int fd, cap_rights_t *rights, unsigned char *flags, struct file **fpp, struct filecaps *caps)
 {
 	(void)td; (void)flags;
-	caps->fc_ioctls = caps_limited ? (void *)&caps_limited : NULL;
+	/* 0: no list (NULL, -1); 1: a list of one; 2: an EMPTY list, which FreeBSD stores as NULL with 0 */
+	caps->fc_ioctls = caps_mode == CAPS_LIST_OF_ONE ? (void *)&caps_mode : NULL;
+	caps->fc_nioctls = caps_mode == CAPS_NONE ? -1 : caps_mode == CAPS_LIST_OF_ONE ? 1 : 0;
 	fget_calls++;
 	last_fd = fd;
 	last_rights = rights->m;
@@ -105,10 +108,28 @@ reset(void)
 {
 	fget_calls = fget_error = last_fd = open_refs = hold_calls = release_calls = vas_calls = order_violation = 0;
 	last_rights = 0;
-	caps_limited = 0;
+	caps_mode = CAPS_NONE;
 	last_hold_handle = last_rel_handle = 0;
 	last_hold_fp = last_rel_fp = NULL;
 	hold_answer = NV_OK;
+}
+
+static void
+run_limited(const char *name, handler_t *h, void *params)
+{
+	struct thread td;
+	NV_STATUS st;
+	int lim;
+
+	/* a descriptor with a limited ioctl list (cap_ioctls_limit), a list of one or an empty one, is refused */
+	for (lim = 1; lim <= 2; lim++) {
+		reset();
+		caps_mode = lim;
+		st = h(NULL, NULL, params, &td);
+		CHECK(st == NV_ERR_INSUFFICIENT_PERMISSIONS && hold_calls == 0 && vas_calls == 0 && open_refs == 0,
+		    "%s: a descriptor with %s ioctl list is refused, our reference dropped (0x%x)", name,
+		    lim == 1 ? "a limited" : "an EMPTY", (unsigned)st);
+	}
 }
 
 static void
@@ -135,12 +156,7 @@ run_one(const char *name, handler_t *h, void *params, bool is_p2p)
 	st = h(NULL, NULL, params, &td);
 	CHECK(st == NV_ERR_INSUFFICIENT_PERMISSIONS, "%s: a bad fd is refused (0x%x)", name, (unsigned)st);
 	CHECK(hold_calls == 0 && release_calls == 0 && vas_calls == 0 && open_refs == 0, "%s: a bad fd reaches no hold, release or work", name);
-	/* a descriptor with a limited ioctl list (cap_ioctls_limit) is refused: the allowlist does not bind this path */
-	reset();
-	caps_limited = 1;
-	st = h(NULL, NULL, params, &td);
-	CHECK(st == NV_ERR_INSUFFICIENT_PERMISSIONS && hold_calls == 0 && vas_calls == 0 && open_refs == 0,
-	    "%s: a descriptor with a limited ioctl list is refused, our reference dropped (0x%x)", name, (unsigned)st);
+	run_limited(name, h, params);
 	/* the file is not an owner's */
 	reset();
 	hold_answer = NV_ERR_INSUFFICIENT_PERMISSIONS;
