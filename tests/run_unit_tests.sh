@@ -45,6 +45,12 @@ for src in "$REPO"/tests/unit/*_test.c; do
 		rc=1
 	fi
 done
+if cc -std=c11 -D_DEFAULT_SOURCE -Wall -Wextra -Werror -I "$REPO/sys" -o "$T/uvm_owner_probe" "$REPO/tests/ioctl/uvm_owner_probe.c"; then
+	echo "ok   uvm_owner_probe builds (run it as root with the modules loaded)"
+else
+	echo "FAIL uvm_owner_probe does not compile"
+	rc=1
+fi
 if cc -std=c11 -Wall -Wextra -Werror -I "$REPO/sys" -o "$T/uvm_ioctl_test" "$REPO/tests/ioctl/uvm_ioctl_test.c"; then
 	echo "ok   uvm_ioctl_test builds (run it with the modules loaded)"
 else
@@ -83,7 +89,7 @@ else
 	echo "FAIL uvm_stress.sh does not parse"
 	rc=1
 fi
-for t in dma_tag_size_test giant_yield_log_test; do
+for t in dma_tag_size_test giant_yield_log_test client_owner_pins_test; do
 	if sh "$REPO/tests/$t.sh"; then :; else rc=1; fi
 done
 exit $rc

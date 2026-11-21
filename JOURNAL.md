@@ -24,3 +24,10 @@
 
 ## 2026-11-20T12:15Z (combo worktree)
 - Fixes for the hardware stress hang: holder marker (no fstat), stop flag + bounded wait for churn/sysctl loops, UUID lookup WARN vs baseline, fake-mode selftest (red first, logs/uvm-2272/stress_selftest_red.txt). Next: gate, commit, push, Track.
+
+## 2026-11-21T04:13:44Z (#2373 sec)
+- Red first: client_owner_test.c against the old-behaviour stub header (log ~/work/gb10/logs/uvm-2373/model_red.txt), then green. Check in uvm_ioctl.c for the five rmCtrlFd requests; pins test with 11 plants; probe tests/ioctl/uvm_owner_probe.c builds. Module built with base lld (Linker: LLD, undefined nvUvmInterfaceClientOwnedByFile). man page SECURITY section, README section.
+- Needs the nvidia.ko of nvidia-gb10-freebsd agent/2373-nv-client-owner. Next: gate round 1 both repos, commit, push, Track, Honcho. Resume: git status.
+
+## 2026-11-21T05:37:10Z
+- Gate round 1 (receipt 45b1b792): pins strengthened (status returned, first call, moved-after and ignore-status plants), probe hardened (ioctl failure is FAIL, uid checks, closed fd row), cause logging, man/README. Rebuilt LLD. Next: round 2 then commit and push.

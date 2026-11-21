@@ -483,6 +483,23 @@ NV_STATUS nvUvmInterfaceUnsetPageDirectory(uvmGpuAddressSpaceHandle vaSpace);
 NV_STATUS nvUvmInterfaceDupAddressSpace(uvmGpuDeviceHandle device, NvHandle hUserClient,
     NvHandle hUserVASpace, uvmGpuAddressSpaceHandle *vaSpace, UvmGpuAddressSpaceInfo *vaSpaceInfo);
 
+/*
+ * Client ownership (Track #2373).  RM resolves the client handles of the entry points
+ * below with kernel privilege and checks nothing about the caller, so every
+ * user-supplied hClient passes nvUvmInterfaceClientHold first.  NV_OK only when fp, a
+ * file the caller holds a reference on, is an open /dev/nvidiactl file of nvidia.ko and
+ * hClient is an RM client allocated on that file; NV_ERR_INSUFFICIENT_PERMISSIONS
+ * otherwise (nothing taken).  On NV_OK the client is held: a free of it waits, and the
+ * hold keeps its own reference on fp, so the caller may drop its own at once.  Call
+ * nvUvmInterfaceClientRelease exactly once per NV_OK, never after a refusal, when the
+ * RM calls that use the handle are done.  Holds are per client, nest, and block nothing
+ * else.  Added to nvidia.ko in nvidia-gb10-freebsd (patches/patch-zz-nvidia_client_owner_*).
+ * An nvidia.ko without them makes nvidia-uvm.ko fail to load (undefined symbol).
+ */
+struct file;
+NV_STATUS nvUvmInterfaceClientHold(struct file *fp, NvHandle hClient);
+void nvUvmInterfaceClientRelease(struct file *fp, NvHandle hClient);
+
 /* fault buffers (02 section 3.6) */
 NV_STATUS nvUvmInterfaceInitFaultInfo(uvmGpuDeviceHandle device, UvmGpuFaultInfo *faultInfo);
 NV_STATUS nvUvmInterfaceDestroyFaultInfo(uvmGpuDeviceHandle device, UvmGpuFaultInfo *faultInfo);

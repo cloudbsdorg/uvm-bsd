@@ -29,6 +29,7 @@
  */
 
 #include "uvm.h"
+#include "uvm_client_owner.h"
 
 #include <sys/uio.h>
 #include <sys/capsicum.h>
@@ -170,11 +171,82 @@ uvm_h_pageable_mem_access_on_gpu(struct uvm_fd *fd, struct uvm_va_space *vas, vo
 
 /* ---- 5.2 - 5.4 registration ---- */
 
+/*
+ * uvm_client_hold - Track #2373.  The five requests that carry an rmCtrlFd
+ * hand RM a client handle that RM resolves with kernel privilege; before any
+ * RM call the handle must belong to the nvidiactl file the caller names, and
+ * it must stay that file's until the request is done (nvidia.ko holds the
+ * client between the hold and the release: a free of it waits, so a handle
+ * freed and reused by another user cannot slip in).  The rule is
+ * uvm_owner_verdict (sys/uvm_client_owner.h): a closed fd, an fd without
+ * read and ioctl rights, a file that is not an nvidiactl file and a handle
+ * that file does not own are all NV_ERR_INSUFFICIENT_PERMISSIONS (EPERM
+ * where a status becomes an errno).  The hold keeps its own reference on the
+ * file, so ours is dropped at once; the release drops the hold's.
+ */
+struct uvm_owner_hold {
+	struct file	*fp;	/* the file the hold keeps referenced; valid while held */
+	NvHandle	hClient;
+	bool		held;
+};
+
+static NV_STATUS
+uvm_client_hold(struct thread *td, enum uvm_owner_request req, NvS32 rmCtrlFd, NvHandle hClient,
+    NvHandle hSmcPartRef, struct uvm_owner_hold *h)
+{
+	cap_rights_t rights;
+	struct file *fp;
+	NV_STATUS owner;
+	int error;
+
+
+	h->fp = NULL;
+	h->held = false;
+	if (!uvm_owner_needed(req, hClient, hSmcPartRef))
+		return (NV_OK);
+	error = fget(td, rmCtrlFd, cap_rights_init(&rights, CAP_READ, CAP_IOCTL), &fp);
+	if (error != 0) {
+		uvm_log_slow("client ownership: rmCtrlFd %d does not resolve with read and ioctl rights (error %d)",
+		    (int)rmCtrlFd, error);
+		return (uvm_owner_verdict(error, NV_OK));
+	}
+	owner = nvUvmInterfaceClientHold(fp, hClient);
+	if (uvm_owner_verdict(0, owner) != NV_OK)
+		uvm_log_slow("client ownership: rmCtrlFd %d is not an nvidiactl file that owns client 0x%x",
+		    (int)rmCtrlFd, (unsigned)hClient);
+	if (uvm_owner_verdict(0, owner) == NV_OK) {
+		h->fp = fp;
+		h->hClient = hClient;
+		h->held = true;
+	}
+	fdrop(fp, td);	/* the hold has its own reference */
+	return (h->held ? NV_OK : NV_ERR_INSUFFICIENT_PERMISSIONS);
+}
+
+static void
+uvm_client_release(struct thread *td, struct uvm_owner_hold *h)
+{
+	(void)td;
+	if (h->held)
+		nvUvmInterfaceClientRelease(h->fp, h->hClient);
+	h->held = false;
+	h->fp = NULL;
+}
+
 static NV_STATUS
 uvm_h_register_gpu(struct uvm_fd *fd, struct uvm_va_space *vas, void *params, struct thread *td)
 {
-	(void)fd; (void)td;
-	return (uvm_vas_register_gpu(vas, params));
+	UVM_REGISTER_GPU_PARAMS *p = params;
+	struct uvm_owner_hold hold;
+	NV_STATUS status;
+
+	(void)fd;
+	status = uvm_client_hold(td, UVM_OWNER_REGISTER_GPU, p->rmCtrlFd, p->hClient, p->hSmcPartRef, &hold);
+	if (status != NV_OK)
+		return (status);
+	status = uvm_vas_register_gpu(vas, params);
+	uvm_client_release(td, &hold);
+	return (status);
 }
 
 static NV_STATUS
@@ -189,8 +261,17 @@ uvm_h_unregister_gpu(struct uvm_fd *fd, struct uvm_va_space *vas, void *params, 
 static NV_STATUS
 uvm_h_register_gpu_vaspace(struct uvm_fd *fd, struct uvm_va_space *vas, void *params, struct thread *td)
 {
-	(void)fd; (void)td;
-	return (uvm_vas_register_gpu_va_space(vas, params));
+	UVM_REGISTER_GPU_VASPACE_PARAMS *p = params;
+	struct uvm_owner_hold hold;
+	NV_STATUS status;
+
+	(void)fd;
+	status = uvm_client_hold(td, UVM_OWNER_REGISTER_GPU_VASPACE, p->rmCtrlFd, p->hClient, 0, &hold);
+	if (status != NV_OK)
+		return (status);
+	status = uvm_vas_register_gpu_va_space(vas, params);
+	uvm_client_release(td, &hold);
+	return (status);
 }
 
 static NV_STATUS
@@ -205,8 +286,17 @@ uvm_h_unregister_gpu_vaspace(struct uvm_fd *fd, struct uvm_va_space *vas, void *
 static NV_STATUS
 uvm_h_register_channel(struct uvm_fd *fd, struct uvm_va_space *vas, void *params, struct thread *td)
 {
-	(void)fd; (void)td;
-	return (uvm_vas_register_channel(vas, params));
+	UVM_REGISTER_CHANNEL_PARAMS *p = params;
+	struct uvm_owner_hold hold;
+	NV_STATUS status;
+
+	(void)fd;
+	status = uvm_client_hold(td, UVM_OWNER_REGISTER_CHANNEL, p->rmCtrlFd, p->hClient, 0, &hold);
+	if (status != NV_OK)
+		return (status);
+	status = uvm_vas_register_channel(vas, params);
+	uvm_client_release(td, &hold);
+	return (status);
 }
 
 static NV_STATUS
@@ -230,8 +320,17 @@ uvm_h_create_external_range(struct uvm_fd *fd, struct uvm_va_space *vas, void *p
 static NV_STATUS
 uvm_h_map_external_allocation(struct uvm_fd *fd, struct uvm_va_space *vas, void *params, struct thread *td)
 {
-	(void)fd; (void)td;
-	return (uvm_vas_map_external_allocation(vas, params));
+	UVM_MAP_EXTERNAL_ALLOCATION_PARAMS *p = params;
+	struct uvm_owner_hold hold;
+	NV_STATUS status;
+
+	(void)fd;
+	status = uvm_client_hold(td, UVM_OWNER_MAP_EXTERNAL_ALLOCATION, p->rmCtrlFd, p->hClient, 0, &hold);
+	if (status != NV_OK)
+		return (status);
+	status = uvm_vas_map_external_allocation(vas, params);
+	uvm_client_release(td, &hold);
+	return (status);
 }
 
 static NV_STATUS
@@ -542,8 +641,17 @@ uvm_h_peer_access(struct uvm_fd *fd, struct uvm_va_space *vas, void *params, str
 static NV_STATUS
 uvm_h_alloc_device_p2p(struct uvm_fd *fd, struct uvm_va_space *vas, void *params, struct thread *td)
 {
-	(void)fd; (void)vas; (void)params; (void)td;
+	UVM_ALLOC_DEVICE_P2P_PARAMS *p = params;
+	struct uvm_owner_hold hold;
+	NV_STATUS status;
+
+	(void)fd; (void)vas;
+	/* not implemented yet, but the check is in place so the implementation cannot skip it */
+	status = uvm_client_hold(td, UVM_OWNER_ALLOC_DEVICE_P2P, p->rmCtrlFd, p->hClient, 0, &hold);
+	if (status != NV_OK)
+		return (status);
 	UVM_NOT_YET("device P2P memory", "phase 2, 11 section 6");
+	uvm_client_release(td, &hold);
 	return (NV_ERR_NOT_SUPPORTED);
 }
 

@@ -108,6 +108,28 @@ GNU ld (in `/usr/local/bin`, first in the default `PATH`) links a module the
 kernel cannot load ("symbol nvUvmInterfaceChannelDestroy undefined").
 `sh tests/toolchain_test.sh` proves both with a hostile `PATH`.
 
+## Security: RM client ownership
+
+RM resolves a client handle with kernel privilege and never checks the caller, and handles are
+predictable (the first client of a boot is `0xC1D00000`). So the module accepts a client handle
+only from the process that holds the `/dev/nvidiactl` file the client was allocated on.
+
+- **Which requests:** `UVM_REGISTER_GPU` (with a client handle or an SMC reference),
+  `UVM_REGISTER_GPU_VASPACE`, `UVM_REGISTER_CHANNEL`, `UVM_MAP_EXTERNAL_ALLOCATION` and
+  `UVM_ALLOC_DEVICE_P2P` carry an `rmCtrlFd` and a handle. Before any RM call the module resolves
+  `rmCtrlFd` (read and ioctl rights) and asks `nvidia.ko` (`nvUvmInterfaceClientHold`, released
+  with `nvUvmInterfaceClientRelease` when the request ends) whether that file owns the handle.
+- **What a caller sees:** `rmStatus = NV_ERR_INSUFFICIENT_PERMISSIONS` (0x1B) for a closed fd, an
+  fd without the rights, a file that is not nvidiactl, or a handle that file does not own. The
+  console logs which of these it was (rate limited).
+- **Dependency:** the `nvidia.ko` of nvidia-gb10-freebsd branch `agent/2373-nv-client-owner` or
+  later. With an older one, `kldload nvidia-uvm` fails and the console shows
+  `symbol nvUvmInterfaceClientHold undefined`.
+- **Files and tests:** the rule is `sys/uvm_client_owner.h`; `tests/unit/client_owner_test.c`
+  is its model test, `tests/client_owner_pins_test.sh` pins the call sites (and runs deliberately
+  broken copies it must reject), and `tests/ioctl/uvm_owner_probe.c` is the two-user probe for a
+  test boot (run as root with both modules loaded). Track #2373.
+
 ## Tunables
 
 `hw.nvidia_uvm.builtin_tests` (0), `enable_va_space_mm` (1),
