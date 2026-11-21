@@ -34,6 +34,7 @@ WORK=${GB10_WORK:-$HOME/work/gb10}
 mkdir -p "$WORK/tmp"
 T=$(mktemp -d "$WORK/tmp/client-owner-pins.XXXXXXXX")
 trap 'rm -rf "$T"' EXIT HUP INT QUIT TERM
+. "$TESTSDIR/pins_lib.sh"
 
 # check_tree <sys dir>: prints one line per problem; no output = clean
 check_tree() {
@@ -54,7 +55,8 @@ check_tree() {
 	sed -n 's/^[[:space:]]*X(\(UVM_OWNER_[A-Z0-9_]*\)).*/\1/p' "$own" | sort > "$T/from_list"
 	diff "$T/from_header" "$T/from_list" > "$T/d1" || sed 's/^/rmCtrlFd structs vs UVM_OWNER_REQUESTS: /' "$T/d1"
 
-	# (2) the handler of each entry
+	# (2) the handler of each entry, on comment-stripped text
+	pin_strip "$ioc" > "$T/ioc.stripped"
 	while read -r e; do
 		fn=uvm_h_$(echo "${e#UVM_OWNER_}" | tr 'A-Z' 'a-z')
 		awk -v fn="$fn" -v e="$e" '
@@ -72,14 +74,18 @@ check_tree() {
 			else if (!use) print fn ": no call into the VA space code found (pin out of date)"
 			else if (!rel) print fn ": no uvm_client_release: the client stays held (a free of it blocks and the nvidiactl file leaks)"
 			else if (rel < use) print fn ": the release comes before the work it guards"
-		}' "$ioc"
+		}' "$T/ioc.stripped"
+		pin_dead "$(pin_fn "$ioc" "$fn")" || echo "$fn: a disabled-code form (if (0, 0 &&, || 1) in the handler"
 	done < "$T/from_list"
+	pin_strip "$sysd/uvm_main.c" | grep -qF 'MODULE_DEPEND(nvidia_uvm, nvidia, 2, 2, 2);' || echo "uvm_main.c: no live MODULE_DEPEND(nvidia_uvm, nvidia, 2, 2, 2) (a comment does not count)"
+	pin_dead "$(pin_fn "$ioc" uvm_client_hold)" || echo "uvm_client_hold: a disabled-code form"
+	pin_dead "$(pin_fn "$ioc" uvm_client_release)" || echo "uvm_client_release: a disabled-code form"
 
 	# (3) the consumers of hClient: functions that call the RM entry points with a user handle
-	cat "$sysd"/*.c | awk '
+	for f in "$sysd"/*.c; do pin_strip "$f"; done | awk '
 	/^[a-z_0-9]+\(/ { cur = $0; sub(/\(.*/, "", cur) }
-	/nvUvmInterfaceDupAddressSpace\(|nvUvmInterfaceDupMemory\(|nvUvmInterfaceRetainChannel\(|UvmGpuClientInfo client = \{ p->hClient/ { print cur }' | sort -u > "$T/consumers"
-	printf '%s\n' uvm_ext_map_one uvm_register_channel_retain uvm_vas_register_gpu uvm_vas_register_gpu_va_space | sort > "$T/known"
+	/nvUvmInterfaceDupAddressSpace\(|nvUvmInterfaceDupMemory\(|nvUvmInterfaceRetainChannel\(|[.>]hClient = p->hClient|UvmGpuClientInfo [a-z_]+ = \{ p->hClient/ { print cur }' | sort -u > "$T/consumers"
+	printf '%s\n' uvm_ext_map_one uvm_register_channel_retain uvm_vas_register_gpu uvm_vas_register_gpu_va_space uvm_vas_register_channel | sort > "$T/known"
 	diff "$T/known" "$T/consumers" > "$T/d3" || sed 's/^/hClient consumers (< expected, > found; a new function hands hClient to RM: give its request a uvm_client_hold and add it to the known list): /' "$T/d3"
 }
 
@@ -100,20 +106,29 @@ plant no-check-channel uvm_ioctl.c 's/UVM_OWNER_REGISTER_CHANNEL, p->rmCtrlFd/UV
 plant no-check-map uvm_ioctl.c 's/UVM_OWNER_MAP_EXTERNAL_ALLOCATION, p->rmCtrlFd/UVM_OWNER_NONE, p->rmCtrlFd/'
 plant no-check-p2p uvm_ioctl.c 's/UVM_OWNER_ALLOC_DEVICE_P2P, p->rmCtrlFd/UVM_OWNER_NONE, p->rmCtrlFd/'
 
+plant commented-hold uvm_ioctl.c 's|^	status = uvm_client_hold(td, UVM_OWNER_REGISTER_CHANNEL.*|	status = NV_OK; /* status = uvm_client_hold(td, UVM_OWNER_REGISTER_CHANNEL, p->rmCtrlFd, p->hClient, 0, \&hold); */|'
+plant disabled-hold uvm_ioctl.c 's|^	if (status != NV_OK)$|	if (0 \&\& status != NV_OK)|'
+plant module-depend-commented uvm_main.c 's|^MODULE_DEPEND(nvidia_uvm, nvidia, 2, 2, 2);|/* MODULE_DEPEND(nvidia_uvm, nvidia, 2, 2, 2); */|'
 plant ignore-status uvm_ioctl.c '/status = uvm_client_hold(td, UVM_OWNER_REGISTER_CHANNEL/{n;N;d;}'
 plant no-release-first-handler uvm_ioctl.c '/uvm_client_release(td, &hold);/{x;s/^/x/;/^x$/{x;d;};x;}'
 # the hold moved after the work in one handler: swap the two statements
 mkdir -p "$T/p-moved-after"
 cp "$REPO"/sys/*.c "$REPO"/sys/*.h "$T/p-moved-after/"
-python3 -I - "$T/p-moved-after/uvm_ioctl.c" <<'PY'
+if python3 -I - "$T/p-moved-after/uvm_ioctl.c" <<'PY'
 import re, sys
 p = sys.argv[1]
 s = open(p).read()
 m = re.search(r"(\tstatus = uvm_client_hold\(td, UVM_OWNER_REGISTER_CHANNEL[^\n]*\n\tif \(status != NV_OK\)\n\t\treturn \(status\);\n)(\tstatus = uvm_vas_register_channel\(vas, params\);\n)", s)
+if m is None:
+    sys.exit(3)
 s = s[:m.start()] + m.group(2) + m.group(1) + s[m.end():]
 open(p, "w").write(s)
 PY
-if [ -z "$(check_tree "$T/p-moved-after")" ]; then echo "FAIL plant moved-after stays green"; rc=1; else echo "ok   plant moved-after is red"; fi
+then
+	if [ -z "$(check_tree "$T/p-moved-after")" ]; then echo "FAIL plant moved-after stays green"; rc=1; else echo "ok   plant moved-after is red"; fi
+else
+	echo "FAIL plant moved-after: the handler no longer has the shape the plant rewrites (update the plant)"; rc=1
+fi
 append_plant() {	# append_plant <name> <file> <text>
 	mkdir -p "$T/p-$1"
 	cp "$REPO"/sys/*.c "$REPO"/sys/*.h "$T/p-$1/"
@@ -124,6 +139,14 @@ append_plant unlisted-request nvidia_uvm_ioctl.h 'typedef struct {
 	NvS32 rmCtrlFd;
 	NV_STATUS rmStatus;
 } UVM_NEW_THING_PARAMS;'
+append_plant new-consumer-assign uvm_va_space.c 'NV_STATUS
+uvm_new_assign(struct uvm_gpu *gpu, UVM_MAP_EXTERNAL_ALLOCATION_PARAMS *p)
+{
+	UvmGpuClientInfo client;
+
+	client.hClient = p->hClient;
+	return (nvUvmInterfaceGetGpuInfo(gpu, &client));
+}'
 append_plant new-consumer uvm_va_space.c 'NV_STATUS
 uvm_new_path(struct uvm_gpu *gpu, UVM_MAP_EXTERNAL_ALLOCATION_PARAMS *p)
 {

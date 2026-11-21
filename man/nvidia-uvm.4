@@ -104,12 +104,23 @@ The handle must be an RM client that was allocated on the
 file that
 .Va rmCtrlFd
 names in the calling process.
-The descriptor must resolve with the read and ioctl rights, the file must be an
+The descriptor must resolve with the
+.Dv CAP_IOCTL
+right, which is the only right required (a descriptor limited to it by
+.Xr cap_rights_limit 2
+is accepted; one with a limited ioctl list, see
+.Xr cap_ioctls_limit 2 ,
+is refused), the file must be an
 nvidiactl file of
 .Pa nvidia.ko ,
 and
 .Pa nvidia.ko
 must list the handle as allocated on that file.
+Allocate the root client on
+.Pa /dev/nvidiactl
+and pass that descriptor; a client allocated on a
+.Pa /dev/nvidiaN
+descriptor is always refused.
 Anything else, including a closed descriptor, a file that is not nvidiactl and
 another user's handle, fails with
 .Dv NV_ERR_INSUFFICIENT_PERMISSIONS

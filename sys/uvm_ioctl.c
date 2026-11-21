@@ -179,7 +179,7 @@ uvm_h_pageable_mem_access_on_gpu(struct uvm_fd *fd, struct uvm_va_space *vas, vo
  * client between the hold and the release: a free of it waits, so a handle
  * freed and reused by another user cannot slip in).  The rule is
  * uvm_owner_verdict (sys/uvm_client_owner.h): a closed fd, an fd without
- * read and ioctl rights, a file that is not an nvidiactl file and a handle
+ * the ioctl right, a file that is not an nvidiactl file and a handle
  * that file does not own are all NV_ERR_INSUFFICIENT_PERMISSIONS (EPERM
  * where a status becomes an errno).  The hold keeps its own reference on the
  * file, so ours is dropped at once; the release drops the hold's.
@@ -195,32 +195,46 @@ uvm_client_hold(struct thread *td, enum uvm_owner_request req, NvS32 rmCtrlFd, N
     NvHandle hSmcPartRef, struct uvm_owner_hold *h)
 {
 	cap_rights_t rights;
+	struct filecaps caps;
 	struct file *fp;
-	NV_STATUS owner;
-	int error;
-
+	NV_STATUS owner, verdict;
+	int error, limited;
 
 	h->fp = NULL;
 	h->held = false;
 	if (!uvm_owner_needed(req, hClient, hSmcPartRef))
 		return (NV_OK);
-	error = fget(td, rmCtrlFd, cap_rights_init(&rights, CAP_READ, CAP_IOCTL), &fp);
+	error = fget_cap(td, rmCtrlFd, cap_rights_init_one(&rights, CAP_IOCTL), NULL, &fp, &caps);
 	if (error != 0) {
-		uvm_log_slow("client ownership: rmCtrlFd %d does not resolve with read and ioctl rights (error %d)",
-		    (int)rmCtrlFd, error);
+		uvm_log_slow("client ownership: rmCtrlFd %d %s (error %d)", (int)rmCtrlFd,
+		    error == EBADF ? "is not an open descriptor" : "lacks the CAP_IOCTL right", error);
 		return (uvm_owner_verdict(error, NV_OK));
 	}
+	/*
+	 * The descriptor's ioctl allowlist (cap_ioctls_limit(2)) is enforced only by
+	 * kern_ioctl, which this path never goes through: a holder limited to a few
+	 * escapes must not be able to drive the client through the kernel instead.
+	 * Fail closed on any limited descriptor.
+	 */
+	limited = caps.fc_ioctls != NULL;
+	filecaps_free(&caps);
+	if (limited) {
+		uvm_log_slow("client ownership: rmCtrlFd %d has a limited ioctl list (cap_ioctls_limit)", (int)rmCtrlFd);
+		fdrop(fp, td);
+		return (uvm_owner_verdict(ENOTCAPABLE, NV_OK));
+	}
 	owner = nvUvmInterfaceClientHold(fp, hClient);
-	if (uvm_owner_verdict(0, owner) != NV_OK)
-		uvm_log_slow("client ownership: rmCtrlFd %d is not an nvidiactl file that owns client 0x%x",
-		    (int)rmCtrlFd, (unsigned)hClient);
-	if (uvm_owner_verdict(0, owner) == NV_OK) {
+	verdict = uvm_owner_verdict(0, owner);
+	if (verdict != NV_OK)
+		uvm_log_slow("client ownership: rmCtrlFd %d is not an nvidiactl file, or does not own client 0x%x "
+		    "(allocate the root client on /dev/nvidiactl and pass that descriptor)", (int)rmCtrlFd, (unsigned)hClient);
+	if (verdict == NV_OK) {
 		h->fp = fp;
 		h->hClient = hClient;
 		h->held = true;
 	}
 	fdrop(fp, td);	/* the hold has its own reference */
-	return (h->held ? NV_OK : NV_ERR_INSUFFICIENT_PERMISSIONS);
+	return (verdict);
 }
 
 static void

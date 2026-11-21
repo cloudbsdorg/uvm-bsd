@@ -11,10 +11,17 @@
  * and checks nothing about the caller, so the module must: a handle names
  * an RM client only for the process that holds the /dev/nvidiactl file that
  * client was allocated on.  Possession of that open file is the capability
- * (a dup of the fd, or the fd sent over a socket, is the same file).
+ * (a dup of the fd, or the fd sent over a socket, is the same file).  The
+ * invariant: the root client must have been allocated on the nvidiactl fd that
+ * is later passed as rmCtrlFd; a client allocated on a device (nvidiaN) fd
+ * is owned by nobody and refused.
  *
  * The rule, in the order the kernel applies it:
- *   1. the fd must resolve in the caller's table with read and ioctl rights;
+ *   1. the fd must resolve in the caller's table with the CAP_IOCTL right (the
+ *      one right that lets its holder drive the client; a process in
+ *      capability mode needs no more on that fd) and must NOT carry an ioctl
+ *      list (cap_ioctls_limit): that allowlist is enforced only by kern_ioctl,
+ *      which this path never goes through, so a limited descriptor is refused;
  *   2. nvidia.ko must say the file is an nvidiactl file that owns hClient;
  *   3. any other answer, including "no such fd", is
  *      NV_ERR_INSUFFICIENT_PERMISSIONS (EPERM where a status becomes an

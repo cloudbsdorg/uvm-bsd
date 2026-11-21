@@ -31,3 +31,12 @@
 
 ## 2026-11-21T05:37:10Z
 - Gate round 1 (receipt 45b1b792): pins strengthened (status returned, first call, moved-after and ignore-status plants), probe hardened (ioctl failure is FAIL, uid checks, closed fd row), cause logging, man/README. Rebuilt LLD. Next: round 2 then commit and push.
+
+## 2026-11-21T07:00:51Z (#2373 fix round 3)
+- uvm side in tree: CAP_IOCTL only, MODULE_DEPEND nvidia 2,2,2 (+pin), uvm glue harness (tests/client_owner_glue_test.sh, 23 mutants red), pins on comment-stripped text (+4 plants), PROVENANCE paragraph, C-Q Q-013 filed in uvm-qa, probe rows (/dev/nvidia0, dup, SCM_RIGHTS pass, SMC-only, P2P, setgroups, -j JSON), tests/ioctl/uvm_owner_race.c (4 loops), uvm_stress.sh -O, run_owner_boot.sh. Not yet committed. nv gate round 2 running; nv commit then phase0 merge branch; then uvm gate rounds.
+
+## 2026-11-21T07:07:12Z
+- uvm worktree: all suites pass in tree (98 ok, 0 FAIL), module built LLD. Waiting for the p0 nv gate, then uvm gate round 1.
+
+## 2026-11-21T07:13:10Z
+- uvm gate round 1 receipt 9e2a08f5 fixed (fget_cap + limited ioctl list refusal, race loops rewritten with assertions and watchdog, probe fixes, boot script, stress baseline, man). Round 2 running (gate-u2-2.log). Module rebuilt with base LLD.

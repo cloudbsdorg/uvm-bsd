@@ -181,3 +181,20 @@ when its checked answer arrives in a new frozen revision.
 | Q-005 NV_WARN_NOTHING_TO_DO from UVM_MM_INITIALIZE in this phase | open | answered; release ordering comes with managed ranges |
 | Q-006 the core/backend split against the spec's locking and teardown order | open | the mapping of spec objects to layers in docs/ARCHITECTURE.md |
 | Q-007 the core device registry (probe by identity, two reference counts) against the spec's register-GPU order | open | the core reference brackets the spec's retain and release steps; the RM client handles stay backend-side |
+
+## Track #2373: RM client ownership (rmCtrlFd and hClient)
+
+The registration requests take an `rmCtrlFd` and an RM client handle that RM resolves with kernel
+privilege. Spec r1 (01-user-abi.md, the `rmCtrlFd` paragraph) says the field is accepted and stored
+but not validated by this driver generation and that RM validates the handles; for the
+kernel-privilege entry points this driver uses (dup address space, dup memory, retain channel, GPU
+info with client) that is not true, and this change deviates from the spec on purpose: before any RM
+call the handle must belong to the nvidiactl file that `rmCtrlFd` names in the caller. The question
+is Q-013 in `uvm-qa/QUESTIONS.md`; the spec erratum is the describer's to make. Sources consulted for
+this change: this repository; spec r1 01, 02 and 08; the MIT headers `nvos.h` and `nv_escape.h` of
+open-gpu-kernel-modules 580.178.04 (layouts and ioctl numbers only); the FreeBSD OS layer of the
+NVIDIA 580.178.04 package (`nvidia_subr.c`, `nvidia_ctl.c`) and its prepared tree in
+nvidia-gb10-freebsd; FreeBSD sources `sys/kern/kern_descrip.c`, `sys/fs/devfs/devfs_vnops.c`,
+`sys/sys/file.h` and Capsicum's `sys/sys/caprights.h` (`CAP_IOCTL`). Nothing from the Linux kernel,
+`kernel-open/` or the describer's notes was read. The rule is `sys/uvm_client_owner.h`; the
+nvidia.ko side is `src/gb10-client-owner/` in nvidia-gb10-freebsd.
