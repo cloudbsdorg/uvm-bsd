@@ -156,13 +156,152 @@ uvm_new_path(struct uvm_gpu *gpu, UVM_MAP_EXTERNAL_ALLOCATION_PARAMS *p)
 # the probe keeps its control rows: without them a module that refuses everyone would pass
 probe_rows() {	# probe_rows <probe source>: prints each missing row
 	for row in "own fd, own handle (owner)" "a dup of own fd, own handle (the same file)" "a dup of own fd, the other's handle" \
-	    "a dup of own fd with an EMPTY ioctl list, own handle" "the other's nvidiactl file passed to us"; do
+	    "a dup of own fd with a limited ioctl list, own handle" "a dup of own fd with an EMPTY ioctl list, own handle" \
+	    "the other's nvidiactl file passed to us"; do
 		grep -qF -- "$row" "$1" || echo "uvm_owner_probe.c lost the row: $row"
 	done
 }
 if [ -z "$(probe_rows "$REPO/tests/ioctl/uvm_owner_probe.c")" ]; then echo "ok   the probe keeps its control rows"; else echo "FAIL probe rows:"; probe_rows "$REPO/tests/ioctl/uvm_owner_probe.c"; rc=1; fi
 grep -v 'own fd, own handle (owner)' "$REPO/tests/ioctl/uvm_owner_probe.c" > "$T/probe.mut"
 if [ -z "$(probe_rows "$T/probe.mut")" ]; then echo "FAIL plant probe-owner-row-dropped stays green"; rc=1; else echo "ok   plant probe-owner-row-dropped is red"; fi
+
+grep -v 'a dup of own fd with a limited ioctl list, own handle' "$REPO/tests/ioctl/uvm_owner_probe.c" > "$T/probe.mut2"
+if cmp -s "$REPO/tests/ioctl/uvm_owner_probe.c" "$T/probe.mut2"; then echo "FAIL plant probe-limited-row-dropped changed nothing"; rc=1
+elif [ -z "$(probe_rows "$T/probe.mut2")" ]; then echo "FAIL plant probe-limited-row-dropped stays green"; rc=1; else echo "ok   plant probe-limited-row-dropped is red"; fi
+
+# the race loops prove nothing when they did nothing: the vacuity rule is in one place and sets "bad"
+RACE=$REPO/tests/ioctl/uvm_owner_race.c
+race_pins() {	# race_pins <source>: prints each problem
+	pin_strip "$1" > "$T/race.stripped"
+	# the vacuity rule is run, not read: the function is cut out of the source and fed rows
+	awk '/^vacuous_loop\(/ { p = 1; print "static int" } p { print } p && /^}/ { exit }' "$T/race.stripped" > "$T/vac.fn"
+	{ cat "$T/vac.fn"; cat <<'CEOF'
+#include <stdio.h>
+#define	ROW(l, a, b, o, want) do { if (vacuous_loop(l, a, b, o) != want) { printf("vacuous_loop(%d, %d, %d, %d) is not %d\n", l, a, b, o, want); bad = 1; } } while (0)
+int main(void)
+{
+	int bad = 0;
+
+	ROW(4, 1, 1, 0, 0); ROW(4, 3, 1, 2, 0); ROW(4, 5, 1, 4, 0); ROW(4, 5, 1, 5, 1); ROW(4, 5, 1, 6, 1);
+	ROW(4, 0, 1, 0, 1); ROW(1, 5, 0, 0, 1); ROW(2, 0, 5, 0, 1); ROW(3, 5, 5, 100, 0); ROW(5, 5, 0, 0, 1);
+	return (bad);
+}
+CEOF
+	} > "$T/vac.c"
+	if ! cc -std=c11 -Wall -Wextra -o "$T/vac" "$T/vac.c" 2>"$T/vac.err"; then echo "the vacuity rule does not compile as cut out: $(head -1 "$T/vac.err")"; elif ! "$T/vac" > "$T/vac.out" 2>&1; then echo "the vacuity rule: $(head -2 "$T/vac.out" | tr '\n' ' ')"; fi
+	grep -qF 'int vac = vacuous_loop(loop, a, b, (long)atomic_load(&open_failed));' "$T/race.stripped" || echo "report() does not ask the vacuity rule"
+	awk '/^\tif \(vac\) \{/ { getline nxt; if (nxt ~ /atomic_store\(&bad, 1\);/) ok = 1 } END { exit !ok }' "$T/race.stripped" || echo "a vacuous loop does not set bad"
+	grep -qF 'case 4: return (loop4());' "$T/race.stripped" && grep -qF 'case 5: return (loop5());' "$T/race.stripped" || echo "loops 4 and 5 are not both run"
+	grep -qF 'RETRIES' "$T/race.stripped" && grep -qF 'atomic_fetch_add(&sh->stuck, 1);' "$T/race.stripped" || echo "loop 5 does not count a client that stays refused"
+	grep -qF 'alarm((unsigned)(seconds * wanted_loops() + 40));' "$T/race.stripped" || echo "the watchdog does not scale with the loops that run"
+	grep -qF 'for (c = 1; c <= NLOOPS; c++) {' "$T/race.stripped" || echo "main does not run NLOOPS loops"
+	grep -qF 'kill(*p1, SIGKILL);' "$T/race.stripped" || echo "spawn_two leaves the first child running when the second fork fails"
+	grep -qF 'atomic_store(&iters_b, atomic_load(&sh->s_hits));' "$T/race.stripped" || echo "loop 5 does not report the stranger's contacts (a loop with none is vacuous)"
+	grep -qF 'r = rm_free_client(c.ctl, h + k);' "$T/race.stripped" && grep -qF 'if (r == FREE_REFUSED)' "$T/race.stripped" || echo "the stranger does not count the frees that met a client"
+	grep -qF 'become(UID_STRANGER)' "$T/race.stripped" && grep -qF 'become(UID_VICTIM)' "$T/race.stripped" || echo "loop 5 does not use its dedicated uids"
+	grep -qF 'atomic_store(&last_bad, failed' "$T/race.stripped" && grep -qF 'atomic_store(&bad, 0);' "$T/race.stripped" || echo "a loop verdict leaks into the next loop (bad is not reset by report)"
+	grep -qF 'atomic_fetch_add(&sh->s_freed, 1);' "$T/race.stripped" && grep -qF 'atomic_load(&sh->s_freed) != 0' "$T/race.stripped" || echo "loop 5 does not fail when the stranger frees a client it does not own"
+	grep -qF 'atomic_fetch_add(&sh->v_free_refused, 1);' "$T/race.stripped" || echo "loop 5 does not fail when the victim is refused the free of its own client"
+	grep -qF 'int failed = atomic_load(&bad);' "$T/race.stripped" && grep -qF '\"failed\":%s' "$T/race.stripped" || echo "report() does not emit failed before the vacuity rule hides it"
+	grep -qF 'RE-RUN: loop %d is vacuous' "$T/race.stripped" || echo "a vacuous loop is reported as FAIL on the diagnostics"
+	grep -qF 'atomic_store(&last_bad, failed ? 1 : (vac ? 4 : 0));' "$T/race.stripped" || echo "a vacuous-only loop does not have its own status (4), apart from a failed one (1)"
+	grep -qF 'FAIL: loop 5: the victim or the stranger did not exit 0' "$T/race.stripped" && grep -qF 'FAIL: loop 4: the allocator process did not exit 0' "$T/race.stripped" || echo "a child that died leaves no reason on the diagnostics"
+	grep -qF 'fprintf(diag(), "FAIL: the stranger freed' "$T/race.stripped" || echo "diagnostics of loop 5 do not go through diag() (they would sit in the JSON lines)"
+}
+if [ -z "$(race_pins "$RACE")" ]; then echo "ok   race loops: the vacuity rule (run on rows) and loop 5"; else echo "FAIL race loops:"; race_pins "$RACE"; rc=1; fi
+race_plant() {	# race_plant <name> <sed>
+	sed -e "$2" "$RACE" > "$T/race.mut"
+	if cmp -s "$RACE" "$T/race.mut"; then echo "FAIL plant $1 changed nothing"; rc=1; return; fi
+	if [ -z "$(race_pins "$T/race.mut")" ]; then echo "FAIL plant $1 stays green"; rc=1; else echo "ok   plant $1 is red"; fi
+}
+race_plant open-failures-ignored 's/ || (loop == 4 \&\& 2 \* open_fail >= a + open_fail)//'
+race_plant open-failures-off-by-one 's/2 \* open_fail >= a + open_fail/2 * open_fail > a + open_fail/'
+race_plant zero-b-passes 's/a == 0 || b == 0 ||/a == 0 ||/'
+race_plant vacuous-not-bad '/^	if (vac) {/{n;s/.*/\t\t(void)vac;/;}'
+race_plant stuck-not-counted 's/atomic_fetch_add(&sh->stuck, 1);/(void)sh;/'
+race_plant loop5-not-run 's/case 5: return (loop5());/case 5: return (loop4());/'
+race_plant watchdog-four-loops 's/seconds \* wanted_loops() + 40/seconds * 4 + 40/'
+race_plant orphan-left-running 's/kill(\*p1, SIGKILL);/(void)p1;/'
+race_plant contacts-not-reported 's/atomic_load(&sh->s_hits)/atomic_load(\&sh->s_frees)/'
+race_plant shared-uids 's/become(UID_STRANGER)/become(UID_VICTIM)/'
+race_plant vacuous-as-failed-status 's/failed ? 1 : (vac ? 4 : 0)/(failed || vac) ? 1 : 0/'
+race_plant dead-child-silent 's/FAIL: loop 5: the victim or the stranger did not exit 0/loop 5/'
+race_plant bad-not-reset 's/^	atomic_store(&bad, 0);$/	(void)0;/'
+race_plant stranger-free-uncounted 's/atomic_fetch_add(&sh->s_freed, 1);/(void)sh;/'
+race_plant victim-free-unchecked 's/atomic_fetch_add(&sh->v_free_refused, 1);/(void)sh;/'
+race_plant failed-hidden 's/int failed = atomic_load(&bad);/int failed = 0;/'
+race_plant vacuous-as-fail 's/RE-RUN: loop %d is vacuous/FAIL: loop %d is vacuous/'
+
+# the boot script reads the probe and the loops the agreed way
+BOOT=$REPO/tests/ioctl/run_owner_boot.sh
+boot_pins() {	# boot_pins <script> <probe source>
+	grep -qF '"refusal":true' "$1" || echo "the boot script does not read the probe's refusal field"
+	grep -qF 'say "RE-RUN"' "$1" || echo "the boot script cannot end RE-RUN"
+	grep -qF 'RmClientDataValidation is overridden to off' "$1" || echo "the boot script does not refuse a host with the validation setting overridden to off"
+	grep -qF 'another process holds /dev/nvidiactl' "$1" && grep -qF 'fstat.race' "$1" || echo "the boot script does not look for another holder of /dev/nvidiactl just before the race loops"
+	grep -qF '\"refusal\"' "$2" || echo "the probe does not print the refusal field"
+	# the row reading is run on fixtures: failed beats vacuous, vacuous alone is RE-RUN, a clean row says nothing
+	sed -n '/^# BEGIN read_race_rows/,/^# END read_race_rows/p' "$1" > "$T/rrr.sh"
+	[ -s "$T/rrr.sh" ] || { echo "the boot script has no read_race_rows function"; return; }
+	for fx in 'failed-and-vacuous|{"schema":"uvm-owner-race/1","loop":5,"what":"w","iterations_a":3,"iterations_b":0,"open_failed":0,"failed":true,"vacuous":true,"ok":false}|FAIL loop 5|0' \
+	    'vacuous-only|{"schema":"uvm-owner-race/1","loop":4,"what":"w","iterations_a":2,"iterations_b":9,"open_failed":7,"failed":false,"vacuous":true,"ok":false}|RE-RUN loop 4|1' \
+	    'failed-only|{"schema":"uvm-owner-race/1","loop":3,"what":"w","iterations_a":9,"iterations_b":9,"open_failed":0,"failed":true,"vacuous":false,"ok":false}|FAIL loop 3|0' \
+	    'vacuous-b-zero|{"schema":"uvm-owner-race/1","loop":4,"what":"w","iterations_a":9,"iterations_b":0,"open_failed":0,"failed":false,"vacuous":true,"ok":false}|second side did no work|1' \
+	    'vacuous-loop5|{"schema":"uvm-owner-race/1","loop":5,"what":"w","iterations_a":9,"iterations_b":0,"open_failed":0,"failed":false,"vacuous":true,"ok":false}|could not be exercised|1' \
+	    'clean|{"schema":"uvm-owner-race/1","loop":1,"what":"w","iterations_a":9,"iterations_b":9,"open_failed":0,"failed":false,"vacuous":false,"ok":true}|NOTHING|0'; do
+		name=${fx%%|*}; rest=${fx#*|}; row=${rest%%|*}; rest=${rest#*|}; want=${rest%%|*}; wantrerun=${rest#*|}
+		printf '%s\n' "$row" > "$T/rrr.jsonl"
+		( rerun=0; out=; say() { out="$out$*;"; }; fail() { out="${out}FAIL $*;"; }
+		  . "$T/rrr.sh"; read_race_rows "$T/rrr.jsonl"
+		  case $want in NOTHING) [ -z "$out" ] || echo "fixture $name: said '$out'" ;; *) case $out in *"$want"*) ;; *) echo "fixture $name: said '$out', wanted $want" ;; esac ;; esac
+		  [ "$rerun" = "$wantrerun" ] || echo "fixture $name: rerun $rerun, wanted $wantrerun"
+		  case $name in failed-and-vacuous) case $out in *RE-RUN*) echo "fixture $name: a failed loop was read as RE-RUN" ;; esac ;; esac )
+	done
+	# the validation setting is read as a number, in the kenv and the sysctl form
+	sed -n '/^# BEGIN validation_override/,/^# END validation_override/p' "$1" > "$T/vo.sh"
+	[ -s "$T/vo.sh" ] || { echo "the boot script has no validation_override function"; return; }
+	for fx in 'off-kenv|hw.nvidia.registry.RmClientDataValidation="0"|FAIL' 'off-sysctl|hw.nvidia.registry.RmClientDataValidation: 0|FAIL' \
+	    'on-kenv|hw.nvidia.registry.RmClientDataValidation="1"|NOFAIL' 'dwords|hw.nvidia.registry.RegistryDwords="RmClientDataValidation=1;RmFoo=0"|NOFAIL' 'absent|kenv exit 0|NOFAIL'; do
+		name=${fx%%|*}; rest=${fx#*|}; line=${rest%%|*}; want=${rest#*|}
+		printf '%s\n' "$line" > "$T/vo.txt"
+		( out=; say() { out="$out$*;"; }; fail() { out="${out}FAIL $*;"; }
+		  . "$T/vo.sh"; validation_override "$T/vo.txt"
+		  case $want in FAIL) case $out in FAIL*) ;; *) echo "validation fixture $name: said '$out', wanted FAIL" ;; esac ;;
+		  *) case $out in FAIL*) echo "validation fixture $name: failed wrongly: '$out'" ;; esac ;; esac )
+	done
+}
+if [ -z "$(boot_pins "$BOOT" "$REPO/tests/ioctl/uvm_owner_probe.c")" ]; then echo "ok   the boot script: refusal field, row reading on fixtures, RE-RUN, validation, busy device"; else echo "FAIL boot script:"; boot_pins "$BOOT" "$REPO/tests/ioctl/uvm_owner_probe.c"; rc=1; fi
+boot_plant() {	# boot_plant <name> <sed>
+	sed -e "$2" "$BOOT" > "$T/boot.mut"
+	if cmp -s "$BOOT" "$T/boot.mut"; then echo "FAIL plant $1 changed nothing"; rc=1; return; fi
+	if [ -z "$(boot_pins "$T/boot.mut" "$REPO/tests/ioctl/uvm_owner_probe.c")" ]; then echo "FAIL plant $1 stays green"; rc=1; else echo "ok   plant $1 is red"; fi
+}
+boot_plant no-rerun-verdict 's/say "RE-RUN"/say "FAIL"/'
+boot_plant no-busy-guard 's/another process holds \/dev\/nvidiactl/something/'
+boot_plant validation-ignored 's/RmClientDataValidation is overridden to off/note/'
+boot_plant validation-by-name 's/\[ $((vval)) = 0 \]/true/'
+boot_plant loop5-cause-generic 's/could not be exercised/did no work/'
+boot_plant failed-arm-dead 's/"failed":true/"failed":nope/'
+boot_plant stale-busy-check 's/fstat.race/fstat.before/g'
+boot_plant vacuous-says-fail 's/say "RE-RUN loop/fail "loop/'
+sed -e 's/\\"refusal\\"/\\"refused_x\\"/' "$REPO/tests/ioctl/uvm_owner_probe.c" > "$T/probe.mut3"
+if [ -z "$(boot_pins "$BOOT" "$T/probe.mut3")" ]; then echo "FAIL plant probe-no-refusal-field stays green"; rc=1; else echo "ok   plant probe-no-refusal-field is red"; fi
+
+# the version pins the man page promises: a live MODULE_DEPEND on exactly version 2 (uvm_main.c; nvidia.ko's MODULE_VERSION is pinned in nvidia-gb10-freebsd tests/client_owner_test.sh)
+mkdir -p "$T/p-depend-1"; cp "$REPO"/sys/*.c "$REPO"/sys/*.h "$T/p-depend-1/"
+sed -e 's/MODULE_DEPEND(nvidia_uvm, nvidia, 2, 2, 2);/MODULE_DEPEND(nvidia_uvm, nvidia, 1, 1, 1);/' "$REPO/sys/uvm_main.c" > "$T/p-depend-1/uvm_main.c"
+if cmp -s "$REPO/sys/uvm_main.c" "$T/p-depend-1/uvm_main.c"; then echo "FAIL plant module-depend-version-1 changed nothing"; rc=1
+elif [ -z "$(check_tree "$T/p-depend-1")" ]; then echo "FAIL plant module-depend-version-1 stays green"; rc=1; else echo "ok   plant module-depend-version-1 is red"; fi
+
+# the man page says what a load failure looks like against an older nvidia.ko
+if grep -qF 'mismatched dependency' "$REPO/man/nvidia-uvm.4" && grep -qF 'symbol nvUvmInterfaceClientHold undefined' "$REPO/man/nvidia-uvm.4"; then echo "ok   the man page names both load failures"; else echo "FAIL the man page lacks the mismatched dependency or the undefined symbol"; rc=1; fi
+# the nvidia side of the version pin, when that repository is at hand (NVIDIA_GB10_REPO, or the default work tree)
+NVREPO=${NVIDIA_GB10_REPO:-$WORK/nvidia-gb10-freebsd}
+if [ -f "$NVREPO/patches/patch-zz-nvidia_client_owner_version_pci.c" ]; then
+	if grep -qF '+MODULE_VERSION(nvidia, 2);' "$NVREPO/patches/patch-zz-nvidia_client_owner_version_pci.c"; then echo "ok   nvidia.ko is module version 2 ($NVREPO)"; else echo "FAIL $NVREPO does not make nvidia.ko module version 2"; rc=1; fi
+else
+	echo "note nvidia-gb10-freebsd not found at $NVREPO (set NVIDIA_GB10_REPO): the nvidia.ko version pin is checked by that repository's tests/client_owner_test.sh"
+fi
 
 # the rule itself: the pure test must go red on a weakened rule
 model_plant() {	# model_plant <name> <sed>

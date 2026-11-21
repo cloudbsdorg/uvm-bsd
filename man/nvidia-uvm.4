@@ -153,8 +153,24 @@ an
 .Pa nvidia.ko
 without them makes the module fail to load:
 .Xr kldload 8
-fails and the console shows
-.Dq symbol nvUvmInterfaceClientHold undefined .
+fails.
+This module depends on exactly module version 2 of
+.Pa nvidia.ko .
+An older
+.Pa nvidia.ko
+makes
+.Xr kldload 8
+fail: the kernel linker reports a missing or mismatched dependency.
+A version 2
+.Pa nvidia.ko
+that lacks the two functions leaves
+.Dq symbol nvUvmInterfaceClientHold undefined
+on the console.
+The reverse fails the same way:
+an older
+.Pa nvidia-uvm.ko
+(built against a version 1 dependency) does not load against the new
+.Pa nvidia.ko .
 Use the
 .Pa nvidia.ko
 built with the

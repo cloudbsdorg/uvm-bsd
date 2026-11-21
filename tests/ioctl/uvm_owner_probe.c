@@ -204,8 +204,9 @@ static void
 emit_json(const char *who, const char *what, int which, NvU32 got, int refused, int ok)
 {
 	printf("{\"schema\":\"uvm-owner-probe/1\",\"who\":\"%s\",\"row\":\"%s\",\"request\":\"%s\","
-	    "\"expected\":\"%s\",\"status\":%u,\"ioctl_failed\":%s,\"errno\":%d,\"ok\":%s}\n",
+	    "\"expected\":\"%s\",\"status\":%u,\"refusal\":%s,\"ioctl_failed\":%s,\"errno\":%d,\"ok\":%s}\n",
 	    who, what, names[which], refused ? "refused" : "not refused", got == IOCTL_FAILED ? 0u : (unsigned)got,
+	    got == NV_ERR_INSUFFICIENT_PERMISSIONS ? "true" : "false",
 	    got == IOCTL_FAILED ? "true" : "false", got == IOCTL_FAILED ? last_errno : 0, ok ? "true" : "false");
 	fflush(stdout);
 }
