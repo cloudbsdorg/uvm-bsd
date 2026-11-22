@@ -132,7 +132,7 @@ only from the process that holds the `/dev/nvidiactl` file the client was alloca
   `sys/uvm_ioctl.c` against fakes and runs it (with mutants that must fail), and the test-boot
   kit is `tests/ioctl/run_owner_boot.sh` (self-recording: the two-user probe
   `tests/ioctl/uvm_owner_probe.c` with `-j` JSON rows, the race loops
-  `tests/ioctl/uvm_owner_race.c`, leftover checks, the CUDA vecadd regression; run as root with
+  `tests/ioctl/uvm_owner_race.c`, leftover checks, the CUDA vecadd run (Linux-only, a last resort, reported as info and never a verdict: it needs CUDA_PROG, the program the wrapper runs); run as root with
   both modules loaded). `tests/stress/uvm_stress.sh -O SECONDS` adds the race loops to the stress
   run. Track #2373.
 - **One-shot test boot:** `tests/ioctl/testboot/make-be.sh` builds a boot environment named
