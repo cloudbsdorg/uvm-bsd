@@ -8,7 +8,7 @@
 #     (a vacuous loop, or another process holding /dev/nvidiactl);
 #   - a staged module that fails to load, a step left "running" (a panic or a kill) or a run with no final "done"
 #     row is NO-GO; a kit PRECONDITION that failed (module hash, nvidia-drm staged, test uids, dead-man timer,
-#     panic settings, an nvidia already loaded, linux64) measured nothing about the change: it is KIT (exit 4);
+#     panic settings, an nvidia already loaded, linux64, the GSP firmware module not loaded, the GPU node missing) measured nothing about the change: it is KIT (exit 4);
 #   - the host's validation setting must have been READ (RmValidateClientData absent or harmless): a PASS
 #     without that line is neither;
 #   - loop 5 counts as evidence for the tombstone path only when iterations_b is above 0; even then race.err
@@ -29,7 +29,7 @@ RUN=$1
 ROWS=$RUN/results.jsonl
 [ -r "$ROWS" ] || { echo "summarize: cannot read $ROWS" >&2; exit 2; }
 
-PRE='^(hash-|no-drm|load-skipped-no-deadman|test-uids|deadman|panic-settings|preloaded|load-linux64|load$)'
+PRE='^(hash-|no-drm|load-skipped-no-deadman|test-uids|deadman|panic-settings|preloaded|load-linux64|load-nvidia_gsp_ga10x_fw|firmware-loaded|gpu-node|load$)'
 # the failed precondition rows, by name
 prenames=$(grep '"result":"fail"' "$ROWS" | sed 's/.*"row":"\([^"]*\)".*/\1/' | grep -E "$PRE" | tr '\n' ' ')
 bename=$(sed -n 's/.*"row":"kit-version".*BE \([A-Za-z0-9._-]*\),.*/\1/p' "$ROWS" | head -1)

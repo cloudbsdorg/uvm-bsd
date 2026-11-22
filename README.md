@@ -141,8 +141,21 @@ only from the process that holds the `/dev/nvidiactl` file the client was alloca
   copied into the root-owned `/boot/modules.nvco-test` of the clone). It is a dry run by default
   (everything except `bectl activate`; it prints the arm command); `--activate` arms the one-shot.
   The `loader.conf` of the clone gets `kern.panic_reboot_wait_time=5` and `debug.debugger_on_panic=0`.
-  The rc one-shot `nvidia_client_owner_testboot` loads `linux64` (nvidia-uvm still depends on it),
-  `nvidia.ko`, `nvidia-modeset.ko` and `nvidia-uvm.ko` (never `nvidia-drm.ko`), runs
+  The list holds five entries: nvidia, nvidia-modeset, nvidia-drm, nvidia-uvm and the GSP firmware module
+  `nvidia_gsp_ga10x_fw-v5.ko`, installed as `nvidia_gsp_ga10x_fw.ko`. The rc one-shot
+  `nvidia_client_owner_testboot` loads `linux64` (nvidia-uvm still depends on it), then the GSP
+  firmware module as root, and only when `kldstat -q -n nvidia_gsp_ga10x_fw` says it is loaded
+  (the `firmware-loaded` precondition row; if not, the run is KIT and nothing else loads), then
+  `nvidia.ko`, `nvidia-modeset.ko` and `nvidia-uvm.ko` (never `nvidia-drm.ko`). The firmware comes
+  first because firmware(9) refuses it to a non-root caller: the v5 boot loaded nvidia.ko without it,
+  the setuid probe made the first GPU open, and the adapter's failure path panicked the host (vmcore.3).
+  Root then opens `/dev/nvidia0` once, before the probe: the `gpu-node` row (the node must exist: KIT when
+  it does not) and the `root-open` row (the open itself: NO-GO when it fails; it shows the adapter
+  initialises as root with the firmware loaded, it does not keep the adapter up). The probe never
+  starts after either failure. `tests/ioctl/testboot/check-be.sh BE` mounts a built boot environment
+  and checks it (run it by hand before arming; make-be.sh does not): the firmware and the modules against the
+  hash list, `loader.conf`, the recorded commit, the installed scripts against that commit, and a
+  static dead-man proof. The one-shot then runs
   `run_owner_boot.sh` as root with dedicated test uids (60001 to 60004), writes the run under
   `/var/db/nvidia-client-owner-test/<stamp>/` (copied to the home directory), reads it with
   `summarize.sh` (GO, NO-GO or NEITHER: PASS is GO evidence, FAIL is NO-GO, RE-RUN is neither; loop 5

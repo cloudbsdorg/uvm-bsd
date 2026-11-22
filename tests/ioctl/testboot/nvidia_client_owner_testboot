@@ -13,8 +13,15 @@
 #      environment carries them too) and records them;
 #   2. checks the staged modules against SHA256-v5.txt (full literal hashes), as root, from the root-owned
 #      directory /boot/modules.nvco-test;
-#   3. loads linux64 (nvidia-uvm and nvidia-modeset still depend on it), nvidia.ko, nvidia-modeset.ko and
-#      nvidia-uvm.ko by full path.  nvidia-drm.ko is NOT loaded: it is not in the directory;
+#   3. loads linux64 (nvidia-uvm and nvidia-modeset still depend on it), then the GSP firmware module
+#      nvidia_gsp_ga10x_fw.ko as root, THEN nvidia.ko, nvidia-modeset.ko and nvidia-uvm.ko, by full path.  The firmware
+#      comes first because firmware_get(9) refuses it to a non-root caller: the v5 boot loaded nvidia.ko without it, the
+#      setuid probe made the first GPU open, the adapter did not initialise and the failure path panicked the host
+#      (Track #2373, vmcore.3).  The precondition row firmware-loaded (kldstat -q -n nvidia_gsp_ga10x_fw) must pass or
+#      nothing else is loaded (KIT); nvidia-drm.ko is NOT loaded: it is not in the directory;
+#   3b. opens the GPU once as root (rows gpu-node, then root-open: /dev/nvidia0 opened read-write and closed), to show
+#      that the adapter initialises as root with the firmware loaded; a missing node is KIT, a failed open is NO-GO,
+#      and either way the probe never starts;
 #   4. runs run_owner_boot.sh as root, with the dedicated test uids, its results under
 #      /var/db/nvidia-client-owner-test/<run>/work/logs/uvm-2373-boot/<stamp>/;
 #   5. applies the reading rule (summarize.sh) and copies the run out to the home directory (a separate
@@ -33,7 +40,7 @@
 # _uid_a, _uid_b (probe uids, 60003 and 60004; the race loops use the uids defined in uvm_owner_race.c, read
 # from the kit), _kit (/usr/local/share/nvidia-client-owner-test), _mods (/boot/modules.nvco-test), _work
 # (/var/db/nvidia-client-owner-test), _copyout (a directory in the home dataset), _cudarun (the root-owned CUDA
-# vecadd script of the kit), _return (testboot-return), and _load_modeset (YES).  tests/testboot_kit_test.sh
+# vecadd script of the kit), _return (testboot-return), and _load_modeset (YES), and _gpudev (the GPU node opened as root, /dev/nvidia0).  tests/testboot_kit_test.sh
 # points them at fakes.
 
 . /etc/rc.subr
@@ -56,6 +63,7 @@ stop_cmd=:
 : "${nvidia_client_owner_testboot_cudarun:=/usr/local/share/nvidia-client-owner-test/run-linux-cuda.sh}"
 : "${nvidia_client_owner_testboot_return:=/usr/local/sbin/testboot-return}"
 : "${nvidia_client_owner_testboot_load_modeset:=YES}"
+: "${nvidia_client_owner_testboot_gpudev:=/dev/nvidia0}"
 : "${nvidia_client_owner_testboot_lockfile:=/var/run/noshutdown}"
 : "${nvidia_client_owner_testboot_version:=/usr/local/etc/nvidia_client_owner_testboot.version}"
 
@@ -114,7 +122,7 @@ deadman_cancel()
 check_hashes()
 {
 	_bad=0
-	for _pair in nvidia:nvidia-v5-phase0.ko nvidia-modeset:nvidia-modeset-v5.ko nvidia-uvm:nvidia-uvm-v5.ko; do
+	for _pair in nvidia:nvidia-v5-phase0.ko nvidia-modeset:nvidia-modeset-v5.ko nvidia-uvm:nvidia-uvm-v5.ko nvidia_gsp_ga10x_fw:nvidia_gsp_ga10x_fw-v5.ko; do
 		_m=${_pair%%:*}; _staged=${_pair#*:}
 		[ -f "$2/$_m.ko" ] || { row "hash-$_m" fail "$2/$_m.ko is missing"; _bad=1; continue; }
 		_got=$(sha256 -q "$2/$_m.ko")
@@ -174,8 +182,27 @@ nvidia_client_owner_testboot_start()
 	[ "$ok" = 1 ] && row test-uids pass "uids $nvidia_client_owner_testboot_uid_a $nvidia_client_owner_testboot_uid_b $_ra $_rb are unused"
 
 	if [ "$ok" = 1 ]; then
-		running load "kldload linux64, nvidia, nvidia-modeset, nvidia-uvm: a panic from here leaves this row last"
+		running load "kldload linux64, the GSP firmware, nvidia, nvidia-modeset, nvidia-uvm: a panic from here leaves this row last"
 		kldload linux64 > "$OUT/kldload-linux64.txt" 2>&1 || kldstat -q -m linux64elf || { row load-linux64 fail "kldload linux64 failed: $(cat "$OUT/kldload-linux64.txt")"; ok=0; }
+		# the firmware module first, as root: nvidia.ko asks firmware(9) for it at the first GPU open, and a
+		# non-root caller is refused
+		if [ "$ok" = 1 ]; then
+			if kldload "$MODS/nvidia_gsp_ga10x_fw.ko" > "$OUT/kldload-nvidia_gsp_ga10x_fw.txt" 2>&1; then
+				row load-nvidia_gsp_ga10x_fw pass "loaded $MODS/nvidia_gsp_ga10x_fw.ko"
+			else
+				row load-nvidia_gsp_ga10x_fw fail "kldload of the GSP firmware failed: $(cat "$OUT/kldload-nvidia_gsp_ga10x_fw.txt")"
+				ok=0
+			fi
+		fi
+		# the precondition: nothing else is loaded without it
+		if [ "$ok" = 1 ]; then
+			if kldstat -q -n nvidia_gsp_ga10x_fw > /dev/null 2>&1; then
+				row firmware-loaded pass "nvidia_gsp_ga10x_fw is loaded (kldstat -q -n nvidia_gsp_ga10x_fw)"
+			else
+				row firmware-loaded fail "nvidia_gsp_ga10x_fw is not loaded: an unprivileged first GPU open would panic the host; nothing else is loaded"
+				ok=0
+			fi
+		fi
 		if [ "$ok" = 1 ]; then
 			for _k in nvidia $( [ "$nvidia_client_owner_testboot_load_modeset" = YES ] && echo nvidia-modeset ) nvidia-uvm; do
 				if kldload "$MODS/$_k.ko" > "$OUT/kldload-$_k.txt" 2>&1; then
@@ -190,7 +217,29 @@ nvidia_client_owner_testboot_start()
 		kldstat -v > "$OUT/kldstat-v.txt" 2>&1
 		dmesg > "$OUT/dmesg-loaded.txt" 2>&1
 		if kldstat | grep -q 'nvidia-drm'; then row no-drm-loaded fail "nvidia-drm is loaded"; ok=0; fi
-		if [ "$ok" = 1 ]; then row load pass "linux64, nvidia, nvidia-modeset and nvidia-uvm are loaded"; else row load fail "a module did not load: see the rows above"; fi
+		if [ "$ok" = 1 ]; then row load pass "linux64, the GSP firmware, nvidia, nvidia-modeset and nvidia-uvm are loaded"; else row load fail "a module did not load: see the rows above"; fi
+	fi
+
+	# the first open of the GPU is made by root, once, before the setuid probe.  It shows that the adapter initialises
+	# as root with the firmware loaded; it does not keep the adapter up (the last close may shut it down), what protects
+	# the probe's own first open is that the firmware module is already loaded.  Two rows: gpu-node is a precondition
+	# (the node must exist after the loads: KIT when it does not), root-open is the open itself (a driver that cannot
+	# initialise the adapter: NO-GO).  root-open is written and synced before the open: a panic leaves it last
+	if [ "$ok" = 1 ]; then
+		if [ -e "$nvidia_client_owner_testboot_gpudev" ]; then
+			row gpu-node pass "$nvidia_client_owner_testboot_gpudev exists"
+			running root-open "root opens $nvidia_client_owner_testboot_gpudev once: a panic from here leaves this row last"
+			if ( exec 3<> "$nvidia_client_owner_testboot_gpudev" ) > "$OUT/root-open.txt" 2>&1; then
+				row root-open pass "root opened and closed $nvidia_client_owner_testboot_gpudev (the adapter initialised as root with the firmware loaded)"
+			else
+				row root-open fail "root could not open $nvidia_client_owner_testboot_gpudev: $(head -c 200 "$OUT/root-open.txt" 2>/dev/null | tr '\n' ' '); see dmesg-root-open.txt; the probe is not started"
+				ok=0
+			fi
+			dmesg > "$OUT/dmesg-root-open.txt" 2>&1
+		else
+			row gpu-node fail "$nvidia_client_owner_testboot_gpudev does not exist after the loads: nvidia.ko did not create it; see kldload-nvidia.txt and dmesg-loaded.txt; the probe is not started"
+			ok=0
+		fi
 	fi
 
 	if [ "$ok" = 1 ]; then

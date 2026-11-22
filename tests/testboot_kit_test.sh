@@ -30,10 +30,11 @@ bad() { echo "FAIL $*"; rc=1; }
 # ---- fixtures: staged modules and their list
 STAGE=$T/stage
 mkdir -p "$STAGE"
-for f in nvidia-v5-phase0.ko nvidia-modeset-v5.ko nvidia-drm-v5.ko nvidia-uvm-v5.ko; do printf 'module %s\n' "$f" > "$STAGE/$f"; done
-( cd "$STAGE" && sha256 nvidia-v5-phase0.ko nvidia-modeset-v5.ko nvidia-drm-v5.ko nvidia-uvm-v5.ko > SHA256-v5.txt )
+for f in nvidia-v5-phase0.ko nvidia-modeset-v5.ko nvidia-drm-v5.ko nvidia-uvm-v5.ko nvidia_gsp_ga10x_fw-v5.ko; do printf 'module %s\n' "$f" > "$STAGE/$f"; done
+( cd "$STAGE" && sha256 nvidia-v5-phase0.ko nvidia-modeset-v5.ko nvidia-drm-v5.ko nvidia-uvm-v5.ko nvidia_gsp_ga10x_fw-v5.ko > SHA256-v5.txt )
 cp "$STAGE/SHA256-v5.txt" "$T/list.save"
 cp "$STAGE/nvidia-uvm-v5.ko" "$T/uvm.save"
+cp "$STAGE/nvidia_gsp_ga10x_fw-v5.ko" "$T/fw.save"
 GBW=$T/gbwork
 mkdir -p "$GBW/tmp" "$GBW/nvidia-gb10-freebsd-uvm0/scripts"
 printf '#!/bin/sh\necho cuda\n' > "$GBW/nvidia-gb10-freebsd-uvm0/scripts/run-linux-cuda.sh"
@@ -79,7 +80,7 @@ if grep -q '^bectl activate' "$T/be.log"; then bad "a dry run called bectl activ
 grep -qF 'arm it with: bectl activate -t nvidia-client-owner-test-20261122-1' "$T/mk.out" && ok "the arm command is printed" || bad "the arm command is not printed"
 grep -q 'no Fable agent runs on this host' "$T/mk.out" && ok "the arm command carries the no-Fable condition" || bad "the arm command lacks the no-Fable condition"
 M=$T/mnt1/root
-for pair in nvidia-v5-phase0.ko:nvidia.ko nvidia-modeset-v5.ko:nvidia-modeset.ko nvidia-uvm-v5.ko:nvidia-uvm.ko; do
+for pair in nvidia-v5-phase0.ko:nvidia.ko nvidia-modeset-v5.ko:nvidia-modeset.ko nvidia-uvm-v5.ko:nvidia-uvm.ko nvidia_gsp_ga10x_fw-v5.ko:nvidia_gsp_ga10x_fw.ko; do
 	s=${pair%%:*}; d=${pair#*:}
 	if [ -f "$M/boot/modules.nvco-test/$d" ] && [ "$(sha256 -q "$M/boot/modules.nvco-test/$d")" = "$(sha256 -q "$STAGE/$s")" ]; then ok "$d is in the clone with the staged hash"; else bad "$d is not in the clone with the staged hash"; fi
 	[ "$(stat -f %Lp "$M/boot/modules.nvco-test/$d")" = 444 ] && ok "$d is mode 0444" || bad "$d is not mode 0444"
@@ -122,6 +123,17 @@ sed 's/^\(SHA256 (nvidia-v5-phase0.ko) = \)\([0-9a-f]\{8\}\).*$/\1\2/' "$T/list.
 refuse prefix-hash 5
 grep -v 'nvidia-drm-v5.ko' "$T/list.save" > "$STAGE/SHA256-v5.txt"
 refuse missing-entry 6
+grep -v 'nvidia_gsp_ga10x_fw-v5.ko' "$T/list.save" > "$STAGE/SHA256-v5.txt"
+refuse missing-firmware-entry 35
+sed 's/^\(SHA256 (nvidia_gsp_ga10x_fw-v5.ko) = \)\([0-9a-f]\{8\}\).*$/\1\2/' "$T/list.save" > "$STAGE/SHA256-v5.txt"
+refuse firmware-prefix-hash 36
+cp "$T/list.save" "$STAGE/SHA256-v5.txt"
+printf 'tampered firmware\n' > "$STAGE/nvidia_gsp_ga10x_fw-v5.ko"
+refuse changed-firmware 37
+cp "$T/fw.save" "$STAGE/nvidia_gsp_ga10x_fw-v5.ko"
+mv "$STAGE/nvidia_gsp_ga10x_fw-v5.ko" "$T/fw.moved"
+refuse missing-firmware-file 38
+mv "$T/fw.moved" "$STAGE/nvidia_gsp_ga10x_fw-v5.ko"
 cp "$T/list.save" "$STAGE/SHA256-v5.txt"
 printf 'kld_list="filemon amdgpu nvidia"\n' > "$T/basetree/etc/rc.conf"
 refuse base-kld-list-nvidia 7
@@ -180,6 +192,125 @@ for f in nvidia_client_owner_testboot summarize.sh testboot-return; do
 	gitq show "HEAD:tests/ioctl/testboot/$f" > "$T/committed.$f" 2>/dev/null
 	cmp -s "$T/committed.$f" "$dst" && ok "the installed $f is the committed one" || bad "the installed $f is not the committed one"
 done
+# ---- check-be.sh: the mount check of a built clone (the fixture clone, built from a real commit)
+CB=$GR/tests/ioctl/testboot/check-be.sh
+GCOMMIT=$(gitq rev-parse HEAD)
+cb() {	# cb <mounted root>: runs check-be.sh on a mounted tree with the fixture list
+	sh "$CB" -U -m "$1" -s "$STAGE/SHA256-v5.txt" -c "$GCOMMIT" > "$T/cb.out" 2>&1
+}
+mkdir -p "$T/mnt-git/root/sbin"; : > "$T/mnt-git/root/sbin/shutdown"; chmod +x "$T/mnt-git/root/sbin/shutdown"
+cb "$T/mnt-git/root"; r=$?
+if [ "$r" = 0 ]; then ok "check-be: a good clone passes every check"; else cat "$T/cb.out"; bad "check-be: a good clone failed ($r)"; fi
+for w in "nvidia_gsp_ga10x_fw.ko is " "dead-man: the rc script arms the timer" "the clone records commit" "loader.conf has the panic settings" "order: the firmware is loaded" "order: root opens the GPU"; do
+	grep -q "^ok   .*$w" "$T/cb.out" || { cat "$T/cb.out"; bad "check-be: no ok line for $w"; }
+done
+cbplant() {	# cbplant <name> <plant function (gets the tree)>: a copy of the good clone is damaged; check-be must fail
+	_t=$T/cbp-$1
+	rm -rf "$_t"; cp -R "$T/mnt-git/root" "$_t"; chmod -R u+w "$_t"
+	"$2" "$_t"
+	[ "$1" = firmware-mode ] || chmod 0444 "$_t"/boot/modules.nvco-test/*.ko
+	cb "$_t"; _r=$?
+	if [ "$_r" != 0 ]; then ok "check-be: plant $1 is caught"; else bad "check-be: plant $1 passes the check"; fi
+	rm -rf "$_t"
+}
+pl_fw_gone() { rm -f "$1/boot/modules.nvco-test/nvidia_gsp_ga10x_fw.ko"; }
+pl_fw_changed() { printf 'tampered\n' > "$1/boot/modules.nvco-test/nvidia_gsp_ga10x_fw.ko"; }
+pl_fw_mode() { chmod 0644 "$1/boot/modules.nvco-test/nvidia_gsp_ga10x_fw.ko"; }
+pl_drm() { : > "$1/boot/modules.nvco-test/nvidia-drm.ko"; }
+pl_list() { printf '# edit\n' >> "$1/usr/local/share/nvidia-client-owner-test/SHA256-v5.txt"; }
+pl_loader() { grep -v 'panic_reboot_wait_time' "$1/boot/loader.conf" > "$1/boot/loader.conf.new"; mv "$1/boot/loader.conf.new" "$1/boot/loader.conf"; }
+pl_loads_nvidia() { printf 'nvidia_load="YES"\n' >> "$1/boot/loader.conf"; }
+pl_commit() { echo 0000000000000000000000000000000000000000 > "$1/usr/local/etc/nvidia_client_owner_testboot.version"; }
+pl_rc() { printf '# changed\n' >> "$1/usr/local/etc/rc.d/nvidia_client_owner_testboot"; }
+pl_deadman_zero() { printf 'nvidia_client_owner_testboot_deadman="0"\n' >> "$1/etc/rc.conf.d/nvidia_client_owner_testboot"; }
+pl_deadman_text() { printf 'nvidia_client_owner_testboot_deadman="soon"\n' >> "$1/etc/rc.conf.d/nvidia_client_owner_testboot"; }
+pl_no_shutdown() { rm -f "$1/sbin/shutdown"; }
+pl_disabled() { sed 's/="YES"/="NO"/' "$1/etc/rc.conf.d/nvidia_client_owner_testboot" > "$1/rcd.new"; mv "$1/rcd.new" "$1/etc/rc.conf.d/nvidia_client_owner_testboot"; }
+pl_none() { :; }
+# the control: the harness itself (copy, chmod, restore modes) leaves a good clone good, so the plants below fail for their own reason
+_t=$T/cbp-control; rm -rf "$_t"; cp -R "$T/mnt-git/root" "$_t"; chmod -R u+w "$_t"; chmod 0444 "$_t"/boot/modules.nvco-test/*.ko
+cb "$_t" && ok "check-be: the plant harness leaves a good clone passing (control)" || { cat "$T/cb.out"; bad "check-be: the plant harness damages a good clone"; }
+rm -rf "$_t"
+cbplant firmware-missing pl_fw_gone
+cbplant firmware-changed pl_fw_changed
+cbplant firmware-mode pl_fw_mode
+cbplant drm-installed pl_drm
+cbplant list-differs pl_list
+cbplant panic-settings-missing pl_loader
+cbplant loader-loads-nvidia pl_loads_nvidia
+cbplant commit-not-recorded pl_commit
+cbplant rc-not-the-committed pl_rc
+cbplant deadman-zero pl_deadman_zero
+cbplant deadman-not-a-number pl_deadman_text
+cbplant no-shutdown pl_no_shutdown
+cbplant one-shot-disabled pl_disabled
+# a different rc script in the clone (the commit check also fires): the dead-man or order check must name it too
+rcplant() {	# rcplant <name> <sed>
+	_t=$T/cbp-$1; rm -rf "$_t"; cp -R "$T/mnt-git/root" "$_t"; chmod -R u+w "$_t"
+	sed -e "$2" ${3:+-e "$3"} "$KIT/nvidia_client_owner_testboot" > "$_t/rcnew"
+	if cmp -s "$KIT/nvidia_client_owner_testboot" "$_t/rcnew"; then bad "check-be: plant $1 changed nothing"; rm -rf "$_t"; return; fi
+	mv "$_t/rcnew" "$_t/usr/local/etc/rc.d/nvidia_client_owner_testboot"
+	cb "$_t"; _r=$?
+	if [ "$_r" != 0 ] && grep -q "^FAIL \(dead-man\|order\)" "$T/cb.out"; then ok "check-be: plant $1 is caught by a dead-man or order check"; else cat "$T/cb.out"; bad "check-be: plant $1 is not caught by a dead-man or order check"; fi
+	rm -rf "$_t"
+}
+rcplant deadman-ungated 's/^\tif \[ "\$DM_OK" != 1 \]; then ok=0; .*$/\t:/'
+rcplant deadman-never-armed 's/^\tdeadman_arm$/\t:/'
+rcplant root-open-removed 's/^\t*running root-open /\t\trunning root-skipped /'
+rcplant firmware-never-loaded 's/kldload "\$MODS\/nvidia_gsp_ga10x_fw.ko"/kldload "$MODS\/nvidia_gsp_ga10x_fw-x.ko"/'
+# the check refuses a list with no entry for the firmware
+grep -v 'nvidia_gsp_ga10x_fw-v5.ko' "$STAGE/SHA256-v5.txt" > "$T/list.nofw"
+sh "$CB" -U -m "$T/mnt-git/root" -s "$T/list.nofw" -c "$GCOMMIT" > "$T/cb.out" 2>&1 && bad "check-be: a list without the firmware entry passed" || ok "check-be: a list without the firmware entry fails"
+# more damage that the check must see: other places that load nvidia, rc.subr's own places for the timer, symbolic links, an emptied script
+pl_loaderconfd() { mkdir -p "$1/boot/loader.conf.d"; printf 'nvidia_load="YES"\n' > "$1/boot/loader.conf.d/nv.conf"; }
+pl_rcconfd_kld() { mkdir -p "$1/etc/rc.conf.d"; printf 'kld_list="nvidia"\n' > "$1/etc/rc.conf.d/kld"; }
+pl_kld_append() { printf 'kld_list+=" nvidia"\n' >> "$1/etc/rc.conf"; }
+pl_boot_modules() { mkdir -p "$1/boot/modules"; : > "$1/boot/modules/nvidia.ko"; }
+pl_deadman_dir() { mkdir -p "$1/usr/local/etc/rc.conf.d/nvidia_client_owner_testboot"; printf 'nvidia_client_owner_testboot_deadman="0"\n' > "$1/usr/local/etc/rc.conf.d/nvidia_client_owner_testboot/x"; }
+pl_deadman_two() { printf 'nvidia_client_owner_testboot_deadman="0"\n' >> "$1/etc/rc.conf.d/nvidia_client_owner_testboot"; mkdir -p "$1/usr/local/etc/rc.conf.d"; printf 'nvidia_client_owner_testboot_deadman="5"\n' > "$1/usr/local/etc/rc.conf.d/zzz"; }
+pl_rc_symlink() { cp "$1/usr/local/etc/rc.d/nvidia_client_owner_testboot" "$T/hostrc"; rm -f "$1/usr/local/etc/rc.d/nvidia_client_owner_testboot"; ln -s "$T/hostrc" "$1/usr/local/etc/rc.d/nvidia_client_owner_testboot"; }
+pl_loader_symlink() { cp "$1/boot/loader.conf" "$T/hostloader"; rm -f "$1/boot/loader.conf"; ln -s "$T/hostloader" "$1/boot/loader.conf"; }
+pl_usr_symlink() { mv "$1/usr/local/sbin" "$T/hostsbin"; ln -s "$T/hostsbin" "$1/usr/local/sbin"; }
+pl_empty_return() { : > "$1/usr/local/sbin/testboot-return"; }
+cbplant loader-conf-d-loads-nvidia pl_loaderconfd
+cbplant rc-conf-d-kld-list pl_rcconfd_kld
+cbplant kld-list-append pl_kld_append
+cbplant module-in-boot-modules pl_boot_modules
+cbplant deadman-zero-in-service-directory pl_deadman_dir
+cbplant deadman-zero-with-a-5-elsewhere pl_deadman_two
+cbplant rc-script-symlink pl_rc_symlink
+cbplant loader-conf-symlink pl_loader_symlink
+cbplant parent-directory-symlink pl_usr_symlink
+cbplant testboot-return-emptied pl_empty_return
+# the failing line names the cause
+_t=$T/cbp-msg; rm -rf "$_t"; cp -R "$T/mnt-git/root" "$_t"; chmod -R u+w "$_t"; chmod 0444 "$_t"/boot/modules.nvco-test/*.ko; pl_deadman_two "$_t"; cb "$_t"
+grep -q "^FAIL dead-man: the timer is set to 0 or to a non-number in: .*nvidia_client_owner_testboot='0'" "$T/cb.out" && ok "check-be: the timer failure names the file and the value" || bad "check-be: the timer failure does not name the file"
+rm -rf "$_t"
+# a different gate position or no gate
+rcplant deadman-gate-after-load 's/^\tif \[ "\$DM_OK" != 1 \]; then ok=0; .*$/\t:/' 's/^\t\trunning owner-boot /\t\tif [ "$DM_OK" != 1 ]; then ok=0; fi\
+\t\trunning owner-boot /'
+rcplant firmware-gate-removed 's/kldstat -q -n nvidia_gsp_ga10x_fw/kldstat -q -n x/g'
+rcplant owner-boot-renamed 's/running owner-boot /running owner-x /'
+grep -q '^FAIL order: no owner-boot step in the rc script' "$T/cb.out" && ok "check-be: a missing owner-boot step is named, not blamed on the root open" || { cat "$T/cb.out"; bad "check-be: the owner-boot message blames the wrong step"; }
+# usage and argument rules
+sh "$CB" -U -m "$T/mnt-git/root" -s "$STAGE/SHA256-v5.txt" -c 0123456789abcdef0123456789abcdef01234567 > "$T/cb.out" 2>&1; [ "$?" = 2 ] && ok "check-be: a commit that is not in the repository is a usage error" || bad "check-be: a foreign commit was accepted"
+sh "$CB" -U -m "$T/mnt-git/root" -s "$STAGE/SHA256-v5.txt" -c "--output=$T/cb-injected" > "$T/cb.out" 2>&1; _r=$?
+if [ "$_r" = 2 ] && ! ls "$T"/cb-injected* > /dev/null 2>&1; then ok "check-be: a commit that starts with a dash is refused and writes nothing"; else bad "check-be: a dash commit was not refused (exit $_r) or wrote a file"; fi
+sh "$CB" -U -s "$STAGE/SHA256-v5.txt" -c "$GCOMMIT" somebe > "$T/cb.out" 2>&1; [ "$?" = 2 ] && ok "check-be: -U without -m is refused" || bad "check-be: -U works on a boot environment"
+env -u GB10_WORK sh "$CB" -m "$T/mnt-git/root" -c "$GCOMMIT" > "$T/cb.out" 2>&1; _r=$?
+[ "$_r" = 2 ] && grep -q 'GB10_WORK' "$T/cb.out" && ok "check-be: no -s and no GB10_WORK is a usage error naming GB10_WORK" || bad "check-be: the default list path is taken from nowhere"
+if [ "$(id -u)" != 0 ]; then
+	NVCO_NOT_ROOT=1 sh "$CB" -m "$T/mnt-git/root" -s "$STAGE/SHA256-v5.txt" -c "$GCOMMIT" > "$T/cb.out" 2>&1; _r=$?
+	[ "$_r" = 1 ] && grep -q 'must be root-owned' "$T/cb.out" && ok "check-be: NVCO_NOT_ROOT in the environment no longer turns off the ownership check" || bad "check-be: the environment still relaxes the ownership check"
+	cb "$T/mnt-git/root"; grep -q 'owner NOT checked: -U' "$T/cb.out" && ! grep -q 'root-owned' "$T/cb.out" && ok "check-be: with -U the line says the owner was not checked" || bad "check-be: -U still claims root ownership"
+fi
+{ cat "$STAGE/SHA256-v5.txt"; echo 'SHA256 (extra.ko) = 0000000000000000000000000000000000000000000000000000000000000000'; } > "$T/list.six"
+sh "$CB" -U -m "$T/mnt-git/root" -s "$T/list.six" -c "$GCOMMIT" > "$T/cb.out" 2>&1; grep -q '^FAIL the list .* five' "$T/cb.out" && ok "check-be: a list of six entries fails" || bad "check-be: a list of six entries passed"
+# the three module tables agree (make-be.sh, check-be.sh, the rc script)
+_mk=$(sed -n 's/^INSTALL="\(.*\)"$/\1/p' "$KIT/make-be.sh" | tr ' ' '\n' | sort)
+_cbl=$(sed -n 's/^for _p in \(nvidia[^;]*\); do$/\1/p' "$KIT/check-be.sh" | tr ' ' '\n' | sort)
+_rcl=$(sed -n 's/^\tfor _pair in \(.*\); do$/\1/p' "$KIT/nvidia_client_owner_testboot" | tr ' ' '\n' | sed 's/^\([^:]*\):\(.*\)$/\2:\1.ko/' | sort)
+[ -n "$_mk" ] && [ "$_mk" = "$_cbl" ] && [ "$_mk" = "$_rcl" ] && ok "the module tables of make-be.sh, check-be.sh and the rc script are the same" || { printf 'make-be: %s\ncheck-be: %s\nrc: %s\n' "$_mk" "$_cbl" "$_rcl"; bad "the module tables of make-be.sh, check-be.sh and the rc script differ"; }
 # an edit of the work tree between the check and the install must not be installed: the dirty check is removed (a plant) and
 # the committed rc script is still what lands; with the sources read from the work tree as well (a second plant) it is not
 printf '# worktree edit\n' >> "$GR/tests/ioctl/testboot/nvidia_client_owner_testboot"
@@ -263,7 +394,8 @@ plant_refused packaged-module-guard-off 25 setup_pkg 's/for _d in boot\/modules 
 
 # ---- the rc one-shot on fake commands
 mkdir -p "$T/rc/bin" "$T/rc/kit/repo/tests/ioctl" "$T/rc/mods" "$T/rc/work" "$T/rc/copyout"
-cp "$STAGE/nvidia-v5-phase0.ko" "$T/rc/mods/nvidia.ko"; cp "$STAGE/nvidia-modeset-v5.ko" "$T/rc/mods/nvidia-modeset.ko"; cp "$STAGE/nvidia-uvm-v5.ko" "$T/rc/mods/nvidia-uvm.ko"
+cp "$STAGE/nvidia-v5-phase0.ko" "$T/rc/mods/nvidia.ko"; cp "$STAGE/nvidia-modeset-v5.ko" "$T/rc/mods/nvidia-modeset.ko"; cp "$STAGE/nvidia-uvm-v5.ko" "$T/rc/mods/nvidia-uvm.ko"; cp "$STAGE/nvidia_gsp_ga10x_fw-v5.ko" "$T/rc/mods/nvidia_gsp_ga10x_fw.ko"
+: > "$T/rc/gpu"
 cp "$T/list.save" "$T/rc/kit/SHA256-v5.txt"
 cp "$KIT/summarize.sh" "$T/rc/kit/summarize.sh"
 cp "$REPO/tests/ioctl/uvm_owner_race.c" "$T/rc/kit/repo/tests/ioctl/"
@@ -272,6 +404,7 @@ cat > "$T/rc/kit/repo/tests/ioctl/run_owner_boot.sh" <<'EOF'
 # a fake run_owner_boot.sh: a result directory with the verdict named by FAKE_VERDICT
 D=$GB10_WORK/logs/uvm-2373-boot/20261122T000000Z
 mkdir -p "$D"
+echo "run_owner_boot" >> "$FAKE_LOG"
 echo "uids $PROBE_UID_A $PROBE_UID_B seconds $1 ko $NVIDIA_KO cuda $CUDA_VECADD" > "$D/args.txt"
 case $FAKE_VERDICT in
 PASS) echo "ok   no RmValidateClientData in kenv or sysctl (default: validation on); see nvidia-settings.txt" > "$D/result.txt"
@@ -283,14 +416,14 @@ EOF
 cat > "$T/rc/bin/kldload" <<'EOF'
 #!/bin/sh
 echo "kldload $*" >> "$FAKE_LOG"
-case "$*" in *nvidia-uvm*) [ -n "${FAKE_UVM_FAILS:-}" ] && { echo "kldload: cannot load" >&2; exit 1; } ;; esac
+case "$*" in *nvidia-uvm*) [ -n "${FAKE_UVM_FAILS:-}" ] && { echo "kldload: cannot load" >&2; exit 1; } ;; *nvidia_gsp_ga10x_fw*) [ -n "${FAKE_FW_LOAD_FAILS:-}" ] && { echo "kldload: cannot load" >&2; exit 1; }; : > "$FAKE_LOG.fw" ;; esac
 exit 0
 EOF
 cat > "$T/rc/bin/kldstat" <<'EOF'
 #!/bin/sh
 echo "kldstat $*" >> "$FAKE_LOG"
 if [ "$1" = -q ]; then
-	case "$3" in linux64elf) exit 0 ;; nvidia) [ -n "${FAKE_PRELOADED:-}" ] && exit 0; exit 1 ;; esac
+	case "$3" in linux64elf) exit 0 ;; nvidia) [ -n "${FAKE_PRELOADED:-}" ] && exit 0; exit 1 ;; nvidia_gsp_ga10x_fw) [ -n "${FAKE_NO_FW:-}" ] && exit 1; [ -e "$FAKE_LOG.fw" ] && exit 0; exit 1 ;; esac
 	exit 1
 fi
 exit 0
@@ -330,13 +463,13 @@ EOF
 RCS=$KIT/nvidia_client_owner_testboot
 runrc() {	# runrc <script> <verdict> [uvm fails]: the script is a copy pointed at fakes
 	rm -rf "$T/rc/work" "$T/rc/copyout" "$T/rc/fallback"; mkdir -p "$T/rc/work" "$T/rc/copyout"
-	: > "$T/rc/log"
+	: > "$T/rc/log"; rm -f "$T/rc/log.fw"
 	sed -e "s#/etc/rc.subr#$T/rc/rc.subr#" "$1" > "$T/rc/script.sh"
 	FAKE_LOG=$T/rc/log FAKE_VERDICT=$2 FAKE_UVM_FAILS=${3:-} PATH=$T/rc/bin:$PATH \
 	    nvidia_client_owner_testboot_kit=$T/rc/kit nvidia_client_owner_testboot_mods=$T/rc/mods \
 	    nvidia_client_owner_testboot_work=${RC_WORK:-$T/rc/work} nvidia_client_owner_testboot_copyout=$T/rc/copyout \
 	    nvidia_client_owner_testboot_return=$T/rc/bin/testboot-return nvidia_client_owner_testboot_cudarun=/kit/cuda.sh \
-	    nvidia_client_owner_testboot_version=/nonexistent nvidia_client_owner_testboot_lockfile=/nonexistent/lock \
+	    nvidia_client_owner_testboot_gpudev=${RC_GPU:-$T/rc/gpu} nvidia_client_owner_testboot_version=/nonexistent nvidia_client_owner_testboot_lockfile=/nonexistent/lock \
 	    nvidia_client_owner_testboot_deadman=${RC_DEADMAN:-1} nvidia_client_owner_testboot_fallback=${RC_FALLBACK:-$T/rc/fallback} \
 	    sh "$T/rc/script.sh" start > "$T/rc/out" 2>&1
 }
@@ -345,6 +478,18 @@ RUN=$(ls -d "$T/rc/work"/2* 2>/dev/null | head -1)
 if [ -n "$RUN" ] && tail -1 "$T/rc/log" | grep -q '^testboot-return cloudbsd-rx7600$'; then ok "rc: testboot-return NORMAL_BE is the last command"; else cat "$T/rc/log"; cat "$T/rc/out"; bad "rc: testboot-return is not the last command"; fi
 first=$(grep -n '^kldload' "$T/rc/log" | head -1)
 case $first in *"kldload linux64") ok "rc: linux64 is loaded first" ;; *) bad "rc: linux64 is not loaded first ($first)" ;; esac
+second=$(grep '^kldload' "$T/rc/log" | sed -n 2p)
+case $second in *"kldload $T/rc/mods/nvidia_gsp_ga10x_fw.ko") ok "rc: the GSP firmware module is loaded by full path right after linux64" ;; *) bad "rc: the firmware is not the second load ($second)" ;; esac
+third=$(grep '^kldload' "$T/rc/log" | sed -n 3p)
+case $third in *"/nvidia.ko") ok "rc: nvidia.ko is loaded after the firmware" ;; *) bad "rc: nvidia.ko does not follow the firmware ($third)" ;; esac
+grep -q '^kldstat -q -n nvidia_gsp_ga10x_fw$' "$T/rc/log" && ok "rc: the precondition runs kldstat -q -n nvidia_gsp_ga10x_fw" || bad "rc: the firmware precondition does not run kldstat -q -n nvidia_gsp_ga10x_fw"
+grep -q '"row":"firmware-loaded","result":"pass"' "$RUN/results.jsonl" && ok "rc: the firmware-loaded row passes" || bad "rc: no passing firmware-loaded row"
+grep -q '"row":"hash-nvidia_gsp_ga10x_fw","result":"pass"' "$RUN/results.jsonl" && ok "rc: the firmware module hash row passes" || bad "rc: no firmware hash row"
+grep -q '"row":"root-open","result":"pass"' "$RUN/results.jsonl" && ok "rc: the root-open row passes" || bad "rc: no passing root-open row"
+rl=$(grep -n '"row":"root-open","result":"pass"' "$RUN/results.jsonl" | head -1 | cut -d: -f1); ob=$(grep -n '"row":"owner-boot","result":"running"' "$RUN/results.jsonl" | head -1 | cut -d: -f1)
+if [ -n "$rl" ] && [ -n "$ob" ] && [ "$rl" -lt "$ob" ]; then ok "rc: the root open comes before the probe starts"; else bad "rc: the root open does not come before the probe"; fi
+fl=$(grep -n '"row":"firmware-loaded"' "$RUN/results.jsonl" | head -1 | cut -d: -f1); nl=$(grep -n '"row":"load-nvidia"' "$RUN/results.jsonl" | head -1 | cut -d: -f1)
+if [ -n "$fl" ] && [ -n "$nl" ] && [ "$fl" -lt "$nl" ]; then ok "rc: the firmware precondition row comes before the nvidia load row"; else bad "rc: the precondition is not before the nvidia load"; fi
 grep '^kldload' "$T/rc/log" | grep -q 'nvidia-drm' && bad "rc: nvidia-drm is loaded" || ok "rc: nvidia-drm is never loaded"
 [ "$(grep -c '^kldload .*\(nvidia\.ko\|nvidia-modeset\.ko\|nvidia-uvm\.ko\)$' "$T/rc/log")" = 3 ] && ok "rc: nvidia, nvidia-modeset and nvidia-uvm are loaded by full path" || bad "rc: the three modules are not loaded by full path"
 grep -q '^sysctl kern.panic_reboot_wait_time=5 debug.debugger_on_panic=0$' "$T/rc/log" && ok "rc: the panic settings are set" || bad "rc: the panic settings are not set"
@@ -409,6 +554,44 @@ with RC_WORK=$T/rc/afile/sub with RC_FALLBACK=$T/rc/afile/fb runrc "$RCS" PASS
 tail -1 "$T/rc/log" | grep -q '^testboot-return cloudbsd-rx7600$' && ok "rc: with no run directory at all the return still runs" || { cat "$T/rc/log"; bad "rc: with no run directory the return did not run"; }
 grep -q '^kldload' "$T/rc/log" && bad "rc: modules were loaded with no run directory" || ok "rc: with no run directory no module is loaded"
 [ ! -e "$T/rc/afile/fb" ] && ok "rc: no results are written when no directory can be made" || bad "rc: results were written"
+# the firmware is not loaded after its kldload: KIT, nothing else is loaded, the probe never starts, the return runs
+with FAKE_NO_FW=1 runrc "$RCS" PASS
+RUN=$(newest)
+grep -q '"row":"firmware-loaded","result":"fail"' "$RUN/results.jsonl" && ok "rc: a firmware that is not loaded fails the firmware-loaded row" || bad "rc: no failing firmware-loaded row"
+grep '^kldload' "$T/rc/log" | grep -q '/nvidia\.ko$' && bad "rc: nvidia.ko was loaded without the firmware" || ok "rc: without the firmware nvidia.ko is not loaded"
+grep -q '^run_owner_boot$' "$T/rc/log" && bad "rc: the probe ran without the firmware" || ok "rc: without the firmware the probe never starts"
+tail -1 "$RUN/summary.txt" | grep -q '^KIT$' && grep -q 'firmware-loaded' "$RUN/summary.txt" && ok "rc: a missing firmware is a KIT result naming the row" || bad "rc: a missing firmware is not KIT"
+last_is_return_early() { tail -1 "$T/rc/log" | grep -q '^testboot-return cloudbsd-rx7600$'; }
+last_is_return_early && ok "rc: a missing firmware still ends with testboot-return" || bad "rc: a missing firmware skipped the return"
+# the kldload of the firmware fails: the same
+with FAKE_FW_LOAD_FAILS=1 runrc "$RCS" PASS
+RUN=$(newest)
+grep '^kldload' "$T/rc/log" | grep -q '/nvidia\.ko$' && bad "rc: nvidia.ko was loaded after a failed firmware load" || ok "rc: a failed firmware load stops the loads"
+tail -1 "$RUN/summary.txt" | grep -q '^KIT$' && ok "rc: a failed firmware load is KIT" || bad "rc: a failed firmware load is not KIT"
+# a changed firmware module: refused before any load
+printf 'tampered\n' > "$T/rc/mods/nvidia_gsp_ga10x_fw.ko"
+runrc "$RCS" PASS
+RUN=$(newest)
+grep -q '^kldload' "$T/rc/log" && bad "rc: a firmware with a wrong hash led to a load" || ok "rc: a firmware with a wrong hash loads nothing"
+grep -q '"row":"hash-nvidia_gsp_ga10x_fw","result":"fail"' "$RUN/results.jsonl" && tail -1 "$RUN/summary.txt" | grep -q '^KIT$' && ok "rc: a firmware hash failure is KIT" || bad "rc: a firmware hash failure is not KIT"
+cp "$STAGE/nvidia_gsp_ga10x_fw-v5.ko" "$T/rc/mods/nvidia_gsp_ga10x_fw.ko"
+# root cannot open the GPU (node missing, or an open that fails): its own failing row, KIT, no probe, the return runs
+# the node is missing after the loads: row gpu-node fails with a detail naming the cause, KIT, no probe, the return runs
+with RC_GPU=$T/rc/nogpu runrc "$RCS" PASS
+RUN=$(newest)
+grep -q '"row":"gpu-node","result":"fail","detail":"[^"]*does not exist after the loads' "$RUN/results.jsonl" && ok "rc: a missing GPU node fails the gpu-node row and says it does not exist" || bad "rc: no failing gpu-node row for a missing node"
+grep -q '"row":"root-open"' "$RUN/results.jsonl" && bad "rc: a root open was tried on a missing node" || ok "rc: a missing node is not opened"
+grep -q '^run_owner_boot$' "$T/rc/log" && bad "rc: the probe ran with no GPU node" || ok "rc: with no GPU node the probe never starts"
+tail -1 "$RUN/summary.txt" | grep -q '^KIT$' && ok "rc: a missing GPU node is KIT" || bad "rc: a missing GPU node is not KIT"
+last_is_return_early && ok "rc: a missing GPU node still ends with testboot-return" || bad "rc: a missing GPU node skipped the return"
+# the node exists and root cannot open it (a directory stands in): row root-open fails, NO-GO (the driver under test), no probe, the return runs
+with RC_GPU=$T/rc runrc "$RCS" PASS
+RUN=$(newest)
+grep -q '"row":"gpu-node","result":"pass"' "$RUN/results.jsonl" && grep -q '"row":"root-open","result":"fail","detail":"root could not open [^"]*: [^"]*[A-Za-z]' "$RUN/results.jsonl" && ok "rc: a node root cannot open fails the root-open row with the error and no empty parentheses" || bad "rc: no failing root-open row with a detail"
+grep -q '()' "$RUN/results.jsonl" && bad "rc: a row detail holds empty parentheses" || ok "rc: no row detail holds empty parentheses"
+grep -q '^run_owner_boot$' "$T/rc/log" && bad "rc: the probe ran after a failed root open" || ok "rc: after a failed root open the probe never starts"
+tail -1 "$RUN/summary.txt" | grep -q '^NO-GO$' && ok "rc: a failed root open is NO-GO" || { cat "$RUN/summary.txt"; bad "rc: a failed root open is not NO-GO"; }
+last_is_return_early && ok "rc: a failed root open still ends with testboot-return" || bad "rc: a failed root open skipped the return"
 # plants on the rc script
 plant_rc() {	# plant_rc <name> <sed> <check: function name>
 	sed -e "$2" "$RCS" > "$T/rc-plant-$1"
@@ -456,6 +639,35 @@ plant_fb() {	# plant_fb <name> <sed> <expect>: a plant on the run-directory bran
 }
 plant_fb fallback-never-used 's/if mkdir -p "\$FALLBACK" 2> \/dev\/null/if false \&\& mkdir -p "$FALLBACK" 2> \/dev\/null/' fallback
 plant_fb no-directory-skips-return 's/^\t\t( "\$nvidia_client_owner_testboot_return" "\$NORMAL" ) > \/dev\/null 2>\&1 \&$/\t\t:/' return
+# plants on the firmware and the root open
+sed -e 's/^\t\t\tif kldload "\$MODS\/nvidia_gsp_ga10x_fw.ko" > .*; then$/\t\t\tif true; then/' "$RCS" > "$T/rc-plant-fw-load-dropped"
+if cmp -s "$RCS" "$T/rc-plant-fw-load-dropped"; then bad "plant fw-load-dropped changed nothing"; else
+	runrc "$T/rc-plant-fw-load-dropped" PASS
+	if grep '^kldload' "$T/rc/log" | grep -q 'nvidia_gsp_ga10x_fw'; then bad "plant fw-load-dropped stays green"; else ok "plant fw-load-dropped is red (the firmware is never loaded)"; fi
+	RUN=$(newest)
+	if grep -q '"row":"firmware-loaded","result":"fail"' "$RUN/results.jsonl" && ! grep '^kldload' "$T/rc/log" | grep -q '/nvidia\.ko$' && tail -1 "$RUN/summary.txt" | grep -q '^KIT$'; then ok "plant fw-load-dropped: the firmware-loaded gate catches it (KIT, nvidia.ko not loaded)"; else bad "plant fw-load-dropped: the gate did not catch the missing firmware"; fi
+fi
+sed -e 's/^\t\t\tif kldstat -q -n nvidia_gsp_ga10x_fw > .*; then$/\t\t\tif true; then/' "$RCS" > "$T/rc-plant-fw-precondition-off"
+if cmp -s "$RCS" "$T/rc-plant-fw-precondition-off"; then bad "plant fw-precondition-off changed nothing"; else
+	with FAKE_NO_FW=1 runrc "$T/rc-plant-fw-precondition-off" PASS
+	if grep '^kldload' "$T/rc/log" | grep -q '/nvidia\.ko$'; then ok "plant fw-precondition-off is red (nvidia.ko loads with the firmware missing)"; else bad "plant fw-precondition-off stays green"; fi
+fi
+sed -e 's/for _k in nvidia \$(/for _k in nvidia-modeset nvidia $(/' -e 's/^\t\t\tif kldload "\$MODS\/nvidia_gsp_ga10x_fw.ko" > /\t\t\tif kldload "$MODS\/nvidia-uvm.ko" > /' "$RCS" > "$T/rc-plant-fw-not-first"
+if cmp -s "$RCS" "$T/rc-plant-fw-not-first"; then bad "plant fw-not-first changed nothing"; else
+	runrc "$T/rc-plant-fw-not-first" PASS
+	if grep '^kldload' "$T/rc/log" | sed -n 2p | grep -q 'nvidia_gsp_ga10x_fw\.ko$'; then bad "plant fw-not-first stays green"; else ok "plant fw-not-first is red (the firmware is not the second load)"; fi
+fi
+sed -e 's/^\t\t\tif ( exec 3<> .*; then$/\t\t\tif true; then/' "$RCS" > "$T/rc-plant-root-open-not-gating"
+if cmp -s "$RCS" "$T/rc-plant-root-open-not-gating"; then bad "plant root-open-not-gating changed nothing"; else
+	with RC_GPU=$T/rc runrc "$T/rc-plant-root-open-not-gating" PASS
+	if grep -q '^run_owner_boot$' "$T/rc/log"; then ok "plant root-open-not-gating is red (the probe runs after a failed root open)"; else bad "plant root-open-not-gating stays green"; fi
+fi
+sed -e '/^\t\t\trunning root-open /,/^\t\t\tdmesg > "\$OUT\/dmesg-root-open.txt"/d' "$RCS" > "$T/rc-plant-root-open-dropped"
+if cmp -s "$RCS" "$T/rc-plant-root-open-dropped"; then bad "plant root-open-dropped changed nothing"; else
+	runrc "$T/rc-plant-root-open-dropped" PASS
+	RUN=$(newest)
+	if grep -q '"row":"root-open"' "$RUN/results.jsonl"; then bad "plant root-open-dropped stays green"; else ok "plant root-open-dropped is red (no root-open row)"; fi
+fi
 # ---- summarize.sh: the reading rule on fixtures
 sumfx() {	# sumfx <name> <rows> <verdict-file-lines> <race row or ''>: builds a run directory, prints its path
 	d=$T/sum-$1; rm -rf "$d"; mkdir -p "$d/work/logs/uvm-2373-boot/20261122T000000Z"
@@ -497,6 +709,17 @@ PASS" "$R5B9")" 4 KIT
 expect kit-and-fail-no-go "$(sumfx kitfail '{"row":"deadman","result":"fail","detail":"x"}
 {"row":"load-skipped-no-deadman","result":"fail","detail":"x"}
 {"row":"done","result":"info","detail":"x"}' "FAIL" "$R5B9")" 1 NO-GO
+expect firmware-loaded-fail-kit "$(sumfx fwfail '{"row":"firmware-loaded","result":"fail","detail":"x"}
+{"row":"done","result":"info","detail":"x"}' "" "")" 4 KIT
+expect firmware-load-fail-kit "$(sumfx fwloadfail '{"row":"load-nvidia_gsp_ga10x_fw","result":"fail","detail":"x"}
+{"row":"done","result":"info","detail":"x"}' "" "")" 4 KIT
+expect firmware-hash-fail-kit "$(sumfx fwhashfail '{"row":"hash-nvidia_gsp_ga10x_fw","result":"fail","detail":"x"}
+{"row":"done","result":"info","detail":"x"}' "" "")" 4 KIT
+expect root-open-fail-no-go "$(sumfx rootopen '{"row":"root-open","result":"fail","detail":"x"}
+{"row":"done","result":"info","detail":"x"}' "" "")" 1 NO-GO
+expect gpu-node-fail-kit "$(sumfx gpunode '{"row":"gpu-node","result":"fail","detail":"x"}
+{"row":"done","result":"info","detail":"x"}' "" "")" 4 KIT
+expect root-open-running-no-go "$(sumfx rootopenrun '{"row":"root-open","result":"running","detail":"x"}' "" "")" 1 NO-GO
 expect no-modules-kit "$(sumfx nomod '{"row":"load-skipped-no-deadman","result":"fail","detail":"x"}
 {"row":"done","result":"info","detail":"x"}' "" "")" 4 KIT
 expect no-result-no-go "$(sumfx nores "$ROWS_OK" "" "")" 1 NO-GO
@@ -527,6 +750,13 @@ sumplant kit-as-no-go 's/^\techo KIT$/\techo NO-GO/' "$(sumfx p6 '{"row":"hash-n
 {"row":"done","result":"info","detail":"x"}' "" "")" 4 KIT
 sumplant load-as-kit 's/|load\$)/|load$|load-nvidia)/' "$(sumfx p7 '{"row":"load-nvidia","result":"fail","detail":"x"}
 {"row":"done","result":"info","detail":"x"}' "" "")" 1 NO-GO
+
+sumplant root-open-as-kit 's/|gpu-node|/|gpu-node|root-open|/' "$(sumfx p9 '{"row":"root-open","result":"fail","detail":"x"}
+{"row":"done","result":"info","detail":"x"}' "" "")" 1 NO-GO
+sumplant gpu-node-as-no-go 's/|gpu-node|/|/' "$(sumfx p11 '{"row":"gpu-node","result":"fail","detail":"x"}
+{"row":"done","result":"info","detail":"x"}' "" "")" 4 KIT
+sumplant firmware-as-no-go 's/|firmware-loaded|/|/' "$(sumfx p10 '{"row":"firmware-loaded","result":"fail","detail":"x"}
+{"row":"done","result":"info","detail":"x"}' "" "")" 4 KIT
 
 sumplant kit-hides-fail 's/^if \[ "\$kit" != 0 \] && \[ "\$verdict" = FAIL \]; then$/if false; then/' "$(sumfx p8 '{"row":"deadman","result":"fail","detail":"x"}
 {"row":"done","result":"info","detail":"x"}' "FAIL" "$R5B9")" 1 NO-GO
