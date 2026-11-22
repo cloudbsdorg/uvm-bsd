@@ -45,3 +45,6 @@
 - Orchestrator: no round 3 on old commits. New uvm commit: empty ioctl list (fc_nioctls != -1, harness case, old-form mutant, probe row), race loop 4 fd leak, -j FAIL rows, README wording. Then nv commit (tombstone, stranger EPERM, 64-bit gen, rows+mutants), commit staged JOURNAL in wt-nv-2373, re-merge into phase0. Each 2 rounds.
 
 - round 1 receipt 79929d93: restored probe control rows (my splice dropped them), enum, open_failed, README. Round 2 running.
+
+## 2026-11-22 (#2373 B-1, new commit on 00e6902, own 2-round budget)
+- B-1: the boot kit read RmClientDataValidation (no such key) and failed only on 0. Now reads RmValidateClientData (nvrm_registry.h:626): off when (v & 0x3) == 0x2, (v & 0x30) == 0x20 or (v & 0xC0) == 0x80; 0 is the default; a source that cannot be read (failed kenv, missing hw.nvidia.registry sysctl, empty capture, key with no value) is RE-RUN, never default. Fixtures for each case plus plants in tests/client_owner_pins_test.sh; red on 00e6902 (the new pins test run against the old script prints 41 failing validation lines), green now. Gate round 1 receipt 71a372f34a0b45d96d842e4eb379b1a920512b59eec657a21874db1dada8d1e2; round 2 answers in .round/tmp/answers.txt.

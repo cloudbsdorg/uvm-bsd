@@ -24,8 +24,9 @@
 #     met a client);
 #   - the race loops are not started while another process holds /dev/nvidiactl (fstat.race, taken just
 #     before them: loop 5 frees handles next to the victim's): the run ends RE-RUN;
-#   - the validation setting of the host is read from nvidia-settings.txt: RmClientDataValidation overridden
-#     to 0 turns the run into FAIL, because the refusals mean nothing then.
+#   - the validation setting of the host is read from nvidia-settings.txt: RmValidateClientData with
+#     (v & 0x3) == 0x2, (v & 0x30) == 0x20 or (v & 0xC0) == 0x80 turns the run into FAIL, because the
+#     refusals mean nothing then; 0 is the default (on); a source that cannot be read ends RE-RUN.
 # Results: $GB10_WORK/logs/uvm-2373-boot/<time>/ ; the last line is PASS, FAIL or RE-RUN.
 #
 # Usage: sh tests/ioctl/run_owner_boot.sh [SECONDS]
@@ -44,20 +45,85 @@ rerun=0
 say() { echo "$*" | tee -a "$OUT/result.txt"; }
 fail() { say "FAIL $*"; rc=1; }
 # BEGIN validation_override
-# validation_override <settings file>: fails when RmClientDataValidation is set to 0 (kenv or sysctl form, the
-# value read as a number), says so when it is set otherwise, and says "no override" when it is absent
+# validation_override <settings file>: reads the RM registry key RmValidateClientData (nvrm_registry.h) from the
+# capture of the host's kenv and hw.nvidia.registry sysctl (nvidia-settings.txt: "kenv exit N", the nvidia lines of
+# kenv, the sysctl text, "sysctl exit N").  Three outcomes:
+#   - a source could not be read (a failed kenv or sysctl, a missing hw.nvidia.registry node because nvidia is not
+#     loaded, an empty capture, a key whose value is not a number of at most 32 bits): RE-RUN, never "default";
+#   - the key is present and validation is OFF in any reading of its value: FAIL.  Validation is off when
+#     (v & 0x3) == 0x2 (field ALL), (v & 0x30) == 0x20 (field HANDLE) or (v & 0xC0) == 0x80 (field STRICT_CLIENT);
+#     0 means the default (on).  A decimal value with a leading zero is read both as decimal and as octal, because
+#     the base the driver uses is not pinned here; either reading being off is a FAIL;
+#   - otherwise (key absent, or any other value): ok, a value is reported.
+# The key name is matched as a whole token (not as a prefix or suffix of another name), case-insensitively; a FAIL
+# beats a RE-RUN.  This function reads from here-documents, never a side file.
+validation_off_field() {	# validation_off_field <number>: prints the field that turns validation off, or nothing
+	if [ $(( ($1 & 0x3) == 0x2 )) = 1 ]; then echo ALL
+	elif [ $(( ($1 & 0x30) == 0x20 )) = 1 ]; then echo HANDLE
+	elif [ $(( ($1 & 0xC0) == 0x80 )) = 1 ]; then echo STRICT_CLIENT
+	fi
+}
 validation_override() {
-	vline=$(grep -i 'RmClientDataValidation' "$1" | head -1)
-	if [ -z "$vline" ]; then
-		say "ok   no override of RmClientDataValidation in kenv or sysctl (default: on); see nvidia-settings.txt"
+	vkrc=$(sed -n 's/^kenv exit \([0-9][0-9]*\)$/\1/p' "$1" 2>/dev/null | head -1 || true)
+	vsrc=$(sed -n 's/^sysctl exit \([0-9][0-9]*\)$/\1/p' "$1" 2>/dev/null | head -1 || true)
+	if [ -z "$vkrc" ] || [ -z "$vsrc" ]; then
+		say "RE-RUN the validation setting could not be read: nvidia-settings.txt is empty or lacks the kenv or sysctl exit line"
+		rerun=1
 		return
 	fi
-	vval=$(printf '%s\n' "$vline" | sed -En 's/.*RmClientDataValidation[=: "]*(0x[0-9a-fA-F]+|[0-9]+).*/\1/p')
-	if [ -n "$vval" ] && [ $((vval)) = 0 ]; then
-		fail "RmClientDataValidation is overridden to off ($vline): refusals are not meaningful on this host"
-	else
-		say "     RmClientDataValidation is set ($vline): read nvidia-settings.txt; it is not set to 0"
+	if [ "$vsrc" != 0 ]; then
+		say "RE-RUN the validation setting could not be read: sysctl hw.nvidia.registry failed (exit $vsrc): load nvidia and run again (not read is not default)"
+		rerun=1
+		return
 	fi
+	if [ "$vkrc" != 0 ]; then
+		say "RE-RUN the validation setting could not be read: kenv failed (exit $vkrc, see kenv.txt): run as root and run again (not read is not default)"
+		rerun=1
+		return
+	fi
+	vmatches=$(grep -Eio '(^|[^A-Za-z0-9_])RmValidateClientData[[:space:]]*[=:][[:space:]]*"?[^;"[:space:]]*' "$1" 2>/dev/null || true)
+	if [ -z "$vmatches" ]; then
+		say "ok   no RmValidateClientData in kenv or sysctl (default: validation on); see nvidia-settings.txt"
+		return
+	fi
+	vbad=0
+	vunread=0
+	while IFS= read -r vline; do
+		vval=$(printf '%s\n' "$vline" | sed -E 's/^[^=:]*[=:][[:space:]]*"?//')
+		vreadings=
+		if printf '%s\n' "$vval" | grep -Eq '^0[xX][0-9a-fA-F]{1,8}$'; then
+			vreadings=$((vval))
+		elif printf '%s\n' "$vval" | grep -Eq '^(0|[1-9][0-9]{0,9})$'; then
+			vreadings=$vval
+		elif printf '%s\n' "$vval" | grep -Eq '^0[0-9]{1,9}$'; then
+			vreadings=$(printf '%s\n' "$vval" | sed 's/^0*\(.\)/\1/')	# the decimal reading
+			if printf '%s\n' "$vval" | grep -Eq '^0[0-7]+$'; then vreadings="$vreadings $((vval))"; fi	# and the octal one
+		fi
+		vok=1
+		for vn in $vreadings; do
+			if [ "$vn" -gt 4294967295 ]; then vok=0; fi
+		done
+		if [ -z "$vreadings" ] || [ "$vok" = 0 ]; then
+			say "RE-RUN RmValidateClientData has no value that reads as a number of at most 32 bits ($vline): not read is not default"
+			rerun=1
+			vunread=1
+			continue
+		fi
+		vfield=
+		for vn in $vreadings; do
+			vf=$(validation_off_field "$vn")
+			[ -n "$vf" ] && vfield=$vf
+		done
+		if [ -n "$vfield" ]; then
+			fail "RmValidateClientData $vval turns RM client validation off (field $vfield) ($vline): remove it from hw.nvidia.registry.RegistryDwords, reboot and run again; refusals are not meaningful on this host"
+			vbad=1
+		else
+			say "     RmValidateClientData is set to $vval ($vline): validation stays on (0 is the default)"
+		fi
+	done <<EOF
+$vmatches
+EOF
+	if [ "$vbad" = 0 ] && [ "$vunread" = 0 ]; then say "ok   RmValidateClientData does not turn validation off"; fi
 }
 # END validation_override
 # BEGIN read_race_rows
@@ -115,7 +181,7 @@ say "     negative rows: $neg (not 0x1B: $neg_bad), positive owner rows: $pos (r
 [ "$neg_bad" = 0 ] || { fail "$neg_bad negative rows were not refused with 0x1B (status 27): see probe.jsonl"; grep '"expected":"refused"' "$OUT/probe.jsonl" | grep -v '"refusal":true' | head -5 | while read -r l; do say "     $l"; done; }
 [ "$pos_bad" = 0 ] || { fail "$pos_bad owner rows were refused with 0x1B (status 27): the module refuses its owner"; grep '"expected":"not refused"' "$OUT/probe.jsonl" | grep '"refusal":true' | head -5 | while read -r l; do say "     $l"; done; }
 [ "$(grep -c '"ok":false' "$OUT/probe.jsonl")" = 0 ] || fail "the probe has a row that is not ok"
-{ kenv > "$OUT/kenv.txt" 2>&1; echo "kenv exit $?"; grep -i nvidia "$OUT/kenv.txt"; sysctl hw.nvidia 2>&1; echo "sysctl exit $?"; } > "$OUT/nvidia-settings.txt" 2>&1
+{ kenv > "$OUT/kenv.txt" 2>&1; echo "kenv exit $?"; grep -i nvidia "$OUT/kenv.txt"; sysctl hw.nvidia.registry 2>&1; echo "sysctl exit $?"; } > "$OUT/nvidia-settings.txt" 2>&1
 validation_override "$OUT/nvidia-settings.txt"
 grep '"ok":false' "$OUT/probe.jsonl" | head -5 | while read -r l; do say "     $l"; done
 
