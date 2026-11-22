@@ -108,6 +108,30 @@ GNU ld (in `/usr/local/bin`, first in the default `PATH`) links a module the
 kernel cannot load ("symbol nvUvmInterfaceChannelDestroy undefined").
 `sh tests/toolchain_test.sh` proves both with a hostile `PATH`.
 
+## Install
+
+```sh
+make install            # install the checkout owner's build as root
+make deinstall          # remove exactly what install wrote
+```
+
+Run `make` as the owner of the checkout before running `make install` as root.
+An effective-uid-0 install never builds in the source tree and refuses a
+missing or stale module. A normal-user staging install still runs the
+incremental build with `/usr/bin/make`.
+
+Both commands ask first. For scripts and other non-interactive runs, add
+`YES=1`, for example `make install YES=1`.
+
+Install writes `/boot/modules/nvidia-uvm.ko` (mode 555) and
+`/usr/local/share/man/man4/nvidia-uvm.4` (mode 444; `PREFIX` changes the
+prefix). It records files and created directories in
+`/var/db/uvm-bsd/installed.manifest`. A normal user can instead stage into an
+existing directory with `make install YES=1 DESTDIR=/path/to/stage`, without
+root. `nvidia-uvm.ko` needs `nvidia.ko` from
+[nvidia-gb10-freebsd](https://github.com/cloudbsdorg/nvidia-gb10-freebsd)
+installed first.
+
 ## Security: RM client ownership
 
 RM resolves a client handle with kernel privilege and never checks the caller, and handles are
