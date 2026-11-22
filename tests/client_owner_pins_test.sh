@@ -269,21 +269,21 @@ boot_pins() {	# boot_pins <script> <probe source>
 	    "perkey-kenv|kenv exit 0\\nhw.nvidia.registry.RmValidateClientData=\"0x2\"\\nsysctl exit 0\\n|FAIL:ALL" \
 	    "perkey-sysctl|kenv exit 0\\nsysctl exit 0\\nhw.nvidia.registry.RmValidateClientData: 2\\n|FAIL:ALL" \
 	    "octal-0200|kenv exit 0\\nhw.nvidia.registry.RegistryDwords=\"RmValidateClientData=0200\"\\nsysctl exit 0\\n|FAIL:STRICT_CLIENT" \
-	    "leading-zero-010|kenv exit 0\\nhw.nvidia.registry.RegistryDwords=\"RmValidateClientData=010\"\\nsysctl exit 0\\n|FAIL:ALL" \
+	    "octal-010-is-8-on|kenv exit 0\\nhw.nvidia.registry.RegistryDwords=\"RmValidateClientData=010\"\\nsysctl exit 0\\n|NOFAIL" \
 	    "zero-default|kenv exit 0\\nhw.nvidia.registry.RegistryDwords=\"RmValidateClientData=0x0\"\\nsysctl exit 0\\n|NOFAIL" \
 	    "0x11-on|kenv exit 0\\nhw.nvidia.registry.RegistryDwords=\"RmValidateClientData=0x11\"\\nsysctl exit 0\\n|NOFAIL" \
 	    "1-on|kenv exit 0\\nhw.nvidia.registry.RegistryDwords=\"RmValidateClientData=1\"\\nsysctl exit 0\\n|NOFAIL" \
 	    "handle-0x30-on|kenv exit 0\\nhw.nvidia.registry.RegistryDwords=\"RmValidateClientData=0x30\"\\nsysctl exit 0\\n|NOFAIL" \
 	    "strict-0xC0-on|kenv exit 0\\nhw.nvidia.registry.RegistryDwords=\"RmValidateClientData=0xC0\"\\nsysctl exit 0\\n|NOFAIL" \
 	    "all-3-on|kenv exit 0\\nhw.nvidia.registry.RegistryDwords=\"RmValidateClientData=3\"\\nsysctl exit 0\\n|NOFAIL" \
-	    "leading-zeros-1|kenv exit 0\\nhw.nvidia.registry.RegistryDwords=\"RmValidateClientData=0001\"\\nsysctl exit 0\\n|NOFAIL" \
+	    "octal-0001-on|kenv exit 0\\nhw.nvidia.registry.RegistryDwords=\"RmValidateClientData=0001\"\\nsysctl exit 0\\n|NOFAIL" \
 	    "absent|kenv exit 0\\nsysctl exit 0\\n|NOFAIL" \
 	    "old-name-is-not-the-key|kenv exit 0\\nhw.nvidia.registry.RmClientDataValidation=\"0\"\\nsysctl exit 0\\n|NOFAIL" \
 	    "longer-name-not-the-key|kenv exit 0\\nhw.nvidia.registry.RegistryDwords=\"XRmValidateClientData=0x2\"\\nsysctl exit 0\\n|NOFAIL" \
 	    "name-with-suffix-not-the-key|kenv exit 0\\nhw.nvidia.registry.RegistryDwords=\"RmValidateClientDataFoo=0x2\"\\nsysctl exit 0\\n|NOFAIL" \
-	    "sysctl-node-missing|kenv exit 0\\nsysctl: unknown oid 'hw.nvidia.registry'\\nsysctl exit 1\\n|RERUN" \
-	    "kenv-failed|kenv exit 1\\nsysctl exit 0\\n|RERUN" \
-	    "empty-capture||RERUN" \
+	    "sysctl-node-missing|kenv exit 0\\nsysctl: unknown oid 'hw.nvidia.registry'\\nsysctl exit 1\\n|RERUN:sysctl hw.nvidia.registry failed" \
+	    "kenv-failed|kenv exit 1\\nsysctl exit 0\\n|RERUN:kenv failed" \
+	    "empty-capture||RERUN:vo.txt" \
 	    "key-without-value|kenv exit 0\\nhw.nvidia.registry.RegistryDwords=\"RmValidateClientData=\"\\nsysctl exit 0\\n|RERUN" \
 	    "hex-no-digits|kenv exit 0\\nhw.nvidia.registry.RegistryDwords=\"RmValidateClientData=0x\"\\nsysctl exit 0\\n|RERUN" \
 	    "hex-garbage|kenv exit 0\\nhw.nvidia.registry.RegistryDwords=\"RmValidateClientData=0xZZ\"\\nsysctl exit 0\\n|RERUN" \
@@ -291,22 +291,50 @@ boot_pins() {	# boot_pins <script> <probe source>
 	    "wide-hex|kenv exit 0\\nhw.nvidia.registry.RegistryDwords=\"RmValidateClientData=0x10000000000000002\"\\nsysctl exit 0\\n|RERUN" \
 	    "wide-decimal|kenv exit 0\\nhw.nvidia.registry.RegistryDwords=\"RmValidateClientData=99999999999999999999\"\\nsysctl exit 0\\n|RERUN" \
 	    "over-32-bits|kenv exit 0\\nhw.nvidia.registry.RegistryDwords=\"RmValidateClientData=4294967296\"\\nsysctl exit 0\\n|RERUN" \
+	    "octal-028-not-a-number|kenv exit 0\\nhw.nvidia.registry.RegistryDwords=\"RmValidateClientData=028\"\\nsysctl exit 0\\n|RERUN:correct it" \
+	    "octal-099-not-a-number|kenv exit 0\\nhw.nvidia.registry.RegistryDwords=\"RmValidateClientData=099\"\\nsysctl exit 0\\n|RERUN" \
+	    "hex-upper-X-0X80|kenv exit 0\\nhw.nvidia.registry.RegistryDwords=\"RmValidateClientData=0X80\"\\nsysctl exit 0\\n|FAIL:STRICT_CLIENT" \
+	    "sysctl-missing-kenv-off|kenv exit 0\\nhw.nvidia.registry.RegistryDwords=\"RmValidateClientData=0x2\"\\nsysctl: unknown oid 'hw.nvidia.registry'\\nsysctl exit 1\\n|FAIL:ALL" \
+	    "kenv-failed-sysctl-off|kenv exit 1\\nsysctl exit 0\\nhw.nvidia.registry.dwords: RmValidateClientData=0x2\\n|FAIL:ALL" \
+	    "colon-glued|kenv exit 0\\nsysctl exit 0\\nhw.nvidia.registry.dwords:RmValidateClientData=0x2\\n|FAIL:ALL" \
+	    "equals-glued|kenv exit 0\\nhw.nvidia.registry.RegistryDwords=RmValidateClientData=0x80\\nsysctl exit 0\\n|FAIL:STRICT_CLIENT" \
+	    "per-key-remedy|kenv exit 0\\nhw.nvidia.registry.RmValidateClientData=\"0x2\"\\nsysctl exit 0\\n|FAIL:ALL:remove hw.nvidia.registry.RmValidateClientData from the loader tunables" \
+	    "dwords-remedy|kenv exit 0\\nhw.nvidia.registry.RegistryDwords=\"RmValidateClientData=0x2\"\\nsysctl exit 0\\n|FAIL:ALL:from RegistryDwords" \
+	    "grep-error|kenv exit 0\\nhw.nvidia.registry.RegistryDwords=\"RmValidateClientData=0x2\"\\nsysctl exit 0\\n|RERUN:run again" \
+	    "zero-plain|kenv exit 0\\nhw.nvidia.registry.RegistryDwords=\"RmValidateClientData=0\"\\nsysctl exit 0\\n|NOFAIL" \
+	    "octal-020000000002-is-2-pow-31-plus-2|kenv exit 0\\nhw.nvidia.registry.RegistryDwords=\"RmValidateClientData=020000000002\"\\nsysctl exit 0\\n|FAIL:ALL" \
+	    "octal-020000000000-pow-31-on|kenv exit 0\\nhw.nvidia.registry.RegistryDwords=\"RmValidateClientData=020000000000\"\\nsysctl exit 0\\n|NOFAIL" \
+	    "octal-040000000000-over-32-bits|kenv exit 0\\nhw.nvidia.registry.RegistryDwords=\"RmValidateClientData=040000000000\"\\nsysctl exit 0\\n|RERUN" \
+	    "hex-padded-0x000000002|kenv exit 0\\nhw.nvidia.registry.RegistryDwords=\"RmValidateClientData=0x000000002\"\\nsysctl exit 0\\n|FAIL:ALL" \
+	    "sysctl-dwords-remedy|kenv exit 0\\nsysctl exit 0\\nhw.nvidia.registry.dwords: RmValidateClientData=0x2\\n|FAIL:ALL:from RegistryDwords" \
+	    "nul-in-capture|kenv exit 0\\nhw.nvidia.registry.RegistryDwords=\"RmValidateClientData=0x2\"\\n\\000\\nsysctl exit 0\\n|FAIL:ALL" \
+	    "inner-grep-error|kenv exit 0\\nhw.nvidia.registry.RegistryDwords=\"RmValidateClientData=0x2\"\\nsysctl exit 0\\n|RERUN" \
+	    "unread-reason-with-unnumbered|kenv exit 1\\nhw.nvidia.registry.RegistryDwords=\"RmValidateClientData=\"\\nsysctl exit 0\\n|RERUN:kenv failed" \
+	    "unread-reason-noted-on-fail|kenv exit 1\\nsysctl exit 0\\nhw.nvidia.registry.dwords: RmValidateClientData=0x2\\n|FAIL:ALL:note: kenv failed" \
+	    "kenv-failed-bad-number|kenv exit 1\\nsysctl exit 0\\nhw.nvidia.registry.dwords: RmValidateClientData=028\\n|RERUN:kenv failed" \
+	    "octal-037777777776-is-0xFFFFFFFE|kenv exit 0\\nhw.nvidia.registry.RegistryDwords=\"RmValidateClientData=037777777776\"\\nsysctl exit 0\\n|FAIL:ALL" \
 	    "fail-beats-ok|kenv exit 0\\nhw.nvidia.registry.RegistryDwords=\"RmValidateClientData=0x1\"\\nsysctl exit 0\\nhw.nvidia.registry.dwords: RmValidateClientData=0x80\\n|FAIL:STRICT_CLIENT" \
-	    "fail-beats-unreadable|kenv exit 0\\nhw.nvidia.registry.RegistryDwords=\"RmValidateClientData=\"\\nsysctl exit 0\\nhw.nvidia.registry.dwords: RmValidateClientData=0x2\\n|FAILMIX:ALL"; do
+	    "fail-beats-unreadable|kenv exit 0\\nhw.nvidia.registry.RegistryDwords=\"RmValidateClientData=\"\\nsysctl exit 0\\nhw.nvidia.registry.dwords: RmValidateClientData=0x2\\n|FAIL:ALL"; do
 		name=${fx%%|*}; rest=${fx#*|}; cap=${rest%|*}; want=${rest##*|}
 		printf "$cap" > "$T/vo.txt"
 		( out=; rerun=0; say() { out="$out$*;"; }; fail() { out="${out}FAIL $*;"; }
-		  . "$T/vo.sh"; validation_override "$T/vo.txt"
-		  case $want in
-		  FAIL:*|FAILMIX:*) fld=${want#*:}
-		      case $out in *"field $fld)"*) ;; *) echo "validation fixture $name: said '$out', wanted FAIL in field $fld" ;; esac
+		  . "$T/vo.sh"
+		  if [ "$name" = grep-error ]; then grep() { case "$*" in *-aEi\ *) return 2 ;; esac; command grep "$@"; }; fi
+		  if [ "$name" = inner-grep-error ]; then grep() { case "$*" in *-aEio*) return 2 ;; esac; command grep "$@"; }; fi
+		  validation_override "$T/vo.txt"
+		  msg=; fld=; kind=${want%%:*}
+		  case $want in *:*) fld=${want#*:}; case $fld in *:*) msg=${fld#*:}; fld=${fld%%:*} ;; *) [ "$kind" = RERUN ] && { msg=$fld; fld=; } ;; esac ;; esac
+		  case $kind in
+		  FAIL) case $out in *"field $fld)"*) ;; *) echo "validation fixture $name: said '$out', wanted FAIL in field $fld" ;; esac
 		      case $out in FAIL*|*";FAIL"*) ;; *) echo "validation fixture $name: no FAIL: '$out'" ;; esac
-		      case $want in FAIL:*) [ "$rerun" = 0 ] || echo "validation fixture $name: a plain FAIL also set RE-RUN: '$out'" ;; esac ;;
+		      case $out in *"ok   "*|*"RE-RUN"*) echo "validation fixture $name: a FAIL fixture also said ok or RE-RUN: '$out'" ;; esac
+		      [ "$rerun" = 0 ] || echo "validation fixture $name: a FAIL also set RE-RUN: '$out'" ;;
 		  RERUN) [ "$rerun" = 1 ] || echo "validation fixture $name: not RE-RUN: '$out'"
 		      case $out in *FAIL*|*"ok   "*) echo "validation fixture $name: RE-RUN fixture also said '$out'" ;; esac ;;
 		  *) case $out in *FAIL*) echo "validation fixture $name: failed wrongly: '$out'" ;; esac
 		      [ "$rerun" = 0 ] || echo "validation fixture $name: wanted no RE-RUN: '$out'" ;;
-		  esac )
+		  esac
+		  if [ -n "$msg" ]; then case $out in *"$msg"*) ;; *) echo "validation fixture $name: said '$out', wanted '$msg'" ;; esac; fi )
 	done
 }
 if [ -z "$(boot_pins "$BOOT" "$REPO/tests/ioctl/uvm_owner_probe.c")" ]; then echo "ok   the boot script: refusal field, row reading on fixtures, RE-RUN, validation, busy device"; else echo "FAIL boot script:"; boot_pins "$BOOT" "$REPO/tests/ioctl/uvm_owner_probe.c"; rc=1; fi
@@ -325,14 +353,23 @@ boot_plant validation-strict-missing 's/; then echo STRICT_CLIENT$/; then :/'
 boot_plant validation-handle-mask-wrong 's/(\$1 \& 0x30) == 0x20/(\$1 \& 0x20) == 0x20/'
 boot_plant validation-strict-mask-wrong 's/(\$1 \& 0xC0) == 0x80/(\$1 \& 0x80) == 0x80/'
 boot_plant validation-zero-is-off 's/(\$1 \& 0x3) == 0x2 ))/(\$1 \& 0x3) == 0x2 || \$1 == 0 ))/'
-boot_plant unread-is-default '/^# BEGIN validation_override/,/^# END validation_override/s/rerun=1$/rerun=0/'
 boot_plant old-key-name 's/RmValidateClientData\[\[:space:\]\]\*/RmClientDataValidation[[:space:]]*/'
+boot_plant unread-is-default '/^# BEGIN validation_override/,/^# END validation_override/s/rerun=1$/rerun=0/'
 boot_plant exits-not-read 's/if \[ "\$vsrc" != 0 \]; then/if false; then/'
-boot_plant kenv-exit-not-read 's/if \[ "\$vkrc" != 0 \]; then/if false; then/'
-boot_plant octal-reading-dropped 's/then vreadings="\$vreadings \$((vval))"; fi/then :; fi/'
-boot_plant range-unchecked 's/\[ "\$vn" -gt 4294967295 \]/false/'
-boot_plant name-boundary-dropped 's/(^|\[^A-Za-z0-9_\])RmValidateClientData/RmValidateClientData/'
-boot_plant rerun-set-on-fail 's/^			vbad=1$/			vbad=1; rerun=1/'
+boot_plant kenv-exit-not-read 's/elif \[ "\$vkrc" != 0 \]; then/elif false; then/'
+boot_plant range-unchecked 's/if \[ -n "\$vn" \] \&\& \[ "\$vn" -ge 0 \] \&\& \[ "\$vn" -le 4294967295 \]; then echo "\$vn"; fi/echo "$vn"/'
+boot_plant octal-rejected 's/\^0\[0-7\]{0,40}\$/^0[0-7]{0,40}$_NEVER/'
+boot_plant octal-read-as-decimal '/0\[0-7\]{0,40}/s/vn=\$((\$1))/vn=${1#0}/'
+boot_plant grep-status-ignored 's/if \[ "\$vgrc" -gt 1 \]; then/if false; then/'
+boot_plant fail-hidden-by-unread 's/\[ "\$vbad" = 0 \] || return 0/[ -z "$vunread" ] || return 0/'
+boot_plant per-key-remedy-lost 's/\*registrydwords\*|\*registry.dwords\*) vwhere=/*XX) vwhere=/'
+boot_plant glued-boundary-kept 's/s\/\^\[\^A-Za-z\]\/\/; //'
+boot_plant name-boundary-dropped 's/(\^|\[\^A-Za-z0-9_\])RmValidateClientData/RmValidateClientData/'
+boot_plant rerun-set-on-fail 's/^				vbad=1$/				vbad=1; rerun=1/'
+boot_plant unread-invariant-dropped 's/if \[ "\$vgrc" = 0 \] \&\& \[ "\$vfound" = 0 \]; then/if false; then/'
+boot_plant binary-capture-skipped 's/grep -aEi "\$vtok"/grep -Ei "$vtok"/'
+boot_plant remedy-case-sensitive 's/vlow=\$(printf .%s. "\$vwhole" | tr .A-Z. .a-z.)/vlow=$vwhole/'
+boot_plant unread-note-dropped 's/say "     note: \$vunread"/:/'
 boot_plant loop5-cause-generic 's/could not be exercised/did no work/'
 boot_plant failed-arm-dead 's/"failed":true/"failed":nope/'
 boot_plant stale-busy-check 's/fstat.race/fstat.before/g'

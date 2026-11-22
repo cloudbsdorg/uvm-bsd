@@ -48,3 +48,6 @@
 
 ## 2026-11-22 (#2373 B-1, new commit on 00e6902, own 2-round budget)
 - B-1: the boot kit read RmClientDataValidation (no such key) and failed only on 0. Now reads RmValidateClientData (nvrm_registry.h:626): off when (v & 0x3) == 0x2, (v & 0x30) == 0x20 or (v & 0xC0) == 0x80; 0 is the default; a source that cannot be read (failed kenv, missing hw.nvidia.registry sysctl, empty capture, key with no value) is RE-RUN, never default. Fixtures for each case plus plants in tests/client_owner_pins_test.sh; red on 00e6902 (the new pins test run against the old script prints 41 failing validation lines), green now. Gate round 1 receipt 71a372f34a0b45d96d842e4eb379b1a920512b59eec657a21874db1dada8d1e2; round 2 answers in .round/tmp/answers.txt.
+
+## 2026-11-22T02:10:00Z (#2373 reader fixes, new commit on 7c6e669, own 2-round budget)
+- Orchestrator: fix leading-zero-89 (numbers read base 0 as strtoul: 0x hex, leading 0 octal, invalid is RE-RUN), grep-error-collapse (grep exit status: 1 no match, 2 or more RE-RUN), a FAIL stands when sysctl or kenv failed, remedy names the right tunable, colon/equals-glued key. Gate round 1 running.

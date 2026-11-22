@@ -26,7 +26,8 @@
 #     before them: loop 5 frees handles next to the victim's): the run ends RE-RUN;
 #   - the validation setting of the host is read from nvidia-settings.txt: RmValidateClientData with
 #     (v & 0x3) == 0x2, (v & 0x30) == 0x20 or (v & 0xC0) == 0x80 turns the run into FAIL, because the
-#     refusals mean nothing then; 0 is the default (on); a source that cannot be read ends RE-RUN.
+#     refusals mean nothing then; 0 is the default (on); a source that cannot be read, or a value that is not
+#     a valid base-0 number, ends RE-RUN (a FAIL stands whatever else could not be read).
 # Results: $GB10_WORK/logs/uvm-2373-boot/<time>/ ; the last line is PASS, FAIL or RE-RUN.
 #
 # Usage: sh tests/ioctl/run_owner_boot.sh [SECONDS]
@@ -47,83 +48,124 @@ fail() { say "FAIL $*"; rc=1; }
 # BEGIN validation_override
 # validation_override <settings file>: reads the RM registry key RmValidateClientData (nvrm_registry.h) from the
 # capture of the host's kenv and hw.nvidia.registry sysctl (nvidia-settings.txt: "kenv exit N", the nvidia lines of
-# kenv, the sysctl text, "sysctl exit N").  Three outcomes:
-#   - a source could not be read (a failed kenv or sysctl, a missing hw.nvidia.registry node because nvidia is not
-#     loaded, an empty capture, a key whose value is not a number of at most 32 bits): RE-RUN, never "default";
-#   - the key is present and validation is OFF in any reading of its value: FAIL.  Validation is off when
+# kenv, the sysctl text, "sysctl exit N").  Outcomes:
+#   - the key is present and validation is OFF: FAIL, whatever else could not be read.  Validation is off when
 #     (v & 0x3) == 0x2 (field ALL), (v & 0x30) == 0x20 (field HANDLE) or (v & 0xC0) == 0x80 (field STRICT_CLIENT);
-#     0 means the default (on).  A decimal value with a leading zero is read both as decimal and as octal, because
-#     the base the driver uses is not pinned here; either reading being off is a FAIL;
+#     0 means the default (on);
+#   - a source could not be read (a failed kenv or sysctl, a missing hw.nvidia.registry node because nvidia is
+#     not loaded, an empty capture, a failed search of the capture) or a value is not a valid number: RE-RUN,
+#     never "default";
 #   - otherwise (key absent, or any other value): ok, a value is reported.
-# The key name is matched as a whole token (not as a prefix or suffix of another name), case-insensitively; a FAIL
-# beats a RE-RUN.  This function reads from here-documents, never a side file.
+# Numbers are read base 0 as the driver's own parse does (see validation_number): 0x or 0X is hex, a leading 0 is
+# octal (digits 0 to 7 only, so 028 is not a number), anything else is decimal; at most 32 bits.  The key name is
+# matched as a whole token, case-insensitively.  The masks live only in validation_off_field.
 validation_off_field() {	# validation_off_field <number>: prints the field that turns validation off, or nothing
 	if [ $(( ($1 & 0x3) == 0x2 )) = 1 ]; then echo ALL
 	elif [ $(( ($1 & 0x30) == 0x20 )) = 1 ]; then echo HANDLE
 	elif [ $(( ($1 & 0xC0) == 0x80 )) = 1 ]; then echo STRICT_CLIENT
 	fi
 }
+# validation_number <text>: prints the value of a base-0 number of at most 32 bits, or nothing.  The driver reads
+# each RegistryDwords value with strtoul(value, NULL, 0) cast to 32 bits (nvidia_os_registry.c of the NVIDIA FreeBSD
+# OS layer); this reader takes only whole numbers (0x hex, a leading 0 octal, else decimal; "0" is octal zero) and
+# gives nothing for text strtoul would read a prefix of (028 reads as 2 there) or truncate (more than 32 bits).
+validation_number() {
+	if printf '%s\n' "$1" | grep -Eq '^0[xX][0-9a-fA-F]{1,16}$'; then vn=$(($1))
+	elif printf '%s\n' "$1" | grep -Eq '^0[0-7]{0,40}$'; then vn=$(($1))
+	elif printf '%s\n' "$1" | grep -Eq '^[1-9][0-9]{0,9}$'; then vn=$1
+	else return 0
+	fi
+	if [ -n "$vn" ] && [ "$vn" -ge 0 ] && [ "$vn" -le 4294967295 ]; then echo "$vn"; fi
+}
 validation_override() {
 	vkrc=$(sed -n 's/^kenv exit \([0-9][0-9]*\)$/\1/p' "$1" 2>/dev/null | head -1 || true)
 	vsrc=$(sed -n 's/^sysctl exit \([0-9][0-9]*\)$/\1/p' "$1" 2>/dev/null | head -1 || true)
 	if [ -z "$vkrc" ] || [ -z "$vsrc" ]; then
-		say "RE-RUN the validation setting could not be read: nvidia-settings.txt is empty or lacks the kenv or sysctl exit line"
+		say "RE-RUN the validation setting could not be read: the capture $1 is empty or lacks the kenv or sysctl exit line; see it and $(dirname "$1")/kenv.txt, then run again (an unreadable setting is not treated as the default)"
 		rerun=1
 		return
 	fi
+	vunread=
 	if [ "$vsrc" != 0 ]; then
-		say "RE-RUN the validation setting could not be read: sysctl hw.nvidia.registry failed (exit $vsrc): load nvidia and run again (not read is not default)"
-		rerun=1
-		return
+		vunread="sysctl hw.nvidia.registry failed (exit $vsrc): load nvidia and run again"
+	elif [ "$vkrc" != 0 ]; then
+		vunread="kenv failed (exit $vkrc, see kenv.txt): run as root and run again"
 	fi
-	if [ "$vkrc" != 0 ]; then
-		say "RE-RUN the validation setting could not be read: kenv failed (exit $vkrc, see kenv.txt): run as root and run again (not read is not default)"
+	vtok='(^|[^A-Za-z0-9_])RmValidateClientData[[:space:]]*[=:][[:space:]]*"?[^;"[:space:]]*'
+	vgrc=0
+	vlines=$(grep -aEi "$vtok" "$1" 2>/dev/null) || vgrc=$?
+	if [ "$vgrc" -gt 1 ]; then
+		say "RE-RUN the capture $1 could not be searched (grep exit $vgrc): check that it is readable and run again (an unreadable setting is not treated as the default)"
 		rerun=1
-		return
-	fi
-	vmatches=$(grep -Eio '(^|[^A-Za-z0-9_])RmValidateClientData[[:space:]]*[=:][[:space:]]*"?[^;"[:space:]]*' "$1" 2>/dev/null || true)
-	if [ -z "$vmatches" ]; then
-		say "ok   no RmValidateClientData in kenv or sysctl (default: validation on); see nvidia-settings.txt"
 		return
 	fi
 	vbad=0
-	vunread=0
-	while IFS= read -r vline; do
-		vval=$(printf '%s\n' "$vline" | sed -E 's/^[^=:]*[=:][[:space:]]*"?//')
-		vreadings=
-		if printf '%s\n' "$vval" | grep -Eq '^0[xX][0-9a-fA-F]{1,8}$'; then
-			vreadings=$((vval))
-		elif printf '%s\n' "$vval" | grep -Eq '^(0|[1-9][0-9]{0,9})$'; then
-			vreadings=$vval
-		elif printf '%s\n' "$vval" | grep -Eq '^0[0-9]{1,9}$'; then
-			vreadings=$(printf '%s\n' "$vval" | sed 's/^0*\(.\)/\1/')	# the decimal reading
-			if printf '%s\n' "$vval" | grep -Eq '^0[0-7]+$'; then vreadings="$vreadings $((vval))"; fi	# and the octal one
-		fi
-		vok=1
-		for vn in $vreadings; do
-			if [ "$vn" -gt 4294967295 ]; then vok=0; fi
-		done
-		if [ -z "$vreadings" ] || [ "$vok" = 0 ]; then
-			say "RE-RUN RmValidateClientData has no value that reads as a number of at most 32 bits ($vline): not read is not default"
-			rerun=1
-			vunread=1
-			continue
-		fi
-		vfield=
-		for vn in $vreadings; do
-			vf=$(validation_off_field "$vn")
-			[ -n "$vf" ] && vfield=$vf
-		done
-		if [ -n "$vfield" ]; then
-			fail "RmValidateClientData $vval turns RM client validation off (field $vfield) ($vline): remove it from hw.nvidia.registry.RegistryDwords, reboot and run again; refusals are not meaningful on this host"
-			vbad=1
-		else
-			say "     RmValidateClientData is set to $vval ($vline): validation stays on (0 is the default)"
-		fi
+	vunnum=0
+	vnummsg=
+	vfound=0
+	if [ "$vgrc" = 0 ]; then
+	while IFS= read -r vwhole; do
+		vfrags=$(printf '%s\n' "$vwhole" | grep -aEio "$vtok" || true)
+		while IFS= read -r vline; do
+			[ -n "$vline" ] || continue
+			vfound=1
+			# the first strip removes the boundary character the token regex may have captured (a ":" or "="
+			# glued to the key: fixtures colon-glued and equals-glued); then everything through the separator
+			vval=$(printf '%s\n' "$vline" | sed -E 's/^[^A-Za-z]//; s/^[^=:]*[=:][[:space:]]*"?//')
+			vnum=$(validation_number "$vval")
+			if [ -z "$vnum" ]; then
+				vnummsg="$vnummsg '$vval'"
+				vunnum=1
+				continue
+			fi
+			vfield=$(validation_off_field "$vnum")
+			if [ -n "$vfield" ]; then
+				vlow=$(printf '%s' "$vwhole" | tr 'A-Z' 'a-z')
+				case $vlow in
+				*registrydwords*|*registry.dwords*) vwhere="remove RmValidateClientData=... from RegistryDwords (hw.nvidia.registry.RegistryDwords in the loader.conf of the boot environment under test)" ;;
+				*) vwhere="remove hw.nvidia.registry.RmValidateClientData from the loader tunables" ;;
+				esac
+				fail "RmValidateClientData $vval ($vnum) turns RM client validation off (field $vfield) in: $vwhole; $vwhere, reboot and run again; refusals are not meaningful on this host"
+				vbad=1
+			else
+				say "     RmValidateClientData is set to $vval ($vnum): validation stays on (0 is the default); in: $vwhole"
+			fi
+		done <<EOF2
+$vfrags
+EOF2
 	done <<EOF
-$vmatches
+$vlines
 EOF
-	if [ "$vbad" = 0 ] && [ "$vunread" = 0 ]; then say "ok   RmValidateClientData does not turn validation off"; fi
+	fi
+	# not read: say why, whatever else is decided (an operator must not learn it one rerun later); the RE-RUN
+	# wording appears only in a run that ends RE-RUN
+	if [ -n "$vnummsg" ]; then
+		if [ "$vbad" = 0 ]; then
+			say "RE-RUN RmValidateClientData value$vnummsg is not a valid number (hex 0x..., octal 0..., or decimal, at most 32 bits): correct it in the loader settings, reboot and run again (an unreadable setting is not treated as the default)"
+		else
+			say "     note: RmValidateClientData value$vnummsg is not a valid number"
+		fi
+	fi
+	if [ -n "$vunread" ] && [ "$vbad" = 0 ]; then
+		say "RE-RUN the validation setting could not be read: $vunread (not read is not default)"
+		rerun=1
+	elif [ -n "$vunread" ]; then
+		say "     note: $vunread"
+	fi
+	[ "$vbad" = 0 ] || return 0		# a FAIL stands whatever else could not be read
+	if [ "$vgrc" = 0 ] && [ "$vfound" = 0 ]; then
+		# the search matched and no value was parsed (a binary capture, or the two searches disagree): not read
+		say "RE-RUN the capture matched RmValidateClientData but no value could be parsed from it: not read is not default"
+		rerun=1
+		return 0
+	fi
+	if [ "$vunnum" != 0 ]; then rerun=1; return 0; fi
+	[ -z "$vunread" ] || return 0
+	if [ "$vfound" = 0 ]; then
+		say "ok   no RmValidateClientData in kenv or sysctl (default: validation on); see nvidia-settings.txt"
+	else
+		say "ok   RmValidateClientData does not turn validation off"
+	fi
 }
 # END validation_override
 # BEGIN read_race_rows
