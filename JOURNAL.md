@@ -24,3 +24,37 @@
 
 ## 2026-11-20T12:15Z (combo worktree)
 - Fixes for the hardware stress hang: holder marker (no fstat), stop flag + bounded wait for churn/sysctl loops, UUID lookup WARN vs baseline, fake-mode selftest (red first, logs/uvm-2272/stress_selftest_red.txt). Next: gate, commit, push, Track.
+
+## 2026-11-21T04:13:44Z (#2373 sec)
+- Red first: client_owner_test.c against the old-behaviour stub header (log ~/work/gb10/logs/uvm-2373/model_red.txt), then green. Check in uvm_ioctl.c for the five rmCtrlFd requests; pins test with 11 plants; probe tests/ioctl/uvm_owner_probe.c builds. Module built with base lld (Linker: LLD, undefined nvUvmInterfaceClientOwnedByFile). man page SECURITY section, README section.
+- Needs the nvidia.ko of nvidia-gb10-freebsd agent/2373-nv-client-owner. Next: gate round 1 both repos, commit, push, Track, Honcho. Resume: git status.
+
+## 2026-11-21T05:37:10Z
+- Gate round 1 (receipt 45b1b792): pins strengthened (status returned, first call, moved-after and ignore-status plants), probe hardened (ioctl failure is FAIL, uid checks, closed fd row), cause logging, man/README. Rebuilt LLD. Next: round 2 then commit and push.
+
+## 2026-11-21T07:00:51Z (#2373 fix round 3)
+- uvm side in tree: CAP_IOCTL only, MODULE_DEPEND nvidia 2,2,2 (+pin), uvm glue harness (tests/client_owner_glue_test.sh, 23 mutants red), pins on comment-stripped text (+4 plants), PROVENANCE paragraph, C-Q Q-013 filed in uvm-qa, probe rows (/dev/nvidia0, dup, SCM_RIGHTS pass, SMC-only, P2P, setgroups, -j JSON), tests/ioctl/uvm_owner_race.c (4 loops), uvm_stress.sh -O, run_owner_boot.sh. Not yet committed. nv gate round 2 running; nv commit then phase0 merge branch; then uvm gate rounds.
+
+## 2026-11-21T07:07:12Z
+- uvm worktree: all suites pass in tree (98 ok, 0 FAIL), module built LLD. Waiting for the p0 nv gate, then uvm gate round 1.
+
+## 2026-11-21T07:13:10Z
+- uvm gate round 1 receipt 9e2a08f5 fixed (fget_cap + limited ioctl list refusal, race loops rewritten with assertions and watchdog, probe fixes, boot script, stress baseline, man). Round 2 running (gate-u2-2.log). Module rebuilt with base LLD.
+
+## 2026-11-21T07:42:11Z (#2373 follow-up commits)
+- Orchestrator: no round 3 on old commits. New uvm commit: empty ioctl list (fc_nioctls != -1, harness case, old-form mutant, probe row), race loop 4 fd leak, -j FAIL rows, README wording. Then nv commit (tombstone, stranger EPERM, 64-bit gen, rows+mutants), commit staged JOURNAL in wt-nv-2373, re-merge into phase0. Each 2 rounds.
+
+- round 1 receipt 79929d93: restored probe control rows (my splice dropped them), enum, open_failed, README. Round 2 running.
+
+## 2026-11-22 (#2373 B-1, new commit on 00e6902, own 2-round budget)
+- B-1: the boot kit read RmClientDataValidation (no such key) and failed only on 0. Now reads RmValidateClientData (nvrm_registry.h:626): off when (v & 0x3) == 0x2, (v & 0x30) == 0x20 or (v & 0xC0) == 0x80; 0 is the default; a source that cannot be read (failed kenv, missing hw.nvidia.registry sysctl, empty capture, key with no value) is RE-RUN, never default. Fixtures for each case plus plants in tests/client_owner_pins_test.sh; red on 00e6902 (the new pins test run against the old script prints 41 failing validation lines), green now. Gate round 1 receipt 71a372f34a0b45d96d842e4eb379b1a920512b59eec657a21874db1dada8d1e2; round 2 answers in .round/tmp/answers.txt.
+
+## 2026-11-22T02:10:00Z (#2373 reader fixes, new commit on 7c6e669, own 2-round budget)
+- Orchestrator: fix leading-zero-89 (numbers read base 0 as strtoul: 0x hex, leading 0 octal, invalid is RE-RUN), grep-error-collapse (grep exit status: 1 no match, 2 or more RE-RUN), a FAIL stands when sysctl or kenv failed, remedy names the right tunable, colon/equals-glued key. Gate round 1 running.
+
+## 2026-11-22T02:40:00Z (#2373 one-shot BE kit, new commit on e5d29d7, own 2-round budget)
+- Reader fixes committed e5d29d7 (round 1 6e744db5, round 2 7645ca8e). Next commit: tests/ioctl/testboot (make-be.sh, rc one-shot, summarize.sh, vendored testboot-return pinned in VENDOR) and tests/testboot_kit_test.sh; run_owner_boot.sh takes PROBE_UID_A/B. Gate round 1 running; then the dry run on the real host (a BE built, not armed).
+
+## 2026-11-22T03:10:00Z (#2373 kit safety fixes, new commit on 7fbca39, own 2-round budget)
+- Orchestrator: a dead-man timer not pending loads nothing (KIT, return straight away); FAIL wins over KIT in summarize.sh; rc script, summarize.sh and testboot-return installed from the git archive; usr/local/etc/rc.conf.d scanned. Gate round 1 running; then destroy the old dry-run BE, build a fresh one, mount check, prove the dead-man timer pending.
+- Round 1 receipt 2d6d5617b04b5dba52601f60cfc35b2629f316ed28175fcf86e8cf7b096f2530 (5 voices FINDINGS, answers .round/tmp/answers.txt). Folded in: the rc script falls back to a 0700 /var/db/nvco-testboot (never /tmp) and, when no run directory can be made at all, writes no results and still runs testboot-return; a dead-man timer disabled or not pending loads nothing.

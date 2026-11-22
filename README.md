@@ -108,6 +108,65 @@ GNU ld (in `/usr/local/bin`, first in the default `PATH`) links a module the
 kernel cannot load ("symbol nvUvmInterfaceChannelDestroy undefined").
 `sh tests/toolchain_test.sh` proves both with a hostile `PATH`.
 
+## Security: RM client ownership
+
+RM resolves a client handle with kernel privilege and never checks the caller, and handles are
+predictable (the first client of a boot is `0xC1D00000`). So the module accepts a client handle
+only from the process that holds the `/dev/nvidiactl` file the client was allocated on.
+
+- **Which requests:** `UVM_REGISTER_GPU` (with a client handle or an SMC reference),
+  `UVM_REGISTER_GPU_VASPACE`, `UVM_REGISTER_CHANNEL`, `UVM_MAP_EXTERNAL_ALLOCATION` and
+  `UVM_ALLOC_DEVICE_P2P` carry an `rmCtrlFd` and a handle. Before any RM call the module resolves
+  `rmCtrlFd` (`CAP_IOCTL` is the only right required, and the descriptor must carry no `cap_ioctls_limit` list, not even an empty one) and asks `nvidia.ko` (`nvUvmInterfaceClientHold`, released
+  with `nvUvmInterfaceClientRelease` when the request ends) whether that file owns the handle.
+- **What a caller sees:** `rmStatus = NV_ERR_INSUFFICIENT_PERMISSIONS` (0x1B) for a closed fd, an
+  fd without the right or with a limited ioctl list, a file that is not nvidiactl, or a handle that file does not own. The
+  console logs which of these it was (rate limited).
+- **Dependency:** the `nvidia.ko` of nvidia-gb10-freebsd branch `agent/2373-nv-client-owner`
+  (module version 2; this module depends on exactly that version, so a later `MODULE_VERSION` needs this module's `MODULE_DEPEND` updated and rebuilt). With an older one,
+  `kldload nvidia-uvm` fails with a version mismatch or `symbol nvUvmInterfaceClientHold
+  undefined`, and an older `nvidia-uvm.ko` (version 1 dependency) refuses the new `nvidia.ko`.
+- **Files and tests:** the rule is `sys/uvm_client_owner.h`; `tests/unit/client_owner_test.c`
+  is its model test, `tests/client_owner_pins_test.sh` pins the call sites (and runs deliberately
+  broken copies it must reject), `tests/client_owner_glue_test.sh` compiles the real glue of
+  `sys/uvm_ioctl.c` against fakes and runs it (with mutants that must fail), and the test-boot
+  kit is `tests/ioctl/run_owner_boot.sh` (self-recording: the two-user probe
+  `tests/ioctl/uvm_owner_probe.c` with `-j` JSON rows, the race loops
+  `tests/ioctl/uvm_owner_race.c`, leftover checks, the CUDA vecadd regression; run as root with
+  both modules loaded). `tests/stress/uvm_stress.sh -O SECONDS` adds the race loops to the stress
+  run. Track #2373.
+- **One-shot test boot:** `tests/ioctl/testboot/make-be.sh` builds a boot environment named
+  `nvidia-client-owner-test-<date>-<n>` from the staged modules (`-m DIR`, hash list
+  `SHA256-v6.txt`, the kit generation: nvidia.ko is the v6 build with the #2417 fix, the other three modules are the unchanged v5 builds; each module is checked against its full 64-digit hash, as staged and again as
+  copied into the root-owned `/boot/modules.nvco-test` of the clone). It is a dry run by default
+  (everything except `bectl activate`; it prints the arm command); `--activate` arms the one-shot.
+  The `loader.conf` of the clone gets `kern.panic_reboot_wait_time=5` and `debug.debugger_on_panic=0`.
+  The list holds five entries: nvidia, nvidia-modeset, nvidia-drm, nvidia-uvm and the GSP firmware module
+  `nvidia_gsp_ga10x_fw-v5.ko`, installed as `nvidia_gsp_ga10x_fw.ko`. The rc one-shot
+  `nvidia_client_owner_testboot` loads `linux64` (nvidia-uvm still depends on it), then the GSP
+  firmware module as root, and only when `kldstat -q -n nvidia_gsp_ga10x_fw` says it is loaded
+  (the `firmware-loaded` precondition row; if not, the run is KIT and nothing else loads), then
+  `nvidia.ko`, `nvidia-modeset.ko` and `nvidia-uvm.ko` (never `nvidia-drm.ko`). The firmware comes
+  first because firmware(9) refuses it to a non-root caller: the v5 boot loaded nvidia.ko without it,
+  the setuid probe made the first GPU open, and the adapter's failure path panicked the host (vmcore.3).
+  Root then opens `/dev/nvidia0` once, before the probe: the `gpu-node` row (the node must exist: KIT when
+  it does not) and the `root-open` row (the open itself: NO-GO when it fails; it shows the adapter
+  initialises as root with the firmware loaded, it does not keep the adapter up). The probe never
+  starts after either failure. `tests/ioctl/testboot/check-be.sh BE` mounts a built boot environment
+  and checks it (run it by hand before arming; make-be.sh does not): the firmware and the modules against the
+  hash list, `loader.conf`, the recorded commit, the installed scripts against that commit, and a
+  static dead-man proof. The one-shot then runs
+  `run_owner_boot.sh` as root with dedicated test uids (60001 to 60004), writes the run under
+  `/var/db/nvidia-client-owner-test/<stamp>/` (copied to the home directory), reads it with
+  `summarize.sh` (GO, NO-GO or NEITHER: PASS is GO evidence, FAIL is NO-GO, RE-RUN is neither; loop 5
+  counts only with `iterations_b` above 0, that is when the stranger's frees met a client; this boot cannot
+  show close-path, the case where the owner of a converted record closes it: the model row and the glue
+  scenario of nvidia-gb10-freebsd are its evidence) and always ends with
+  `testboot-return NORMAL_BE`, a vendored copy (see `tests/ioctl/testboot/VENDOR`) of the skill
+  script that reboots the host back into the normal boot environment. `tests/testboot_kit_test.sh`
+  tests it on a fake `bectl` and fake commands, and runs mutated copies of the kit that each of its
+  checks must catch.
+
 ## Tunables
 
 `hw.nvidia_uvm.builtin_tests` (0), `enable_va_space_mm` (1),

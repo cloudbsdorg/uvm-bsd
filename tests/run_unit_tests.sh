@@ -45,6 +45,18 @@ for src in "$REPO"/tests/unit/*_test.c; do
 		rc=1
 	fi
 done
+if cc -std=c11 -D_DEFAULT_SOURCE -Wall -Wextra -Werror -I "$REPO/sys" -o "$T/uvm_owner_race" "$REPO/tests/ioctl/uvm_owner_race.c" -lpthread; then
+	echo "ok   uvm_owner_race builds (run it with the modules loaded)"
+else
+	echo "FAIL uvm_owner_race does not compile"
+	rc=1
+fi
+if cc -std=c11 -D_DEFAULT_SOURCE -Wall -Wextra -Werror -I "$REPO/sys" -o "$T/uvm_owner_probe" "$REPO/tests/ioctl/uvm_owner_probe.c"; then
+	echo "ok   uvm_owner_probe builds (run it as root with the modules loaded)"
+else
+	echo "FAIL uvm_owner_probe does not compile"
+	rc=1
+fi
 if cc -std=c11 -Wall -Wextra -Werror -I "$REPO/sys" -o "$T/uvm_ioctl_test" "$REPO/tests/ioctl/uvm_ioctl_test.c"; then
 	echo "ok   uvm_ioctl_test builds (run it with the modules loaded)"
 else
@@ -55,7 +67,8 @@ fi
 # removed call leaves the userland tests green, so pin the call sites
 for pat in 'sys/uvm_main.c:uvm_open_admit(uvm.unloading)' 'sys/uvm_main.c:uvm_unload_busy(' \
     'sys/uvm_main.c:uvm.unloading = true' 'sys/uvm_main.c:sysctl_ctx_free(&uvm_sysctl_ctx)' \
-    'sys/uvm_mmap.c:uvm_pager_ctor_mem_refs()' 'sys/uvm_mmap.c:uvm_pager_mapper_drops_ref('; do
+    'sys/uvm_mmap.c:uvm_pager_ctor_mem_refs()' 'sys/uvm_mmap.c:uvm_pager_mapper_drops_ref(' \
+    'sys/uvm_main.c:MODULE_DEPEND(nvidia_uvm, nvidia, 2, 2, 2)'; do
 	if grep -qF -- "${pat#*:}" "$REPO/${pat%%:*}"; then
 		echo "ok   ${pat%%:*} uses ${pat#*:}"
 	else
@@ -83,7 +96,7 @@ else
 	echo "FAIL uvm_stress.sh does not parse"
 	rc=1
 fi
-for t in dma_tag_size_test giant_yield_log_test; do
+for t in dma_tag_size_test giant_yield_log_test client_owner_pins_test client_owner_glue_test testboot_kit_test; do
 	if sh "$REPO/tests/$t.sh"; then :; else rc=1; fi
 done
 exit $rc

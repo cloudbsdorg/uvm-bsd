@@ -512,7 +512,7 @@ uvm_modevent(module_t mod, int what, void *arg)
 static moduledata_t uvm_mod = { "nvidia_uvm", uvm_modevent, NULL };
 DECLARE_MODULE(nvidia_uvm, uvm_mod, SI_SUB_DRIVERS, SI_ORDER_ANY);
 MODULE_VERSION(nvidia_uvm, 1);
-MODULE_DEPEND(nvidia_uvm, nvidia, 1, 1, 1);
+MODULE_DEPEND(nvidia_uvm, nvidia, 2, 2, 2);	/* nvidia.ko 2 carries the client hold exports (Track #2373): an older nvidia.ko, or an older nvidia-uvm.ko against this nvidia.ko, must not load */
 #if defined(__aarch64__)
 MODULE_DEPEND(nvidia_uvm, linux64elf, 1, 1, 1);
 #else

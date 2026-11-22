@@ -85,6 +85,97 @@ Page tables and the probe page are single-page DMA allocations; the
 GPU DMA tag is one page in size, as
 .Xr bus_dma 9
 allocates the whole tag size per allocation.
+.Sh SECURITY
+Five requests carry an
+.Va rmCtrlFd
+and RM handles:
+.Dv UVM_REGISTER_GPU
+(with a client handle or an SMC partition reference),
+.Dv UVM_REGISTER_GPU_VASPACE ,
+.Dv UVM_REGISTER_CHANNEL ,
+.Dv UVM_MAP_EXTERNAL_ALLOCATION
+and
+.Dv UVM_ALLOC_DEVICE_P2P .
+The RM resolves a client handle with kernel privilege and checks nothing about
+the caller, and handles are predictable (the first client of a boot is
+0xC1D00000), so the module checks ownership itself, before any RM call.
+The handle must be an RM client that was allocated on the
+.Pa /dev/nvidiactl
+file that
+.Va rmCtrlFd
+names in the calling process.
+The descriptor must resolve with the
+.Dv CAP_IOCTL
+right, which is the only right required (a descriptor limited to it by
+.Xr cap_rights_limit 2
+is accepted; one with a limited ioctl list, see
+.Xr cap_ioctls_limit 2 ,
+is refused), the file must be an
+nvidiactl file of
+.Pa nvidia.ko ,
+and
+.Pa nvidia.ko
+must list the handle as allocated on that file.
+Allocate the root client on
+.Pa /dev/nvidiactl
+and pass that descriptor; a client allocated on a
+.Pa /dev/nvidiaN
+descriptor is always refused.
+Anything else, including a closed descriptor, a file that is not nvidiactl and
+another user's handle, fails with
+.Dv NV_ERR_INSUFFICIENT_PERMISSIONS
+in
+.Va rmStatus
+(0x1B; EPERM where a status becomes an errno), and RM is never called.
+The client stays held in
+.Pa nvidia.ko
+from the check to the end of the request: closing the descriptor succeeds but
+the file is not released until the request ends, and freeing the client blocks
+until then, so a client that is freed and whose handle is reused by another
+user cannot be picked up in between.
+Holds are per client; no other client waits.
+A refusal logs its cause (rate limited) to the console: an
+.Va rmCtrlFd
+that does not resolve, or a file that is not an nvidiactl file owning the
+handle.
+Holding the open file is the capability: a duplicate of the descriptor, or the
+descriptor passed over a socket, is the same file and passes.
+.Dv UVM_UNREGISTER_CHANNEL
+names a channel in the caller's own VA space only and calls no RM function, so
+it needs no check.
+The check needs
+.Fn nvUvmInterfaceClientHold
+and
+.Fn nvUvmInterfaceClientRelease
+from
+.Pa nvidia.ko ;
+an
+.Pa nvidia.ko
+without them makes the module fail to load:
+.Xr kldload 8
+fails.
+This module depends on exactly module version 2 of
+.Pa nvidia.ko .
+An older
+.Pa nvidia.ko
+makes
+.Xr kldload 8
+fail: the kernel linker reports a missing or mismatched dependency.
+A version 2
+.Pa nvidia.ko
+that lacks the two functions leaves
+.Dq symbol nvUvmInterfaceClientHold undefined
+on the console.
+The reverse fails the same way:
+an older
+.Pa nvidia-uvm.ko
+(built against a version 1 dependency) does not load against the new
+.Pa nvidia.ko .
+Use the
+.Pa nvidia.ko
+built with the
+.Pa patch-zz-nvidia_client_owner_*
+patches of nvidia-gb10-freebsd.
 .Sh LOADER TUNABLES
 .Bl -tag -width indent
 .It Va hw.nvidia_uvm.builtin_tests

@@ -31,13 +31,18 @@
 # Any other kldunload failure (doas, a wrong name) is a FAIL, never a
 # refusal.  After the load stops a last probe must unload the idle module.
 #
-# Usage: uvm_stress.sh [-n MINUTES] [-j JOBS] [-c CHURN] [-s SEED] [-U] [-H MODE] [-T] [-h]
+# Usage: uvm_stress.sh [-n MINUTES] [-j JOBS] [-c CHURN] [-s SEED] [-U] [-H MODE] [-O SECONDS] [-T] [-h]
 #   -n  run time in minutes (default 10)
 #   -j  concurrent CUDA workers (default 4)
 #   -c  concurrent churn loops (default 2)
 #   -s  seed of the random choices (default: the time)
 #   -U  also try to unload the module under load (needs doas)
 #   -H  with -U, the probe kind: hold, free or alternate (default alternate)
+#   -O  after the load stops, run the client ownership race loops of Track #2373
+#       (tests/ioctl/uvm_owner_race.c, as root) for SECONDS each, then require no
+#       thread left in wait channel nvcobusy and no new ownership-glue bug line on the console
+#       (the patterns are tests/ioctl/owner_bug_patterns.txt, the same list run_owner_boot.sh uses;
+#       rate-limited refusal lines are expected)
 #   -T  self-test the kernel log filter against known lines and exit
 # Environment:
 #   GB10_WORK   work root (default $HOME/work/gb10); logs go to
@@ -79,6 +84,7 @@ JOBS=4
 CHURN=2
 SEED=$(date +%s)
 UNLOAD=0
+OWNER_RACE=0
 HMODE=alternate
 SELFTEST=0
 # the kernel-log lines that mean trouble.  The module logs as "nvidia-uvm: ..."
@@ -134,7 +140,7 @@ usage() {
 	sed -n '/^# Usage:/,/^# Run as/p' "$0" | sed 's/^# \{0,1\}//'
 }
 
-while getopts n:j:c:s:UH:Th opt; do
+while getopts n:j:c:s:UH:O:Th opt; do
 	case $opt in
 	n) MINUTES=$OPTARG ;;
 	j) JOBS=$OPTARG ;;
@@ -142,6 +148,7 @@ while getopts n:j:c:s:UH:Th opt; do
 	s) SEED=$OPTARG ;;
 	U) UNLOAD=1 ;;
 	H) HMODE=$OPTARG ;;
+	O) OWNER_RACE=$OPTARG ;;
 	T) SELFTEST=1 ;;
 	h) usage; exit 0 ;;
 	*) usage >&2; exit 2 ;;
@@ -155,7 +162,7 @@ case $HMODE in
 hold | free | alternate) ;;
 *) echo "uvm_stress: -H is hold, free or alternate, not $HMODE" >&2; exit 2 ;;
 esac
-for v in "$MINUTES" "$JOBS" "$CHURN" "$SEED"; do
+for v in "$MINUTES" "$JOBS" "$CHURN" "$SEED" "$OWNER_RACE"; do
 	case $v in
 	'' | *[!0-9]*) echo "uvm_stress: not a number: $v" >&2; exit 2 ;;
 	esac
@@ -556,6 +563,25 @@ if [ "$OK" -eq 0 ] && [ "$SPAWNED" -gt "$KILLED" ]; then
 fi
 CHURNS=$(cat "$LOGDIR"/churn*.count 2>/dev/null | wc -l | tr -d ' ')
 check_health
+if [ "$OWNER_RACE" -gt 0 ]; then
+	# the client ownership race loops: liveness in the program, leftovers here
+	kernlog > "$T/kernlog.before" 2>/dev/null
+	if cc -std=c11 -D_DEFAULT_SOURCE -I "$REPO/sys" -o "$T/uvm_owner_race" "$REPO/tests/ioctl/uvm_owner_race.c" -lpthread 2>"$T/race.cc"; then
+		doas "$T/uvm_owner_race" -j -t "$OWNER_RACE" >"$LOGDIR/owner-race.jsonl" 2>&1 || { log "FAIL: the ownership race loops failed (see owner-race.jsonl)"; RESULT=1; }
+		if ps -axo pid,wchan,comm | grep -q '[n]vcobusy'; then
+			log "FAIL: a thread sleeps in nvcobusy after the race loops (a leaked hold)"
+			RESULT=1
+		fi
+		kernlog > "$T/kernlog.after" 2>/dev/null
+		if diff "$T/kernlog.before" "$T/kernlog.after" | sed -n 's/^> //p' | grep -E -f "$REPO/tests/ioctl/owner_bug_patterns.txt" >"$LOGDIR/owner-console.txt"; then
+			log "FAIL: the ownership glue logged a bug line (owner-console.txt)"
+			RESULT=1
+		fi
+	else
+		log "FAIL: cannot build uvm_owner_race: $(head -2 "$T/race.cc" | tr '\n' ' ')"
+		RESULT=1
+	fi
+fi
 if [ "$UNLOAD" -eq 1 ]; then
 	# nothing is open now (the holder first): the module must go, and must come back
 	holder_stop
