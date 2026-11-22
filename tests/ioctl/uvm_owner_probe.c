@@ -18,7 +18,7 @@
  * external allocation and alloc device P2P (and register GPU with an SMC reference but
  * no client), with the OTHER's handle:
  *   - own nvidiactl fd, /dev/null, /dev/zero, a closed fd, an unopened number,
- *     /dev/nvidia0 (when present), a dup of the own fd          -> refused
+ *     the GPU device file (-d, else the one /dev/nvidiaN), a dup of the own fd  -> refused
  *   - the other's nvidiactl file passed to us (the capability)  -> NOT refused
  * and with the own handle: the own fd and a dup of it -> NOT refused for ownership
  * (the request fails later for want of a registered GPU, which is the point: the check
@@ -42,6 +42,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <dirent.h>
 #include <unistd.h>
 
 #include "nvidia_uvm_ioctl.h"
@@ -200,6 +201,59 @@ static const char *const names[] = { "register GPU", "register GPU VA space", "r
     "map external allocation", "alloc device P2P", "register GPU (SMC reference, no client)" };
 static int json;
 
+/*
+ * the GPU device file of the "a device file" rows: -d NODE, else the one /dev/nvidiaN (digits only: not nvidiactl,
+ * nvidia-uvm, nvidia-modeset) there is.  On a host whose GPU is not unit 0 (amp001: vgapci0 is AMD, the NVIDIA card
+ * is vgapci1 and its node is nvidia1) the node is not /dev/nvidia0.  The kit always passes -d (from gpu-detect.sh); this scan is the
+ * standalone fallback.  gpu_node is NULL, and gpu_note says why, when there is none or several:
+ * the row is then skipped, naming them, never guessed.
+ */
+static char gpu_path[256], gpu_what[384], gpu_note[160];
+static const char *gpu_node;
+
+static void
+find_gpu_node(const char *want)
+{
+	DIR *d;
+	struct dirent *e;
+	char nodenames[256] = "";
+	int n = 0;
+	size_t i;
+
+	if (want != NULL) {
+		snprintf(gpu_path, sizeof(gpu_path), "%s", want);
+		gpu_node = gpu_path;
+	} else if ((d = opendir("/dev")) == NULL) {
+		snprintf(gpu_note, sizeof(gpu_note), "/dev cannot be read");
+	} else {
+		while ((e = readdir(d)) != NULL) {
+			if (strncmp(e->d_name, "nvidia", 6) != 0 || e->d_name[6] == '\0')
+				continue;
+			for (i = 6; e->d_name[i] >= '0' && e->d_name[i] <= '9'; i++)
+				;
+			if (e->d_name[i] != '\0')
+				continue;
+			if (n++ == 0)
+				snprintf(gpu_path, sizeof(gpu_path), "/dev/%s", e->d_name);
+			if (strlen(nodenames) + strlen(e->d_name) + 2 < sizeof(nodenames)) {
+				strcat(nodenames, e->d_name);
+				strcat(nodenames, " ");
+			}
+		}
+		closedir(d);
+		if (n == 1)
+			gpu_node = gpu_path;
+		else if (n == 0)
+			snprintf(gpu_note, sizeof(gpu_note), "there is no /dev/nvidiaN node");
+		else
+			snprintf(gpu_note, sizeof(gpu_note), "there are several nodes (%s): pass the GPU with -d", nodenames);
+	}
+	if (gpu_node == NULL)
+		snprintf(gpu_what, sizeof(gpu_what), "a device file: no usable GPU node (%s)", gpu_note);
+	else
+		snprintf(gpu_what, sizeof(gpu_what), "a device file (%s), the other's handle", gpu_node);
+}
+
 static void
 emit_json(const char *who, const char *what, int which, NvU32 got, int refused, int ok)
 {
@@ -272,7 +326,9 @@ attack(const char *who, struct side *me, NvU32 other_client, int passed_fd)
 {
 	int w, nullfd, zerofd, closedfd, devfd, dupfd, never_open = 1000;
 
-	devfd = open("/dev/nvidia0", O_RDWR);	/* a device file: -1 when the node is absent, the row is skipped */
+	devfd = gpu_node != NULL ? open(gpu_node, O_RDWR) : -1;	/* a device file: -1 when there is no unique node or it cannot be opened, the row is skipped with the reason */
+	if (gpu_node != NULL && devfd < 0)
+		snprintf(gpu_what, sizeof(gpu_what), "a device file (%s): it cannot be opened: %s", gpu_node, strerror(errno));
 	for (w = 0; w < NREQUESTS; w++) {
 		nullfd = open("/dev/null", O_RDWR);
 		zerofd = open("/dev/zero", O_RDWR);
@@ -290,10 +346,10 @@ attack(const char *who, struct side *me, NvU32 other_client, int passed_fd)
 		expect(who, "a closed fd", w, request(me->uvm, w, closedfd, other_client), 1);
 		expect(who, "a descriptor number that is not open", w, request(me->uvm, w, never_open, other_client), 1);
 		if (devfd >= 0)
-			expect(who, "a device file (/dev/nvidia0), the other's handle", w,
+			expect(who, gpu_what, w,
 			    request(me->uvm, w, devfd, other_client), 1);
 		else
-			skipped(who, "a device file (/dev/nvidia0): the node is absent", w);
+			skipped(who, gpu_what, w);
 		if (passed_fd >= 0)
 			expect(who, "the other's nvidiactl file passed to us (the capability), the other's handle", w,
 			    request(me->uvm, w, passed_fd, other_client), 0);
@@ -468,11 +524,11 @@ run_a(const char *ua, pid_t pid, int from_b, int to_b, int sock)
 int
 main(int argc, char **argv)
 {
-	const char *ua = NULL, *ub = NULL;
+	const char *ua = NULL, *ub = NULL, *dopt = NULL;
 	int pa[2], pb[2], sp[2], c;
 	pid_t pid;
 
-	while ((c = getopt(argc, argv, "vja:b:")) != -1) {
+	while ((c = getopt(argc, argv, "vja:b:d:")) != -1) {
 		if (c == 'v')
 			verbose = 1;
 		else if (c == 'j')
@@ -481,8 +537,10 @@ main(int argc, char **argv)
 			ua = optarg;
 		else if (c == 'b')
 			ub = optarg;
+		else if (c == 'd')
+			dopt = optarg;
 		else {
-			printf("usage: uvm_owner_probe [-v] [-j (one JSON object per line)] [-a uidA] [-b uidB]\n");
+			printf("usage: uvm_owner_probe [-v] [-j (one JSON object per line)] [-a uidA] [-b uidB] [-d NODE (the GPU device file, default: the one /dev/nvidiaN)]\n");
 			return (2);
 		}
 	}
@@ -490,6 +548,7 @@ main(int argc, char **argv)
 		printf("-a and -b must differ: the probe needs two users\n");
 		return (2);
 	}
+	find_gpu_node(dopt);
 	if (geteuid() != 0) {
 		printf("run as root: the two users are made with setuid\n");
 		return (2);

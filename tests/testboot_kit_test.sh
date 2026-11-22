@@ -395,7 +395,28 @@ plant_refused packaged-module-guard-off 25 setup_pkg 's/for _d in boot\/modules 
 # ---- the rc one-shot on fake commands
 mkdir -p "$T/rc/bin" "$T/rc/kit/repo/tests/ioctl" "$T/rc/mods" "$T/rc/work" "$T/rc/copyout"
 cp "$STAGE/nvidia-v6-phase0.ko" "$T/rc/mods/nvidia.ko"; cp "$STAGE/nvidia-modeset-v5.ko" "$T/rc/mods/nvidia-modeset.ko"; cp "$STAGE/nvidia-uvm-v5.ko" "$T/rc/mods/nvidia-uvm.ko"; cp "$STAGE/nvidia_gsp_ga10x_fw-v5.ko" "$T/rc/mods/nvidia_gsp_ga10x_fw.ko"
-: > "$T/rc/gpu"
+LAY=$T/lay; mkdir -p "$LAY"
+mkdir -p "$T/rc/kit/repo/tests/ioctl/testboot"; cp "$KIT/gpu-detect.sh" "$T/rc/kit/repo/tests/ioctl/testboot/gpu-detect.sh"
+gdfix() {	# gdfix <name> <nodes...>: a layout directory with those nodes in dev/ and the pci and parent files from the callers
+	rm -rf "$LAY/$1"; mkdir -p "$LAY/$1/dev"; : > "$LAY/$1/dev/nvidiactl"; : > "$LAY/$1/dev/nvidia-uvm"; : > "$LAY/$1/dev/nvidia-modeset"
+	_n=$1; shift
+	for _x in "$@"; do : > "$LAY/$_n/dev/$_x"; done
+	: > "$LAY/$_n/par"
+}
+BMC="vgapci0@pci0:2:0:0:	class=0x030000 rev=0x41 hdr=0x00 vendor=0x1a03 device=0x2000 subvendor=0x15d9 subdevice=0x1b95"
+pcil() { printf 'vgapci%s@pci0:%s:0:0:\tclass=%s rev=0xa1 hdr=0x00 vendor=%s device=%s subvendor=0x10de subdevice=0x0001\n' "$1" "$2" "$3" "$4" "$5"; }
+gdfix amp001 nvidia1; { printf "vgapci0@pci12:3:0:0:\tclass=0x030000 rev=0xc1 hdr=0x00 vendor=0x1002 device=0x7480 subvendor=0x1da2 subdevice=0xe452\n"; printf "vgapci1@pci13:1:0:0:\tclass=0x030000 rev=0xa1 hdr=0x00 vendor=0x10de device=0x2d04 subvendor=0x1462 subdevice=0x5351\n"; printf "vgapci2@pci4:2:0:0:\tclass=0x030000 rev=0x41 hdr=0x00 vendor=0x1a03 device=0x2000 subvendor=0x15d9 subdevice=0x1b95\n"; } > "$LAY/amp001/pci"; echo "1 vgapci1" > "$LAY/amp001/par"
+gdfix zero; echo "$BMC" > "$LAY/zero/pci"
+gdfix one0 nvidia0; pcil 0 1 0x030200 0x10de 0x2e12 > "$LAY/one0/pci"; echo "0 vgapci0" > "$LAY/one0/par"
+gdfix many nvidia0 nvidia1; { echo "$BMC"; pcil 1 3 0x030000 0x10de 0x1c82; pcil 2 4 0x030200 0x10de 0x2e12; } > "$LAY/many/pci"; printf '0 vgapci1\n1 vgapci2\n' > "$LAY/many/par"
+gdfix twocompute nvidia0 nvidia1; { pcil 1 5 0x030200 0x10de 0x2e12; pcil 2 4 0x030200 0x10de 0x2e12; } > "$LAY/twocompute/pci"; printf '0 vgapci1\n1 vgapci2\n' > "$LAY/twocompute/par"
+gdfix apple nvidia0 nvidia1 nvidia2; { pcil 0 3 0x030000 0x10de 0x1c82; pcil 1 4 0x030000 0x10de 0x1c82; pcil 2 1 0x030200 0x10de 0x2e12; } > "$LAY/apple/pci"; printf '0 vgapci0\n1 vgapci1\n2 vgapci2\n' > "$LAY/apple/par"
+gdfix unknown nvidia1 nvidia3; { echo "$BMC"; pcil 1 1 0x030200 0x10de 0x2e12; } > "$LAY/unknown/pci"; echo "1 vgapci1" > "$LAY/unknown/par"
+gdfix notnvidia nvidia0; echo "$BMC" > "$LAY/notnvidia/pci"; echo "0 vgapci0" > "$LAY/notnvidia/par"
+rm -rf "$LAY/baddev"; cp -R "$LAY/amp001" "$LAY/baddev"; rm -f "$LAY/baddev/dev/nvidia1"; mkdir "$LAY/baddev/dev/nvidia1"
+rm -rf "$LAY/garbled"; cp -R "$LAY/amp001" "$LAY/garbled"; sed 's/^vgapci1@pci13:1:0:0:/vgapci1@pci13:1:0:0 /' "$LAY/amp001/pci" > "$LAY/garbled/pci"
+rm -rf "$LAY/locbad"; cp -R "$LAY/amp001" "$LAY/locbad"; echo "1 slot=0 function=0 dbsf=pci13:9:0:0 handle=\\_SB" > "$LAY/locbad/loc"
+rm -rf "$LAY/locmissing"; cp -R "$LAY/amp001" "$LAY/locmissing"; echo "9 slot=0 function=0 dbsf=pci1:1:0:0" > "$LAY/locmissing/loc"
 cp "$T/list.save" "$T/rc/kit/SHA256-v6.txt"
 cp "$KIT/summarize.sh" "$T/rc/kit/summarize.sh"
 cp "$REPO/tests/ioctl/uvm_owner_race.c" "$T/rc/kit/repo/tests/ioctl/"
@@ -405,7 +426,7 @@ cat > "$T/rc/kit/repo/tests/ioctl/run_owner_boot.sh" <<'EOF'
 D=$GB10_WORK/logs/uvm-2373-boot/20261122T000000Z
 mkdir -p "$D"
 echo "run_owner_boot" >> "$FAKE_LOG"
-echo "uids $PROBE_UID_A $PROBE_UID_B seconds $1 ko $NVIDIA_KO cuda $CUDA_VECADD" > "$D/args.txt"
+echo "uids $PROBE_UID_A $PROBE_UID_B seconds $1 ko $NVIDIA_KO cuda $CUDA_VECADD gpu $GPU_NODE" > "$D/args.txt"
 case $FAKE_VERDICT in
 PASS) echo "ok   no RmValidateClientData in kenv or sysctl (default: validation on); see nvidia-settings.txt" > "$D/result.txt"
       echo '{"schema":"uvm-owner-race/1","loop":5,"what":"w","iterations_a":3,"iterations_b":9,"open_failed":0,"failed":false,"vacuous":false,"ok":true}' > "$D/race.jsonl"; echo PASS >> "$D/result.txt"; exit 0 ;;
@@ -434,6 +455,8 @@ echo "sysctl $*" >> "$FAKE_LOG"
 case "$*" in
 "-n kern.panic_reboot_wait_time debug.debugger_on_panic") printf '%s\n%s\n' "${FAKE_PANIC_WAIT:-5}" "${FAKE_DEBUGGER:-0}" ;;
 "-n kern.module_path") echo "/boot/kernel;/boot/modules" ;;
+"-n dev.nvidia."*".%parent") _u=${2#dev.nvidia.}; _u=${_u%.%parent}; awk -v u="$_u" '$1 == u { print $2 }' "$FAKE_PARENTS" ;;
+"-n dev.vgapci."*".%location") _u=${2#dev.vgapci.}; _u=${_u%.%location}; if [ -f "${FAKE_PCI%pci}loc" ]; then awk -v u="$_u" '$1 == u { $1 = ""; print }' "${FAKE_PCI%pci}loc"; else grep "^vgapci$_u@" "$FAKE_PCI" | sed -n 's/^vgapci[0-9]*@\(pci[0-9]*:[0-9]*\):\([0-9]*\):\([0-9]*\):.*/slot=\2 function=\3 dbsf=\1:\2:\3 handle=\\_SB/p'; fi ;;
 esac
 exit 0
 EOF
@@ -442,6 +465,15 @@ cat > "$T/rc/bin/pgrep" <<'EOF'
 echo "pgrep $*" >> "$FAKE_LOG"
 [ -z "${FAKE_NO_DEADMAN:-}" ] || exit 1
 exit 0
+EOF
+cat > "$T/rc/bin/pciconf" <<'EOF'
+#!/bin/sh
+f=$FAKE_PCI
+if [ -n "${FAKE_FLIP_AFTER:-}" ] && [ -n "${FAKE_LOG:-}" ]; then
+	n=0; [ ! -f "$FAKE_LOG.pcicalls" ] || n=$(cat "$FAKE_LOG.pcicalls"); n=$((n + 1)); echo $n > "$FAKE_LOG.pcicalls"
+	[ "$n" -le "$FAKE_FLIP_AFTER" ] || f=${FAKE_PCI%pci}pci2
+fi
+if [ "$1" = -l ] && [ -n "${2:-}" ]; then grep "^$2@" "$f"; else cat "$f"; fi
 EOF
 for c in dmesg bectl shutdown pkill sync; do
 	cat > "$T/rc/bin/$c" <<EOF
@@ -463,13 +495,13 @@ EOF
 RCS=$KIT/nvidia_client_owner_testboot
 runrc() {	# runrc <script> <verdict> [uvm fails]: the script is a copy pointed at fakes
 	rm -rf "$T/rc/work" "$T/rc/copyout" "$T/rc/fallback"; mkdir -p "$T/rc/work" "$T/rc/copyout"
-	: > "$T/rc/log"; rm -f "$T/rc/log.fw"
+	: > "$T/rc/log"; rm -f "$T/rc/log.fw" "$T/rc/log.pcicalls"
 	sed -e "s#/etc/rc.subr#$T/rc/rc.subr#" "$1" > "$T/rc/script.sh"
 	FAKE_LOG=$T/rc/log FAKE_VERDICT=$2 FAKE_UVM_FAILS=${3:-} PATH=$T/rc/bin:$PATH \
 	    nvidia_client_owner_testboot_kit=$T/rc/kit nvidia_client_owner_testboot_mods=$T/rc/mods \
 	    nvidia_client_owner_testboot_work=${RC_WORK:-$T/rc/work} nvidia_client_owner_testboot_copyout=$T/rc/copyout \
 	    nvidia_client_owner_testboot_return=$T/rc/bin/testboot-return nvidia_client_owner_testboot_cudarun=/kit/cuda.sh \
-	    nvidia_client_owner_testboot_gpudev=${RC_GPU:-$T/rc/gpu} nvidia_client_owner_testboot_version=/nonexistent nvidia_client_owner_testboot_lockfile=/nonexistent/lock \
+	    nvidia_client_owner_testboot_devdir=${RC_LAYOUT:-$LAY/amp001}/dev FAKE_PCI=${RC_LAYOUT:-$LAY/amp001}/pci FAKE_PARENTS=${RC_LAYOUT:-$LAY/amp001}/par FAKE_FLIP_AFTER=${FAKE_FLIP_AFTER-} nvidia_client_owner_testboot_version=/nonexistent nvidia_client_owner_testboot_lockfile=/nonexistent/lock \
 	    nvidia_client_owner_testboot_deadman=${RC_DEADMAN:-1} nvidia_client_owner_testboot_fallback=${RC_FALLBACK:-$T/rc/fallback} \
 	    sh "$T/rc/script.sh" start > "$T/rc/out" 2>&1
 }
@@ -575,23 +607,122 @@ RUN=$(newest)
 grep -q '^kldload' "$T/rc/log" && bad "rc: a firmware with a wrong hash led to a load" || ok "rc: a firmware with a wrong hash loads nothing"
 grep -q '"row":"hash-nvidia_gsp_ga10x_fw","result":"fail"' "$RUN/results.jsonl" && tail -1 "$RUN/summary.txt" | grep -q '^KIT$' && ok "rc: a firmware hash failure is KIT" || bad "rc: a firmware hash failure is not KIT"
 cp "$STAGE/nvidia_gsp_ga10x_fw-v5.ko" "$T/rc/mods/nvidia_gsp_ga10x_fw.ko"
-# root cannot open the GPU (node missing, or an open that fails): its own failing row, KIT, no probe, the return runs
-# the node is missing after the loads: row gpu-node fails with a detail naming the cause, KIT, no probe, the return runs
-with RC_GPU=$T/rc/nogpu runrc "$RCS" PASS
+# ---- the GPU is found by what the machine reports (gpu-detect.sh), never by an index: fixtures for 0 cards, 1 card,
+# several cards, a card not at unit 0 (the real amp001 layout: AMD, NVIDIA, BMC), an Apple-style layout with the useful node higher,
+# a node the driver does not report on, and a node that is not the chosen card after the open
+GD=$KIT/gpu-detect.sh
+gd() {	# gd <layout> [args]: runs gpu-detect.sh on the layout with the fake pciconf and sysctl
+	_l=$1; shift
+	FAKE_PCI=$LAY/$_l/pci FAKE_PARENTS=$LAY/$_l/par PATH=$T/rc/bin:$PATH sh "$GD" -D "$LAY/$_l/dev" "$@"
+}
+gdj() { sed -n "s/^  \"$2\": \"\\([^\"]*\\)\".*/\\1/p" "$1" | head -1; }
+gd amp001 > "$T/gd.json"; r=$?
+[ "$r" = 0 ] && [ "$(gdj "$T/gd.json" status)" = selected ] && [ "$(gdj "$T/gd.json" selected_node)" = "$LAY/amp001/dev/nvidia1" ] && [ "$(gdj "$T/gd.json" selected_bus_id)" = pci13:1:0:0 ] && ok "gpu-detect: the NVIDIA card is vgapci1 (AMD at vgapci0, the BMC at vgapci2), its node is nvidia1, matched to bus pci13:1:0:0" || { cat "$T/gd.json"; bad "gpu-detect: the amp001 layout is not nvidia1"; }
+grep -q '"vendor": "0x1002".*"role": "display"' "$T/gd.json" && ok "gpu-detect: the AMD card (vgapci0) is listed as excluded, the real amp001 layout" || bad "gpu-detect: the AMD card is not excluded"
+[ "$(gdj "$T/gd.json" selected_device)" = 0x2d04 ] && [ "$(gdj "$T/gd.json" selected_vendor)" = 0x10de ] && grep -q '"bus": "pci13:1:0:0".*"class": "0x030000"' "$T/gd.json" && ok "gpu-detect: the NVIDIA card is 0x10de:0x2d04 at pci13:1:0:0, class 0x030000 (a VGA-class NVIDIA card counts)" || bad "gpu-detect: the NVIDIA identity"
+gd locmissing > "$T/gd2.json"; [ "$(gdj "$T/gd2.json" status)" = none ] && grep -q 'gives no address (dbsf=)' "$T/gd2.json" && grep -q '"detail": "1 NVIDIA display device(s) present but none usable' "$T/gd2.json" && ok "gpu-detect: a driver that gives no address does not confirm the card: unusable (fails closed), and none says a card is present" || { cat "$T/gd2.json"; bad "gpu-detect: a missing driver address"; }
+gd zero > "$T/gd2.json"; grep -q '"detail": "no NVIDIA display device in pciconf -l"' "$T/gd2.json" && ok "gpu-detect: no card and an unusable card are told apart in detail" || bad "gpu-detect: detail for no card"
+gd many -d "$LAY/many/dev/nvidia7" > "$T/gd2.json"; grep -q '"detail": "the override [^"]*nvidia7 is not a usable NVIDIA node found"' "$T/gd2.json" && ok "gpu-detect: an override that matches nothing says so" || bad "gpu-detect: an unmatched override has no reason"
+gd garbled > "$T/gd2.json"; r=$?
+[ "$r" = 2 ] && [ "$(gdj "$T/gd2.json" status)" = error ] && grep -q '"selected_node": null' "$T/gd2.json" && grep -q 'does not parse: vgapci1@pci13:1:0:0 ' "$T/gd2.json" && ok "gpu-detect: a display line that does not parse is status error, exit 2, never silently dropped" || { cat "$T/gd2.json"; bad "gpu-detect: an unparsed line"; }
+gd locbad > "$T/gd2.json"; [ "$(gdj "$T/gd2.json" status)" = none ] && grep -q '"usable": false.*dev.vgapci.1.%location says pci13:9:0:0 but pciconf says pci13:1:0:0' "$T/gd2.json" && ok "gpu-detect: a driver address that differs from pciconf's makes the card unusable, with the reason" || { cat "$T/gd2.json"; bad "gpu-detect: the location cross-check"; }
+grep -q '"role": "bmc".*"vendor": "0x1a03"\|"vendor": "0x1a03".*"role": "bmc"' "$T/gd.json" && ok "gpu-detect: the ASPEED BMC is listed as excluded" || bad "gpu-detect: the ASPEED BMC is not listed as excluded"
+! grep -q '^    {"index".*0x1a03' "$T/gd.json" && ok "gpu-detect: the BMC is not among the devices" || bad "gpu-detect: the BMC is a device"
+grep -q '"rule": "compute controllers' "$T/gd.json" && ok "gpu-detect: the rule is in the output" || bad "gpu-detect: no rule in the output"
+gd zero > "$T/gd.json"; r=$?
+[ "$r" = 0 ] && [ "$(gdj "$T/gd.json" status)" = none ] && grep -q '"selected_node": null' "$T/gd.json" && ok "gpu-detect: 0 cards is status none, exit 0" || { cat "$T/gd.json"; bad "gpu-detect: 0 cards"; }
+gd one0 > "$T/gd.json"; [ "$(gdj "$T/gd.json" selected_node)" = "$LAY/one0/dev/nvidia0" ] && ok "gpu-detect: 1 card at nvidia0 is found there (found, not assumed)" || bad "gpu-detect: 1 card at nvidia0"
+gd many > "$T/gd.json"; [ "$(gdj "$T/gd.json" selected_node)" = "$LAY/many/dev/nvidia1" ] && [ "$(grep -c '^    {"index"' "$T/gd.json")" = 2 ] && ok "gpu-detect: several cards, the compute controller beats the display card at the lower index" || { cat "$T/gd.json"; bad "gpu-detect: several cards"; }
+gd twocompute > "$T/gd.json"; [ "$(gdj "$T/gd.json" selected_node)" = "$LAY/twocompute/dev/nvidia1" ] && ok "gpu-detect: two compute cards, the lowest PCI address wins (bus 4, not unit order)" || bad "gpu-detect: two compute cards"
+gd apple > "$T/gd.json"; [ "$(gdj "$T/gd.json" selected_node)" = "$LAY/apple/dev/nvidia2" ] && ok "gpu-detect: an Apple-style layout, the useful node is the higher one (nvidia2)" || { cat "$T/gd.json"; bad "gpu-detect: the Apple-style layout"; }
+gd unknown > "$T/gd.json"; [ "$(gdj "$T/gd.json" selected_node)" = "$LAY/unknown/dev/nvidia1" ] && grep -q '"node": "[^"]*nvidia3".*"usable": false' "$T/gd.json" && ok "gpu-detect: a node the driver does not report on is listed unusable and never chosen" || { cat "$T/gd.json"; bad "gpu-detect: an unreported node"; }
+gd notnvidia > "$T/gd.json"; [ "$(gdj "$T/gd.json" status)" = none ] && ok "gpu-detect: a node whose PCI device is not NVIDIA is never chosen" || { cat "$T/gd.json"; bad "gpu-detect: a non-NVIDIA node was chosen"; }
+gd many -d "$LAY/many/dev/nvidia0" > "$T/gd.json"; [ "$(gdj "$T/gd.json" selected_node)" = "$LAY/many/dev/nvidia0" ] && grep -q '"override": true' "$T/gd.json" && ok "gpu-detect: -d overrides the rule and says so" || bad "gpu-detect: -d"
+gd many -d "$LAY/many/dev/nvidia7" > "$T/gd.json"; r=$?; [ "$r" = 2 ] && [ "$(gdj "$T/gd.json" status)" = override-not-found ] && ok "gpu-detect: -d naming no node found is exit 2 and says so" || bad "gpu-detect: -d of a missing node ($r)"
+gd many -d "$LAY/many/dev/nvidiactl" > /dev/null; [ "$?" = 2 ] && ok "gpu-detect: -d nvidiactl is not a GPU node" || bad "gpu-detect: -d nvidiactl accepted"
+# plants on gpu-detect.sh: each wrong rule must turn a layout red
+gdplant() {	# gdplant <name> <sed> <layout> <expected node unit or 'none'>
+	sed -e "$2" "$GD" > "$T/gd-plant-$1.sh"
+	if cmp -s "$GD" "$T/gd-plant-$1.sh"; then bad "plant $1 changed nothing"; return; fi
+	_o=$(FAKE_PCI=$LAY/$3/pci FAKE_PARENTS=$LAY/$3/par PATH=$T/rc/bin:$PATH sh "$T/gd-plant-$1.sh" -D "$LAY/$3/dev" 2> /dev/null | sed -n 's/^  "selected_node": "\([^"]*\)".*/\1/p' | head -1)
+	case $4 in none) _want= ;; *) _want=$LAY/$3/dev/nvidia$4 ;; esac
+	if [ "$_o" = "$_want" ]; then bad "plant $1 stays green"; else ok "plant $1 is red"; fi
+}
+gdplant by-unit-order 's/-k1,1n -k2,2)/-k10,10n)/' many 1
+gdplant vendor-ignored 's/if \[ "\$vendor" != 0x10de \]; then/if false; then/' notnvidia none
+gdplant compute-not-preferred 's/case \$role in compute) prio=0 ;; \*) prio=1 ;; esac/case $role in compute) prio=1 ;; *) prio=1 ;; esac/' many 1
+gdplant index-zero 's/\$11 == 1 { print; exit }/\$11 == 1 \&\& \$10 == 0 { print; exit }/' amp001 1
+# the rc script runs it, records the enumeration, the choice and the verify result, and hands the node to the probe
+( RC_LAYOUT=$LAY/amp001 runrc "$RCS" PASS )
 RUN=$(newest)
-grep -q '"row":"gpu-node","result":"fail","detail":"[^"]*does not exist after the loads' "$RUN/results.jsonl" && ok "rc: a missing GPU node fails the gpu-node row and says it does not exist" || bad "rc: no failing gpu-node row for a missing node"
-grep -q '"row":"root-open"' "$RUN/results.jsonl" && bad "rc: a root open was tried on a missing node" || ok "rc: a missing node is not opened"
-grep -q '^run_owner_boot$' "$T/rc/log" && bad "rc: the probe ran with no GPU node" || ok "rc: with no GPU node the probe never starts"
-tail -1 "$RUN/summary.txt" | grep -q '^KIT$' && ok "rc: a missing GPU node is KIT" || bad "rc: a missing GPU node is not KIT"
-last_is_return_early && ok "rc: a missing GPU node still ends with testboot-return" || bad "rc: a missing GPU node skipped the return"
-# the node exists and root cannot open it (a directory stands in): row root-open fails, NO-GO (the driver under test), no probe, the return runs
-with RC_GPU=$T/rc runrc "$RCS" PASS
-RUN=$(newest)
-grep -q '"row":"gpu-node","result":"pass"' "$RUN/results.jsonl" && grep -q '"row":"root-open","result":"fail","detail":"root could not open [^"]*: [^"]*[A-Za-z]' "$RUN/results.jsonl" && ok "rc: a node root cannot open fails the root-open row with the error and no empty parentheses" || bad "rc: no failing root-open row with a detail"
+grep -q "\"row\":\"gpu-node\",\"result\":\"pass\",\"detail\":\"$LAY/amp001/dev/nvidia1 (bus pci13:1:0:0, vendor 0x10de, device 0x2d04) chosen among 1 usable device(s)[^\"]*excluded: [^\"]*0x1a03 role bmc" "$RUN/results.jsonl" && grep -q "gpu $LAY/amp001/dev/nvidia1\$" "$RUN"/work/logs/uvm-2373-boot/*/args.txt && grep -q '"row":"root-open","result":"pass"' "$RUN/results.jsonl" && ok "rc: nvidia1 on the amp001 layout is chosen, opened, and handed to the probe" || { cat "$RUN/results.jsonl"; bad "rc: the amp001 layout"; }
+[ -f "$RUN/gpu-detect.json" ] && grep -q '"schema": "gpu-detect/1"' "$RUN/gpu-detect.json" && grep -q '"status": "pass"' "$RUN/gpu-verify.json" && grep -q '"root_open": true' "$RUN/gpu-verify.json" && grep -q '"row":"gpu-verify","result":"pass"' "$RUN/results.jsonl" && ok "rc: the enumeration and choice (gpu-detect.json) and the verify result (gpu-verify.json) are in the results" || { cat "$RUN/gpu-verify.json"; bad "rc: no gpu-detect.json or gpu-verify.json"; }
+vl=$(grep -n '"row":"gpu-verify"' "$RUN/results.jsonl" | head -1 | cut -d: -f1); ob=$(grep -n '"row":"owner-boot","result":"running"' "$RUN/results.jsonl" | head -1 | cut -d: -f1)
+if [ -n "$vl" ] && [ -n "$ob" ] && [ "$vl" -lt "$ob" ]; then ok "rc: the verify comes before the probe starts"; else bad "rc: the verify does not come before the probe"; fi
+( RC_LAYOUT=$LAY/one0 runrc "$RCS" PASS ); RUN=$(newest)
+grep -q "gpu $LAY/one0/dev/nvidia0\$" "$RUN"/work/logs/uvm-2373-boot/*/args.txt && ok "rc: one card at nvidia0 is handed to the probe as found" || bad "rc: one card at nvidia0"
+( RC_LAYOUT=$LAY/apple runrc "$RCS" PASS ); RUN=$(newest)
+grep -q "gpu $LAY/apple/dev/nvidia2\$" "$RUN"/work/logs/uvm-2373-boot/*/args.txt && grep -q "chosen among 3 usable device(s)" "$RUN/results.jsonl" && ok "rc: with several cards the rule chooses (nvidia2) and the row says how many were found" || { cat "$RUN/results.jsonl"; bad "rc: several cards"; }
+# 0 cards: KIT naming the status and the other display devices, no open, no probe, the return runs
+( RC_LAYOUT=$LAY/zero runrc "$RCS" PASS ); RUN=$(newest)
+grep -q '"row":"gpu-node","result":"fail","detail":"no usable NVIDIA GPU node: status none (no NVIDIA display device in pciconf -l), other display devices: [^"]*0x1a03 role bmc' "$RUN/results.jsonl" && ! grep -q '"row":"root-open"' "$RUN/results.jsonl" && ! grep -q '^run_owner_boot$' "$T/rc/log" && tail -1 "$RUN/summary.txt" | grep -q '^KIT$' && last_is_return_early && ok "rc: 0 cards is KIT, names the BMC, opens nothing, starts no probe, and still returns" || { cat "$RUN/results.jsonl"; bad "rc: 0 cards"; }
+# a pciconf line the detector cannot parse is an error the row shows, not an empty host
+( RC_LAYOUT=$LAY/garbled runrc "$RCS" PASS ); RUN=$(newest)
+grep -q '"row":"gpu-node","result":"fail","detail":"no usable NVIDIA GPU node: status error[^"]*errors: *a display-class line of pciconf -l does not parse' "$RUN/results.jsonl" && ! grep -q '^run_owner_boot$' "$T/rc/log" && tail -1 "$RUN/summary.txt" | grep -q '^KIT$' && ok "rc: an unparsable pciconf line is shown as an error, KIT, no probe" || { cat "$RUN/results.jsonl"; bad "rc: an unparsable pciconf line"; }
+# the node exists and root cannot open it (a directory stands in): root-open fails, NO-GO, no probe, the return runs
+( RC_LAYOUT=$LAY/baddev runrc "$RCS" PASS ); RUN=$(newest)
+grep -q '"row":"gpu-node","result":"pass"' "$RUN/results.jsonl" && grep -q '"row":"root-open","result":"fail","detail":"root could not open [^"]*: [^"]*[A-Za-z]' "$RUN/results.jsonl" && grep -q '"status": "fail"' "$RUN/gpu-verify.json" && ok "rc: a node root cannot open fails the root-open row with the error, and gpu-verify.json says fail" || { cat "$RUN/results.jsonl"; bad "rc: a node root cannot open"; }
 grep -q '()' "$RUN/results.jsonl" && bad "rc: a row detail holds empty parentheses" || ok "rc: no row detail holds empty parentheses"
 grep -q '^run_owner_boot$' "$T/rc/log" && bad "rc: the probe ran after a failed root open" || ok "rc: after a failed root open the probe never starts"
 tail -1 "$RUN/summary.txt" | grep -q '^NO-GO$' && ok "rc: a failed root open is NO-GO" || { cat "$RUN/summary.txt"; bad "rc: a failed root open is not NO-GO"; }
 last_is_return_early && ok "rc: a failed root open still ends with testboot-return" || bad "rc: a failed root open skipped the return"
+# the node opens but is not the card that was chosen (the identity read after the open differs): gpu-verify fails, NO-GO, no probe
+cp "$LAY/amp001/pci" "$LAY/amp001/pci2"; sed -i '' 's/device=0x2d04/device=0x9999/' "$LAY/amp001/pci2"
+( RC_LAYOUT=$LAY/amp001 FAKE_FLIP_AFTER=1 runrc "$RCS" PASS ); RUN=$(newest)
+grep -q '"row":"gpu-verify","result":"fail","detail":"expected [^"]*nvidia1 at bus pci13:1:0:0 vendor 0x10de device 0x2d04, found bus pci13:1:0:0 vendor 0x10de device 0x9999' "$RUN/results.jsonl" && ! grep -q '^run_owner_boot$' "$T/rc/log" && tail -1 "$RUN/summary.txt" | grep -q '^NO-GO$' && grep -q '"status": "fail"' "$RUN/gpu-verify.json" && ok "rc: a node that is not the chosen card fails gpu-verify naming expected and found, NO-GO, no probe" || { cat "$RUN/results.jsonl"; bad "rc: a changed identity is not caught"; }
+# no hard-coded unit: the kit and the probe name no /dev/nvidia0
+for f in "$KIT/nvidia_client_owner_testboot" "$KIT/make-be.sh" "$KIT/check-be.sh" "$REPO/tests/ioctl/run_owner_boot.sh" "$REPO/tests/ioctl/uvm_owner_probe.c" "$KIT/gpu-detect.sh"; do
+	grep -v '^[[:space:]]*\(#\|/\?\*\)' "$f" | grep -q '/dev/nvidia0' && bad "$(basename "$f") names /dev/nvidia0" || ok "$(basename "$f") does not hard-code /dev/nvidia0"
+done
+# the probe finds its GPU node by itself (-d overrides): the selection logic on a fixture /dev
+PROBEDIR=$T/probe-sel; mkdir -p "$PROBEDIR/dev"
+sed -e 's|opendir("/dev")|opendir(getenv("FAKE_DEV"))|' -e 's|"/dev/%s", e->d_name|"%s/%s", getenv("FAKE_DEV"), e->d_name|' -e 's|^main(int argc, char \*\*argv)$|probe_main(int argc, char **argv)|' "$REPO/tests/ioctl/uvm_owner_probe.c" > "$PROBEDIR/sel.c"
+cat >> "$PROBEDIR/sel.c" <<'EOF'
+
+int
+main(int argc, char **argv)
+{
+	find_gpu_node(argc > 1 ? argv[1] : NULL);
+	printf("%s|%s\n", gpu_node != NULL ? gpu_node : "(none)", gpu_what);
+	return (0);
+}
+EOF
+selcc() {	# selcc <source> <out>
+	cc -std=c11 -D_DEFAULT_SOURCE -w -I "$REPO/sys" -o "$2" "$1" 2> "$PROBEDIR/cc.err" || { cat "$PROBEDIR/cc.err"; return 1; }
+}
+if selcc "$PROBEDIR/sel.c" "$PROBEDIR/sel"; then
+	rm -f "$PROBEDIR"/dev/*; for n in nvidiactl nvidia-uvm nvidia-modeset nvidia; do : > "$PROBEDIR/dev/$n"; done
+	r=$(FAKE_DEV=$PROBEDIR/dev "$PROBEDIR/sel"); case $r in "(none)|a device file: no usable GPU node (there is no /dev/nvidiaN node)") ok "probe: no nvidiaN node (nvidiactl, nvidia-uvm and nvidia-modeset do not count) skips the row and says so" ;; *) bad "probe: no node gave '$r'" ;; esac
+	: > "$PROBEDIR/dev/nvidia0"
+	r=$(FAKE_DEV=$PROBEDIR/dev "$PROBEDIR/sel"); case $r in "$PROBEDIR/dev/nvidia0|a device file ($PROBEDIR/dev/nvidia0), the other's handle") ok "probe: nvidia0 alone is the node" ;; *) bad "probe: nvidia0 gave '$r'" ;; esac
+	rm -f "$PROBEDIR/dev/nvidia0"; : > "$PROBEDIR/dev/nvidia1"
+	r=$(FAKE_DEV=$PROBEDIR/dev "$PROBEDIR/sel"); case $r in "$PROBEDIR/dev/nvidia1|a device file ($PROBEDIR/dev/nvidia1), the other's handle") ok "probe: nvidia1 alone is the node (not nvidia0)" ;; *) bad "probe: nvidia1 gave '$r'" ;; esac
+	: > "$PROBEDIR/dev/nvidia0"
+	r=$(FAKE_DEV=$PROBEDIR/dev "$PROBEDIR/sel"); case $r in "(none)|"*"several nodes ("*nvidia0*nvidia1*|"(none)|"*"several nodes ("*nvidia1*nvidia0*) ok "probe: two nodes are not guessed and both are named" ;; *) bad "probe: two nodes gave '$r'" ;; esac
+	r=$(FAKE_DEV=$PROBEDIR/dev "$PROBEDIR/sel" /dev/nvidia1); case $r in "/dev/nvidia1|"*) ok "probe: -d names the node and overrides the scan" ;; *) bad "probe: -d gave '$r'" ;; esac
+	for pl in 's/if (n == 1)$/if (n >= 1)/' 's|"%s/%s", getenv("FAKE_DEV"), e->d_name|"%s/nvidia0", getenv("FAKE_DEV")|'; do
+		sed -e "$pl" "$PROBEDIR/sel.c" > "$PROBEDIR/plant.c"
+		if cmp -s "$PROBEDIR/sel.c" "$PROBEDIR/plant.c"; then bad "probe plant '$pl' changed nothing"; continue; fi
+		if selcc "$PROBEDIR/plant.c" "$PROBEDIR/plant"; then
+			# state: nvidia0 and nvidia1 (two nodes) for the guess; then nvidia1 alone for the hard-coded path
+			r2=$(FAKE_DEV=$PROBEDIR/dev "$PROBEDIR/plant")
+			rm -f "$PROBEDIR/dev/nvidia0"; r1=$(FAKE_DEV=$PROBEDIR/dev "$PROBEDIR/plant"); : > "$PROBEDIR/dev/nvidia0"
+			case $r2 in "(none)|"*"several nodes"*) two=ok ;; *) two=bad ;; esac
+			case $r1 in "$PROBEDIR/dev/nvidia1|"*) one=ok ;; *) one=bad ;; esac
+			if [ "$two" = ok ] && [ "$one" = ok ]; then bad "probe plant '$pl' stays green"; else ok "probe plant '$pl' is red"; fi
+		else bad "probe plant '$pl' does not build"; fi
+	done
+else bad "the probe selection harness does not build"; fi
 # plants on the rc script
 plant_rc() {	# plant_rc <name> <sed> <check: function name>
 	sed -e "$2" "$RCS" > "$T/rc-plant-$1"
@@ -659,7 +790,7 @@ if cmp -s "$RCS" "$T/rc-plant-fw-not-first"; then bad "plant fw-not-first change
 fi
 sed -e 's/^\t\t\tif ( exec 3<> .*; then$/\t\t\tif true; then/' "$RCS" > "$T/rc-plant-root-open-not-gating"
 if cmp -s "$RCS" "$T/rc-plant-root-open-not-gating"; then bad "plant root-open-not-gating changed nothing"; else
-	with RC_GPU=$T/rc runrc "$T/rc-plant-root-open-not-gating" PASS
+	with RC_LAYOUT=$LAY/baddev runrc "$T/rc-plant-root-open-not-gating" PASS
 	if grep -q '^run_owner_boot$' "$T/rc/log"; then ok "plant root-open-not-gating is red (the probe runs after a failed root open)"; else bad "plant root-open-not-gating stays green"; fi
 fi
 sed -e '/^\t\t\trunning root-open /,/^\t\t\tdmesg > "\$OUT\/dmesg-root-open.txt"/d' "$RCS" > "$T/rc-plant-root-open-dropped"
