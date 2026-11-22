@@ -54,3 +54,7 @@
 
 ## 2026-11-22T02:40:00Z (#2373 one-shot BE kit, new commit on e5d29d7, own 2-round budget)
 - Reader fixes committed e5d29d7 (round 1 6e744db5, round 2 7645ca8e). Next commit: tests/ioctl/testboot (make-be.sh, rc one-shot, summarize.sh, vendored testboot-return pinned in VENDOR) and tests/testboot_kit_test.sh; run_owner_boot.sh takes PROBE_UID_A/B. Gate round 1 running; then the dry run on the real host (a BE built, not armed).
+
+## 2026-11-22T03:10:00Z (#2373 kit safety fixes, new commit on 7fbca39, own 2-round budget)
+- Orchestrator: a dead-man timer not pending loads nothing (KIT, return straight away); FAIL wins over KIT in summarize.sh; rc script, summarize.sh and testboot-return installed from the git archive; usr/local/etc/rc.conf.d scanned. Gate round 1 running; then destroy the old dry-run BE, build a fresh one, mount check, prove the dead-man timer pending.
+- Round 1 receipt 2d6d5617b04b5dba52601f60cfc35b2629f316ed28175fcf86e8cf7b096f2530 (5 voices FINDINGS, answers .round/tmp/answers.txt). Folded in: the rc script falls back to a 0700 /var/db/nvco-testboot (never /tmp) and, when no run directory can be made at all, writes no results and still runs testboot-return; a dead-man timer disabled or not pending loads nothing.

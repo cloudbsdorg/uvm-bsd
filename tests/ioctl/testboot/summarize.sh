@@ -29,11 +29,14 @@ RUN=$1
 ROWS=$RUN/results.jsonl
 [ -r "$ROWS" ] || { echo "summarize: cannot read $ROWS" >&2; exit 2; }
 
+PRE='^(hash-|no-drm|load-skipped-no-deadman|test-uids|deadman|panic-settings|preloaded|load-linux64|load$)'
+# the failed precondition rows, by name
+prenames=$(grep '"result":"fail"' "$ROWS" | sed 's/.*"row":"\([^"]*\)".*/\1/' | grep -E "$PRE" | tr '\n' ' ')
 bename=$(sed -n 's/.*"row":"kit-version".*BE \([A-Za-z0-9._-]*\),.*/\1/p' "$ROWS" | head -1)
 again="to run again: build a new boot environment with make-be.sh, or re-arm ${bename:-the one that ran} (bectl activate -t ${bename:-BE}, from the normal boot environment)"
 bad=0
 kit=0
-awk '
+awk -v prere="$PRE" '
 function field(line, name,   p, rest) {
 	p = index(line, "\"" name "\":\"")
 	if (p == 0) return ""
@@ -47,7 +50,7 @@ function field(line, name,   p, rest) {
 	if (!(r in seen)) { seen[r] = 1; order[++k] = r }
 	last[r] = res
 	if (res == "fail") anyfail[r] = 1
-	if (res == "fail" && r ~ /^(hash-|no-drm|test-uids|deadman|panic-settings|preloaded|load-linux64|load$)/) pre[r] = 1
+	if (res == "fail" && r ~ prere) pre[r] = 1
 }
 END {
 	bad = 0; kit = 0
@@ -85,8 +88,14 @@ if [ "$bad" != 0 ]; then
 	echo NO-GO
 	exit 1
 fi
+# a measured FAIL is never hidden by a failed precondition: FAIL wins
+if [ "$kit" != 0 ] && [ "$verdict" = FAIL ]; then
+	echo "summary: NO-GO (run_owner_boot.sh says FAIL: read $RES); precondition rows also failed: $prenames: the FAIL stands, but fix those before trusting any re-run; $again"
+	echo NO-GO
+	exit 1
+fi
 if [ "$kit" != 0 ]; then
-	echo "summary: KIT: a precondition of the test failed (a hash, the staged set, the test uids, the dead-man timer, the panic settings, a preloaded nvidia or linux64): nothing was measured about the change; fix it; $again"
+	echo "summary: KIT: a precondition of the test failed: $prenames: nothing was measured about the change; fix it; $again"
 	echo KIT
 	exit 4
 fi

@@ -28,7 +28,8 @@
 # hang; it is cancelled before testboot-return.
 #
 # rc.conf variables (make-be.sh writes _enable, _normal_be, _copyout and _cudarun): nvidia_client_owner_testboot_enable,
-# _normal_be (default cloudbsd-rx7600), _seconds (the race loop length, 60), _deadman (minutes, 60),
+# _fallback (/var/db/nvco-testboot, made 0700 when the work directory cannot be made; there is no /tmp on the
+# fleet hosts), _normal_be (default cloudbsd-rx7600), _seconds (the race loop length, 60), _deadman (minutes, 60),
 # _uid_a, _uid_b (probe uids, 60003 and 60004; the race loops use the uids defined in uvm_owner_race.c, read
 # from the kit), _kit (/usr/local/share/nvidia-client-owner-test), _mods (/boot/modules.nvco-test), _work
 # (/var/db/nvidia-client-owner-test), _copyout (a directory in the home dataset), _cudarun (the root-owned CUDA
@@ -50,6 +51,7 @@ stop_cmd=:
 : "${nvidia_client_owner_testboot_kit:=/usr/local/share/nvidia-client-owner-test}"
 : "${nvidia_client_owner_testboot_mods:=/boot/modules.nvco-test}"
 : "${nvidia_client_owner_testboot_work:=/var/db/nvidia-client-owner-test}"
+: "${nvidia_client_owner_testboot_fallback:=/var/db/nvco-testboot}"
 : "${nvidia_client_owner_testboot_copyout:=/home/mlapointe/work/gb10/logs/uvm-2373-testboot}"
 : "${nvidia_client_owner_testboot_cudarun:=/usr/local/share/nvidia-client-owner-test/run-linux-cuda.sh}"
 : "${nvidia_client_owner_testboot_return:=/usr/local/sbin/testboot-return}"
@@ -61,9 +63,12 @@ NORMAL=$nvidia_client_owner_testboot_normal_be
 KIT=$nvidia_client_owner_testboot_kit
 MODS=$nvidia_client_owner_testboot_mods
 WORKROOT=$nvidia_client_owner_testboot_work
+FALLBACK=$nvidia_client_owner_testboot_fallback
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
 OUT=$WORKROOT/$STAMP
 
+DM_OK=0
+DM_WHY="the dead-man timer was never armed"
 row()	# row <name> <pass|fail|info|skip|running> <detail>
 {
 	printf '{"row":"%s","result":"%s","detail":"%s"}\n' "$1" "$2" \
@@ -77,19 +82,24 @@ running()	# running <name> <detail>: written and synced before a step that can p
 	sync
 }
 
+# deadman_arm: sets DM_OK to 1 only when a timer is pending; DM_WHY says why not.  A timer disabled with 0
+# minutes is not pending: nothing is loaded without one (a hang would leave the host on the test kernel).
 deadman_arm()
 {
+	DM_OK=0
 	case $nvidia_client_owner_testboot_deadman in
-	''|*[!0-9]*) row deadman fail "the dead-man setting '$nvidia_client_owner_testboot_deadman' is not a number of minutes: no dead-man timer"; return 0 ;;
+	''|*[!0-9]*) DM_WHY="the setting nvidia_client_owner_testboot_deadman is '$nvidia_client_owner_testboot_deadman', not a number of minutes"; row deadman fail "$DM_WHY: no dead-man timer"; return 0 ;;
 	*[!0]*) ;;
-	*) row deadman info "the dead-man timer is disabled"; return 0 ;;
+	*) DM_WHY="the dead-man timer is disabled (nvidia_client_owner_testboot_deadman is 0)"; row deadman fail "$DM_WHY: this boot is NOT protected against a hang"; return 0 ;;
 	esac
 	shutdown -r "+$nvidia_client_owner_testboot_deadman" "nvidia_client_owner_testboot dead-man: the machine restarts in $nvidia_client_owner_testboot_deadman minutes unless the run finishes" > /dev/null 2>&1 &
 	sleep 1
 	if [ -e "$nvidia_client_owner_testboot_lockfile" ] || ! pgrep -f "nvidia_client_owner_testboot dead-man" > /dev/null 2>&1; then
-		row deadman fail "the dead-man timer is not pending (lock file $nvidia_client_owner_testboot_lockfile, or the request failed): this boot is NOT protected against a hang"
+		DM_WHY="the dead-man timer is not pending (lock file $nvidia_client_owner_testboot_lockfile, or the shutdown request failed)"
+		row deadman fail "$DM_WHY: this boot is NOT protected against a hang"
 	else
 		row deadman info "a dead-man timer is requested for $nvidia_client_owner_testboot_deadman minutes"
+		DM_OK=1
 	fi
 	sync
 }
@@ -116,11 +126,23 @@ check_hashes()
 
 nvidia_client_owner_testboot_start()
 {
-	# a failure to make the run directory must not skip the return to the normal boot environment: fall back to a
-	# temporary directory (and, failing that, to /tmp) and go on
-	if mkdir -p "$WORKROOT" 2> /dev/null && chmod 0700 "$WORKROOT" 2> /dev/null && mkdir -m 0700 "$OUT" 2> /dev/null; then :; else
-		echo "cannot create $OUT: using a temporary directory"
-		OUT=$(mktemp -d /tmp/nvco-testboot.XXXXXXXX 2> /dev/null) || OUT=/tmp
+	# a failure to make the run directory must not skip the return to the normal boot environment: try the work
+	# directory, then a 0700 directory of /var/db (no /tmp on the fleet hosts), else write no results at all and still
+	# return
+	_made=0
+	if mkdir -p "$WORKROOT" 2> /dev/null && chmod 0700 "$WORKROOT" 2> /dev/null && mkdir -m 0700 "$OUT" 2> /dev/null; then
+		_made=1
+	else
+		OUT=$FALLBACK/$STAMP
+		if mkdir -p "$FALLBACK" 2> /dev/null && chmod 0700 "$FALLBACK" 2> /dev/null && [ "$(stat -f %u "$FALLBACK")" = "$(id -u)" ] && mkdir -m 0700 "$OUT" 2> /dev/null; then
+			_made=1
+			echo "== the work directory could not be made: results go to $OUT"
+		fi
+	fi
+	if [ "$_made" != 1 ]; then
+		echo "== no run directory could be made ($WORKROOT, $FALLBACK): no module is loaded and no results are written; returning to $NORMAL"
+		( "$nvidia_client_owner_testboot_return" "$NORMAL" ) > /dev/null 2>&1 &
+		return 0
 	fi
 	cd "$OUT" 2> /dev/null || cd /
 	: > "$OUT/results.jsonl"
@@ -130,6 +152,8 @@ nvidia_client_owner_testboot_start()
 	sysctl kern.panic_reboot_wait_time=5 debug.debugger_on_panic=0 > "$OUT/sysctl-set.txt" 2>&1
 	_ps=$(sysctl -n kern.panic_reboot_wait_time debug.debugger_on_panic 2>&1 | tr '\n' ' ')
 	ok=1
+	# a dead-man timer that is not pending means a hang would leave the host on the test kernel: load nothing
+	if [ "$DM_OK" != 1 ]; then ok=0; row load-skipped-no-deadman fail "no module is loaded because $DM_WHY; set nvidia_client_owner_testboot_deadman in /etc/rc.conf.d/nvidia_client_owner_testboot of this boot environment and boot it again"; fi
 	if [ "$_ps" = "5 0 " ]; then row panic-settings pass "kern.panic_reboot_wait_time 5, debug.debugger_on_panic 0"; else row panic-settings fail "read back '$_ps', not '5 0': a panic could wait in the debugger; nothing is loaded"; ok=0; fi
 	# run_owner_boot.sh reloads nvidia-uvm by name after its unload test: the staged directory is on the module path
 	# (the staged directory comes FIRST: a name lookup walks the path in order)

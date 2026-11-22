@@ -132,6 +132,9 @@ base_tree
 mkdir -p "$T/basetree/boot/loader.conf.d"; printf 'nvidia-modeset_load="YES"\n' > "$T/basetree/boot/loader.conf.d/x.conf"
 refuse base-loader-conf-d-loads-nvidia 14
 base_tree
+mkdir -p "$T/basetree/usr/local/etc/rc.conf.d"; printf 'kld_list="nvidia"\n' > "$T/basetree/usr/local/etc/rc.conf.d/kld"
+refuse base-usr-local-rc-conf-d-loads-nvidia 26
+base_tree
 mkdir -p "$T/basetree/boot/modules"; : > "$T/basetree/boot/modules/nvidia-uvm.ko"
 refuse base-has-packaged-nvidia-module 15
 base_tree
@@ -171,7 +174,51 @@ KR=$T/mnt-git/root/usr/local/share/nvidia-client-owner-test/repo
 printf '# edit\n' >> "$GR/tests/ioctl/run_owner_boot.sh"
 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null NVCO_MNT=$T/mnt-dirty/root sh "$GR/tests/ioctl/testboot/make-be.sh" -m "$STAGE" -D 20261122 -n 19 > "$T/mk.out" 2>&1 && bad "a kit with an uncommitted change was built" || ok "a kit with an uncommitted change is refused"
 grep -q 'uncommitted changes' "$T/mk.out" && ok "and says so" || bad "the refusal does not say what is wrong"
+# everything installed is the archive of the commit: the rc script, summarize.sh and testboot-return too
+for f in nvidia_client_owner_testboot summarize.sh testboot-return; do
+	case $f in nvidia_client_owner_testboot) dst=$T/mnt-git/root/usr/local/etc/rc.d/$f ;; testboot-return) dst=$T/mnt-git/root/usr/local/sbin/$f ;; *) dst=$T/mnt-git/root/usr/local/share/nvidia-client-owner-test/$f ;; esac
+	gitq show "HEAD:tests/ioctl/testboot/$f" > "$T/committed.$f" 2>/dev/null
+	cmp -s "$T/committed.$f" "$dst" && ok "the installed $f is the committed one" || bad "the installed $f is not the committed one"
+done
+# an edit of the work tree between the check and the install must not be installed: the dirty check is removed (a plant) and
+# the committed rc script is still what lands; with the sources read from the work tree as well (a second plant) it is not
+printf '# worktree edit\n' >> "$GR/tests/ioctl/testboot/nvidia_client_owner_testboot"
+rm -rf "$T/gp-a" "$T/gp-b"
+cp -R "$GR" "$T/gp-a"; cp -R "$GR" "$T/gp-b"
+for g in a b; do
+	sed -e 's/^\t\[ -z "\$_dirty" \] || {/\t[ -z "" ] || {/' "$GR/tests/ioctl/testboot/make-be.sh" > "$T/gp-$g/tests/ioctl/testboot/make-be.sh"
+done
+cmp -s "$GR/tests/ioctl/testboot/make-be.sh" "$T/gp-a/tests/ioctl/testboot/make-be.sh" && bad "the dirty-check plant changed nothing"
+sed -e 's/^ASRC=\$SCRATCH\/kit\/tests\/ioctl\/testboot$/ASRC=$KITDIR/' "$T/gp-b/tests/ioctl/testboot/make-be.sh" > "$T/gp-b/tests/ioctl/testboot/mb.sh" && mv "$T/gp-b/tests/ioctl/testboot/mb.sh" "$T/gp-b/tests/ioctl/testboot/make-be.sh"
+cmp -s "$T/gp-a/tests/ioctl/testboot/make-be.sh" "$T/gp-b/tests/ioctl/testboot/make-be.sh" && bad "the work-tree plant changed nothing"
+GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null NVCO_MNT=$T/mnt-gpa/root sh "$T/gp-a/tests/ioctl/testboot/make-be.sh" -m "$STAGE" -D 20261122 -n 28 > "$T/mk.out" 2>&1 || { cat "$T/mk.out"; bad "the dirty-check plant run failed"; }
+cmp -s "$T/committed.nvidia_client_owner_testboot" "$T/mnt-gpa/root/usr/local/etc/rc.d/nvidia_client_owner_testboot" && ok "with the dirty check off, the committed rc script is still what is installed" || { cat "$T/mk.out"; bad "an edit of the work tree reached the clone although the install reads the archive"; }
+GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null NVCO_MNT=$T/mnt-gpb/root sh "$T/gp-b/tests/ioctl/testboot/make-be.sh" -m "$STAGE" -D 20261122 -n 29 > "$T/mk.out" 2>&1; _r=$?
+if [ "$_r" = 0 ] && cmp -s "$T/gp-b/tests/ioctl/testboot/nvidia_client_owner_testboot" "$T/mnt-gpb/root/usr/local/etc/rc.d/nvidia_client_owner_testboot"; then ok "plant installs-from-work-tree is red (the edited work-tree script lands in the clone)"; else cat "$T/mk.out"; bad "plant installs-from-work-tree did not show the work-tree script in the clone (exit $_r)"; fi
+rm -rf "$T/gp-a" "$T/gp-b"
 export NVCO_NO_GIT_CHECK=1
+
+# a stale scratch tree of an earlier run is not installed
+mkdir -p "$T/mnt-stale/kit/tests/ioctl"; : > "$T/mnt-stale/kit/tests/ioctl/stale-file"
+: > "$T/be.log"; NVCO_MNT=$T/mnt-stale/root sh "$KIT/make-be.sh" -m "$STAGE" -D 20261122 -n 30 > "$T/mk.out" 2>&1
+[ -f "$T/mnt-stale/root/usr/local/share/nvidia-client-owner-test/repo/tests/ioctl/run_owner_boot.sh" ] && [ ! -e "$T/mnt-stale/root/usr/local/share/nvidia-client-owner-test/repo/tests/ioctl/stale-file" ] && ok "a stale file of an earlier scratch tree is not installed" || { cat "$T/mk.out"; bad "a stale scratch file reached the clone"; }
+# a symbolic link in the kit is refused
+mkdir -p "$T/symrepo/tests/ioctl" "$T/symrepo/sys"; cp -R "$KIT" "$T/symrepo/tests/ioctl/testboot"; ln -s /etc/passwd "$T/symrepo/tests/ioctl/evil"
+NVCO_MNT=$T/mnt-sym/root sh "$T/symrepo/tests/ioctl/testboot/make-be.sh" -m "$STAGE" -D 20261122 -n 31 > "$T/mk.out" 2>&1 && bad "a kit with a symbolic link was built" || ok "a kit with a symbolic link is refused"
+grep -q 'symbolic link' "$T/mk.out" && [ ! -e "$T/be/nvidia-client-owner-test-20261122-31" ] && ok "and nothing is built" || bad "the symbolic link refusal left a boot environment"
+# a continued kld_list line is joined before the scan
+printf 'kld_list="linux64 \\\n nvidia-modeset"\n' > "$T/contline"
+base_tree; mkdir -p "$T/basetree/usr/local/etc/rc.conf.d"; cp "$T/contline" "$T/basetree/usr/local/etc/rc.conf.d/kld"
+refuse base-continued-kld-list-loads-nvidia 32
+base_tree
+# a file missing from the commit is named in terms of the commit
+rm -rf "$T/gm"; cp -R "$GR" "$T/gm"; gitm() { GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null git -c user.name=t -c user.email=t@t -C "$T/gm" "$@"; }
+mkdir -p "$T/gm/.git/info"; gitm checkout -q -- . 2>/dev/null; gitm rm -q --cached tests/ioctl/testboot/summarize.sh && printf 'tests/ioctl/testboot/summarize.sh\n' >> "$T/gm/.git/info/exclude" && gitm commit -q -m drop
+unset NVCO_NO_GIT_CHECK
+GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null NVCO_MNT=$T/mnt-gm/root sh "$T/gm/tests/ioctl/testboot/make-be.sh" -m "$STAGE" -D 20261122 -n 33 > "$T/mk.out" 2>&1 && bad "a commit without summarize.sh was built" || ok "a commit without summarize.sh is refused"
+grep -q 'commit .* has no tests/ioctl/testboot/summarize.sh' "$T/mk.out" && ok "and the message names the commit and the file" || { cat "$T/mk.out"; bad "the message is not in terms of the commit"; }
+export NVCO_NO_GIT_CHECK=1
+rm -rf "$T/gm"
 
 # ---- plants on make-be.sh
 # two independent checks of the same hash (the staged file, then the copy): either alone refuses the changed module;
@@ -205,12 +252,14 @@ plant_refused() {	# plant_refused <name> <seq> <setup fn> <sed args...>: the pla
 	base_tree; cp "$T/list.save" "$STAGE/SHA256-v5.txt"
 	if [ "$r" = 0 ]; then ok "plant $_pn is red (the refused case is accepted)"; else bad "plant $_pn stays green"; fi
 }
-setup_prefix() { sed 's/^\(SHA256 (nvidia-v5-phase0.ko) = \)\([0-9a-f]\{8\}\).*$/\1\2/' "$T/list.save" > "$STAGE/SHA256-v5.txt"; printf 'junk\n' >> "$STAGE/nvidia-v5-phase0.ko"; cp "$STAGE/nvidia-v5-phase0.ko" "$T/p0.mod"; }
 setup_loader() { printf 'nvidia_load="YES"\n' >> "$T/basetree/boot/loader.conf"; }
 setup_pkg() { mkdir -p "$T/basetree/boot/modules"; : > "$T/basetree/boot/modules/nvidia-uvm.ko"; }
 plant_refused loader-guard-off 24 setup_loader 's/boot\/loader.conf boot\/loader.conf.local; do/boot\/nothing; do/'
+setup_contline() { mkdir -p "$T/basetree/usr/local/etc/rc.conf.d"; cp "$T/contline" "$T/basetree/usr/local/etc/rc.conf.d/kld"; }
+setup_usrlocal() { mkdir -p "$T/basetree/usr/local/etc/rc.conf.d"; printf 'kld_list="nvidia"\n' > "$T/basetree/usr/local/etc/rc.conf.d/kld"; }
+plant_refused usr-local-scan-off 27 setup_usrlocal 's/for _d in etc\/rc.conf.d usr\/local\/etc\/rc.conf.d boot\/loader.conf.d; do/for _d in etc\/rc.conf.d boot\/loader.conf.d; do/'
+plant_refused continuation-join-off 34 setup_contline 's/sed -e :a -e .*ta. "\$1" 2> \/dev\/null/cat "$1" 2> \/dev\/null/'
 plant_refused packaged-module-guard-off 25 setup_pkg 's/for _d in boot\/modules boot\/kernel; do/for _d in boot\/nothing; do/'
-cp "$STAGE/nvidia-v5-phase0.ko" "$T/p0.keep" 2>/dev/null
 
 # ---- the rc one-shot on fake commands
 mkdir -p "$T/rc/bin" "$T/rc/kit/repo/tests/ioctl" "$T/rc/mods" "$T/rc/work" "$T/rc/copyout"
@@ -255,7 +304,13 @@ case "$*" in
 esac
 exit 0
 EOF
-for c in dmesg bectl shutdown pkill pgrep sync; do
+cat > "$T/rc/bin/pgrep" <<'EOF'
+#!/bin/sh
+echo "pgrep $*" >> "$FAKE_LOG"
+[ -z "${FAKE_NO_DEADMAN:-}" ] || exit 1
+exit 0
+EOF
+for c in dmesg bectl shutdown pkill sync; do
 	cat > "$T/rc/bin/$c" <<EOF
 #!/bin/sh
 echo "$c \$*" >> "\$FAKE_LOG"
@@ -274,7 +329,7 @@ run_rc_command() { nvidia_client_owner_testboot_start; wait; }
 EOF
 RCS=$KIT/nvidia_client_owner_testboot
 runrc() {	# runrc <script> <verdict> [uvm fails]: the script is a copy pointed at fakes
-	rm -rf "$T/rc/work" "$T/rc/copyout"; mkdir -p "$T/rc/work" "$T/rc/copyout"
+	rm -rf "$T/rc/work" "$T/rc/copyout" "$T/rc/fallback"; mkdir -p "$T/rc/work" "$T/rc/copyout"
 	: > "$T/rc/log"
 	sed -e "s#/etc/rc.subr#$T/rc/rc.subr#" "$1" > "$T/rc/script.sh"
 	FAKE_LOG=$T/rc/log FAKE_VERDICT=$2 FAKE_UVM_FAILS=${3:-} PATH=$T/rc/bin:$PATH \
@@ -282,7 +337,7 @@ runrc() {	# runrc <script> <verdict> [uvm fails]: the script is a copy pointed a
 	    nvidia_client_owner_testboot_work=${RC_WORK:-$T/rc/work} nvidia_client_owner_testboot_copyout=$T/rc/copyout \
 	    nvidia_client_owner_testboot_return=$T/rc/bin/testboot-return nvidia_client_owner_testboot_cudarun=/kit/cuda.sh \
 	    nvidia_client_owner_testboot_version=/nonexistent nvidia_client_owner_testboot_lockfile=/nonexistent/lock \
-	    nvidia_client_owner_testboot_deadman=1 \
+	    nvidia_client_owner_testboot_deadman=${RC_DEADMAN:-1} nvidia_client_owner_testboot_fallback=${RC_FALLBACK:-$T/rc/fallback} \
 	    sh "$T/rc/script.sh" start > "$T/rc/out" 2>&1
 }
 runrc "$RCS" PASS
@@ -326,10 +381,34 @@ grep -q '"row":"panic-settings","result":"fail"' "$RUN/results.jsonl" && tail -1
 # nvidia already loaded: nothing is loaded
 with FAKE_PRELOADED=1 runrc "$RCS" PASS
 grep -q '^kldload' "$T/rc/log" && bad "rc: modules were loaded over a preloaded nvidia" || ok "rc: a preloaded nvidia is not loaded over"
-# the run directory cannot be made: the return still happens
+# a dead-man timer that is not pending: nothing is loaded, KIT, and the return runs (the newest run directory is read)
+newest() { ls -dt "$T/rc/work"/2* | head -1; }
+with FAKE_NO_DEADMAN=1 runrc "$RCS" PASS
+grep -q '^kldload' "$T/rc/log" && bad "rc: modules were loaded with no dead-man timer pending" || ok "rc: with no dead-man timer pending no module is loaded"
+RUN=$(newest)
+tail -1 "$T/rc/log" | grep -q '^testboot-return cloudbsd-rx7600$' && ok "rc: with no dead-man timer the return still runs" || bad "rc: with no dead-man timer the return did not run"
+grep -q '"row":"deadman","result":"fail"' "$RUN/results.jsonl" && grep -q '"row":"load-skipped-no-deadman","result":"fail"' "$RUN/results.jsonl" && tail -1 "$RUN/summary.txt" | grep -q '^KIT$' && ok "rc: no dead-man timer is a KIT result" || { cat "$RUN/results.jsonl"; bad "rc: no dead-man timer is not a KIT result"; }
+grep -q 'load-skipped-no-deadman' "$RUN/summary.txt" && ok "rc: the summary names the skipped load" || bad "rc: the summary does not name the failed row"
+# a timer disabled with 0 is not a pending timer
+with RC_DEADMAN=0 runrc "$RCS" PASS
+grep -q '^kldload' "$T/rc/log" && bad "rc: modules were loaded with the dead-man timer disabled" || ok "rc: a dead-man timer disabled with 0 loads nothing"
+RUN=$(newest); tail -1 "$RUN/summary.txt" | grep -q '^KIT$' && ok "rc: a disabled dead-man timer is a KIT result" || bad "rc: a disabled dead-man timer is not KIT"
+# a setting that is not a number: nothing is loaded, and the reason names the setting
+with RC_DEADMAN=10m runrc "$RCS" PASS
+grep -q '^kldload' "$T/rc/log" && bad "rc: modules were loaded with a bad dead-man setting" || ok "rc: a bad dead-man setting loads nothing"
+RUN=$(newest); grep -q '"row":"load-skipped-no-deadman".*not a number' "$RUN/results.jsonl" && ok "rc: the reason says the setting is not a number" || bad "rc: the reason does not name the setting"
+# the run directory cannot be made: the fallback directory of /var/db is used (no /tmp), results are there, the return still runs
 : > "$T/rc/afile"
 with RC_WORK=$T/rc/afile/sub runrc "$RCS" PASS
-tail -1 "$T/rc/log" | grep -q '^testboot-return cloudbsd-rx7600$' && ok "rc: a run directory that cannot be made still ends with testboot-return" || { cat "$T/rc/log"; bad "rc: an unusable work directory skipped testboot-return"; }
+tail -1 "$T/rc/log" | grep -q '^testboot-return cloudbsd-rx7600$' && ok "rc: an unusable work directory still ends with testboot-return" || { cat "$T/rc/log"; bad "rc: an unusable work directory skipped testboot-return"; }
+FB=$(ls -d "$T/rc/fallback"/2* 2>/dev/null | head -1)
+[ -n "$FB" ] && [ "$(stat -f %Lp "$T/rc/fallback")" = 700 ] && [ "$(stat -f %Lp "$FB")" = 700 ] && [ -f "$FB/results.jsonl" ] && ok "rc: the fallback directory is 0700 and holds the results" || bad "rc: the fallback directory was not used"
+grep -v '^[[:space:]]*#' "$RCS" | grep -q '/tmp' && bad "rc: the script uses /tmp" || ok "rc: the script never uses /tmp"
+# neither directory can be made: no results, no module is loaded, the return still runs
+with RC_WORK=$T/rc/afile/sub with RC_FALLBACK=$T/rc/afile/fb runrc "$RCS" PASS
+tail -1 "$T/rc/log" | grep -q '^testboot-return cloudbsd-rx7600$' && ok "rc: with no run directory at all the return still runs" || { cat "$T/rc/log"; bad "rc: with no run directory the return did not run"; }
+grep -q '^kldload' "$T/rc/log" && bad "rc: modules were loaded with no run directory" || ok "rc: with no run directory no module is loaded"
+[ ! -e "$T/rc/afile/fb" ] && ok "rc: no results are written when no directory can be made" || bad "rc: results were written"
 # plants on the rc script
 plant_rc() {	# plant_rc <name> <sed> <check: function name>
 	sed -e "$2" "$RCS" > "$T/rc-plant-$1"
@@ -344,6 +423,11 @@ plant_rc return-dropped 's/^\t"\$nvidia_client_owner_testboot_return" "\$NORMAL"
 plant_rc something-after-return 's/^\techo "== testboot-return exit \$_trc"$/\techo "== testboot-return exit $_trc"; echo after >> "$FAKE_LOG"/' last_is_return
 plant_rc drm-loaded 's/for _k in nvidia \$(/for _k in nvidia-drm nvidia $(/' drm_never
 plant_rc linux64-not-first 's/kldload linux64 > /kldload nvidia > /' linux_first
+sed -e 's/^\tif \[ "\$DM_OK" != 1 \]; then ok=0; .*$/\t:/' "$RCS" > "$T/rc-plant-deadman-not-gating"
+if cmp -s "$RCS" "$T/rc-plant-deadman-not-gating"; then bad "plant deadman-not-gating changed nothing"; else
+	with FAKE_NO_DEADMAN=1 runrc "$T/rc-plant-deadman-not-gating" PASS
+	if grep -q '^kldload' "$T/rc/log"; then ok "plant deadman-not-gating is red (modules load with no dead-man timer)"; else bad "plant deadman-not-gating stays green"; fi
+fi
 sed -e 's/^\tif check_hashes .*$/\tif true; then :; else ok=0; fi/' "$RCS" > "$T/rc-plant-hash-unchecked"
 if cmp -s "$RCS" "$T/rc-plant-hash-unchecked"; then bad "plant hash-unchecked changed nothing"; else
 	printf 'tampered\n' > "$T/rc/mods/nvidia.ko"; runrc "$T/rc-plant-hash-unchecked" PASS
@@ -360,12 +444,18 @@ if cmp -s "$RCS" "$T/rc-plant-deadman-always"; then bad "plant deadman-always ch
 	with FAKE_RETURN_RC=2 runrc "$T/rc-plant-deadman-always" PASS
 	if grep -q '^pkill' "$T/rc/log"; then ok "plant deadman-always is red (a failed return loses the dead-man timer)"; else bad "plant deadman-always stays green"; fi
 fi
-sed -e 's/^\tif mkdir -p "\$WORKROOT" .*; then :; else$/\tif mkdir -p "$WORKROOT" \&\& mkdir -m 0700 "$OUT"; then :; else return 1/' "$RCS" > "$T/rc-plant-early-return"
-if cmp -s "$RCS" "$T/rc-plant-early-return"; then bad "plant early-return changed nothing"; else
-	with RC_WORK=$T/rc/afile/sub runrc "$T/rc-plant-early-return" PASS
-	if last_is_return; then bad "plant early-return stays green"; else ok "plant early-return is red (an unusable work directory skips the return)"; fi
-fi
-
+plant_fb() {	# plant_fb <name> <sed> <expect>: a plant on the run-directory branches
+	sed -e "$2" "$RCS" > "$T/rc-plant-$1"
+	if cmp -s "$RCS" "$T/rc-plant-$1"; then bad "plant $1 changed nothing"; return; fi
+	case $3 in
+	fallback) with RC_WORK=$T/rc/afile/sub runrc "$T/rc-plant-$1" PASS; _f=$(ls -d "$T/rc/fallback"/2* 2>/dev/null | head -1)
+	    if [ -n "$_f" ] && [ -f "$_f/results.jsonl" ]; then bad "plant $1 stays green"; else ok "plant $1 is red (the fallback directory is not used)"; fi ;;
+	return) with RC_WORK=$T/rc/afile/sub with RC_FALLBACK=$T/rc/afile/fb runrc "$T/rc-plant-$1" PASS
+	    if last_is_return; then bad "plant $1 stays green"; else ok "plant $1 is red (with no run directory the return is skipped)"; fi ;;
+	esac
+}
+plant_fb fallback-never-used 's/if mkdir -p "\$FALLBACK" 2> \/dev\/null/if false \&\& mkdir -p "$FALLBACK" 2> \/dev\/null/' fallback
+plant_fb no-directory-skips-return 's/^\t\t( "\$nvidia_client_owner_testboot_return" "\$NORMAL" ) > \/dev\/null 2>\&1 \&$/\t\t:/' return
 # ---- summarize.sh: the reading rule on fixtures
 sumfx() {	# sumfx <name> <rows> <verdict-file-lines> <race row or ''>: builds a run directory, prints its path
 	d=$T/sum-$1; rm -rf "$d"; mkdir -p "$d/work/logs/uvm-2373-boot/20261122T000000Z"
@@ -404,9 +494,19 @@ expect hash-fail-kit "$(sumfx hashfail '{"row":"hash-nvidia","result":"fail","de
 expect deadman-fail-kit "$(sumfx deadman '{"row":"deadman","result":"fail","detail":"x"}
 {"row":"done","result":"info","detail":"x"}' "$READ_OK
 PASS" "$R5B9")" 4 KIT
+expect kit-and-fail-no-go "$(sumfx kitfail '{"row":"deadman","result":"fail","detail":"x"}
+{"row":"load-skipped-no-deadman","result":"fail","detail":"x"}
+{"row":"done","result":"info","detail":"x"}' "FAIL" "$R5B9")" 1 NO-GO
+expect no-modules-kit "$(sumfx nomod '{"row":"load-skipped-no-deadman","result":"fail","detail":"x"}
+{"row":"done","result":"info","detail":"x"}' "" "")" 4 KIT
 expect no-result-no-go "$(sumfx nores "$ROWS_OK" "" "")" 1 NO-GO
 expect garbage-verdict-no-go "$(sumfx garbage "$ROWS_OK" "MAYBE" "$R5B9")" 1 NO-GO
 out=$(sh "$KIT/summarize.sh" "$(sumfx rerunmsg "$ROWS_OK" "RE-RUN" "$R5B9")" 2>&1); case $out in *"bectl activate -t"*) ok "summarize: a RE-RUN says how to run again" ;; *) bad "summarize: a RE-RUN does not say how to run again" ;; esac
+out=$(sh "$KIT/summarize.sh" "$(sumfx kitfail2 '{"row":"deadman","result":"fail","detail":"x"}
+{"row":"load-skipped-no-deadman","result":"fail","detail":"x"}
+{"row":"done","result":"info","detail":"x"}' "FAIL" "$R5B9")" 2>&1); case $out in *"deadman load-skipped-no-deadman"*"fix those"*) ok "summarize: FAIL over KIT names the failed precondition rows" ;; *) bad "summarize: FAIL over KIT does not name the rows: $out" ;; esac
+out=$(sh "$KIT/summarize.sh" "$(sumfx nomod2 '{"row":"load-skipped-no-deadman","result":"fail","detail":"x"}
+{"row":"done","result":"info","detail":"x"}' "" "")" 2>&1); case $out in *"KIT: a precondition of the test failed: load-skipped-no-deadman"*) ok "summarize: KIT names the failed row" ;; *) bad "summarize: KIT does not name the row: $out" ;; esac
 # the message for no result does not contradict itself
 out=$(sh "$KIT/summarize.sh" "$(sumfx nores2 "$ROWS_OK" "" "")" 2>&1); case $out in *"found 0"*"read rc.log"*) ok "summarize: no result says found 0 and where to read" ;; *) bad "summarize: the no-result message is wrong: $out" ;; esac
 sumplant() {	# sumplant <name> <sed> <fixture dir> <exit> <last>
@@ -427,6 +527,9 @@ sumplant kit-as-no-go 's/^\techo KIT$/\techo NO-GO/' "$(sumfx p6 '{"row":"hash-n
 {"row":"done","result":"info","detail":"x"}' "" "")" 4 KIT
 sumplant load-as-kit 's/|load\$)/|load$|load-nvidia)/' "$(sumfx p7 '{"row":"load-nvidia","result":"fail","detail":"x"}
 {"row":"done","result":"info","detail":"x"}' "" "")" 1 NO-GO
+
+sumplant kit-hides-fail 's/^if \[ "\$kit" != 0 \] && \[ "\$verdict" = FAIL \]; then$/if false; then/' "$(sumfx p8 '{"row":"deadman","result":"fail","detail":"x"}
+{"row":"done","result":"info","detail":"x"}' "FAIL" "$R5B9")" 1 NO-GO
 
 # ---- docs: the kit says what it does
 for w in 'nvidia-client-owner-test-' 'modules.nvco-test' 'testboot-return' 'panic_reboot_wait_time' 'debugger_on_panic' 'nvidia-drm' 'linux64'; do

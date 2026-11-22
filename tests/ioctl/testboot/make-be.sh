@@ -25,12 +25,13 @@
 #      testboot-return must equal the pin in VENDOR; the kit must be committed (git status clean in sys/ and
 #      tests/ioctl), and what is installed is `git archive` of that commit, never the work tree;
 #   2. bectl create -e BASE BE, mounts it on a new root-owned directory of /var/run, and refuses a clone that
-#      would load an nvidia module by itself (kld_list, loader.conf, loader.conf.d) or has one in /boot/modules
+#      would load an nvidia module by itself (kld_list, loader.conf, loader.conf.d, rc.conf.d) or has one in /boot/modules
 #      or /boot/kernel;
 #   3. copies nvidia.ko, nvidia-modeset.ko and nvidia-uvm.ko, as root, into the NEW root-owned directory
 #      /boot/modules.nvco-test of the clone (refused when it exists), mode 0444, and checks every copy against
 #      the same full hash again;
-#   4. installs the kit (this repository's sys/ and tests/ioctl/, root-owned), the hash list, the CUDA script
+#   4. installs the kit (this repository's sys/ and tests/ioctl/, root-owned, all from one git archive of the commit,
+#      the rc script, summarize.sh and testboot-return included), the hash list, the CUDA script
 #      (root-owned), the rc one-shot nvidia_client_owner_testboot and its rc.conf.d file, testboot-return
 #      (vendored: see VENDOR), turns off every other test-boot kit in the clone, and writes loader.conf lines
 #      kern.panic_reboot_wait_time=5 and debug.debugger_on_panic=0 into the clone only;
@@ -100,6 +101,8 @@ else
 fi
 SCRATCH=$(dirname "$MNT")
 mkdir -p "$SCRATCH"
+early_cleanup() { rm -rf "$SCRATCH/kit" "$SCRATCH/kit.tar"; [ -z "${MNTBASE:-}" ] || rmdir "$MNTBASE" 2> /dev/null; }
+trap early_cleanup EXIT
 
 # the kit itself: committed, so that what boots is what was reviewed.  git is told the directory is safe and not to
 # write the index (root runs on the owner's repository)
@@ -130,18 +133,25 @@ for _p in $INSTALL nvidia-drm-v5.ko:; do
 	[ "$_got" = "$_want" ] || { echo "make-be.sh: $MODDIR/$_f is $_got, the list says $_want" >&2; exit 1; }
 	echo "checked $_f $_got"
 done
-# the vendored testboot-return is the one that was pinned
-VWANT=$(sed -n 's/^sha256 *= *\([0-9a-f]\{64\}\)$/\1/p' "$KITDIR/VENDOR")
-[ -n "$VWANT" ] && [ "$(sha256 -q "$KITDIR/testboot-return")" = "$VWANT" ] || { echo "make-be.sh: testboot-return differs from the pin in VENDOR" >&2; exit 1; }
-for _f in nvidia_client_owner_testboot summarize.sh; do [ -f "$KITDIR/$_f" ] || { echo "make-be.sh: missing $KITDIR/$_f" >&2; exit 1; }; done
 CUDASRC=$WORK/nvidia-gb10-freebsd-uvm0/scripts/run-linux-cuda.sh
 [ -f "$CUDASRC" ] || { echo "make-be.sh: missing the CUDA vecadd script $CUDASRC" >&2; exit 1; }
-# what is installed is the commit, never the work tree (ignored files, a later edit)
+# what is installed is the commit, never the work tree (ignored files, a later edit): the sources, the rc script,
+# summarize.sh and testboot-return all come from this one archive
 if [ "$COMMIT" = unchecked-test-hook ]; then
-	( cd "$REPO" && tar -cf "$SCRATCH/kit.tar" sys tests/ioctl )
+	( cd "$REPO" && tar -cf "$SCRATCH/kit.tar" --exclude sys/machine sys tests/ioctl )
 else
 	git_ archive "$COMMIT" sys tests/ioctl > "$SCRATCH/kit.tar" || { echo "make-be.sh: git archive of $COMMIT failed" >&2; exit 1; }
 fi
+rm -rf "$SCRATCH/kit"
+mkdir "$SCRATCH/kit" || { echo "make-be.sh: cannot make $SCRATCH/kit" >&2; exit 1; }
+tar -xf "$SCRATCH/kit.tar" -C "$SCRATCH/kit" || { echo "make-be.sh: the archive of commit $COMMIT does not unpack (disk full?)" >&2; exit 1; }
+# nothing but regular files and directories: a committed symbolic link would be followed at install
+[ -z "$(find "$SCRATCH/kit" ! -type f ! -type d)" ] || { echo "make-be.sh: commit $COMMIT holds a symbolic link or special file under sys/ or tests/ioctl/: the kit installs regular files only" >&2; exit 1; }
+ASRC=$SCRATCH/kit/tests/ioctl/testboot
+# the vendored testboot-return of the commit is the one that was pinned
+VWANT=$(sed -n 's/^sha256 *= *\([0-9a-f]\{64\}\)$/\1/p' "$ASRC/VENDOR" 2> /dev/null)
+[ -n "$VWANT" ] && [ -f "$ASRC/testboot-return" ] && [ "$(sha256 -q "$ASRC/testboot-return")" = "$VWANT" ] || { echo "make-be.sh: testboot-return in commit $COMMIT differs from the pin in VENDOR (or VENDOR is missing)" >&2; exit 1; }
+for _f in nvidia_client_owner_testboot summarize.sh; do [ -f "$ASRC/$_f" ] || { echo "make-be.sh: commit $COMMIT has no tests/ioctl/testboot/$_f (not committed, or ignored by .gitignore?): commit it and run again" >&2; exit 1; }; done
 
 run() { echo "+ $*"; "$@"; }
 BE_MADE=0
@@ -158,7 +168,7 @@ cleanup() {
 			echo "make-be.sh: COULD NOT remove $BE: remove it by hand with bectl(8) before using the name again" >&2
 		fi
 	fi
-	rm -f "$SCRATCH/kit.tar"
+	rm -rf "$SCRATCH/kit" "$SCRATCH/kit.tar"
 	[ -z "${MNTBASE:-}" ] || { rmdir "$MNT" 2> /dev/null; rmdir "$MNTBASE" 2> /dev/null; }
 	true
 	exit "$_rc"
@@ -175,18 +185,22 @@ run mkdir -p "$MNT"
 [ ! -L "$MNT" ] || { echo "make-be.sh: the mount point $MNT is a symbolic link" >&2; exit 1; }
 run $BECTL mount "$BE" "$MNT"
 
-# the clone must not load an nvidia module by itself: the kit loads them, from its own directory, and nothing else
+# the clone must not load an nvidia module by itself: the kit loads them, from its own directory, and nothing else.  A
+# line continued with a backslash is joined first.
+loads_nvidia() {	# loads_nvidia <file>
+	sed -e :a -e '/\\$/N; s/\\\n//; ta' "$1" 2> /dev/null | grep -Eq '^[[:space:]]*(kld_list=.*nvidia|nvidia[A-Za-z0-9_-]*_load=.?[Yy])'
+}
 for _f in etc/rc.conf etc/rc.conf.local usr/local/etc/rc.conf usr/local/etc/rc.conf.local boot/loader.conf boot/loader.conf.local; do
 	[ -f "$MNT/$_f" ] || continue
-	if grep -Eq '^[[:space:]]*(kld_list=.*nvidia|nvidia[A-Za-z0-9_-]*_load=.?[Yy])' "$MNT/$_f"; then
+	if loads_nvidia "$MNT/$_f"; then
 		echo "make-be.sh: $_f of $BASE loads an nvidia module by itself: this kit loads them, from /boot/modules.nvco-test; use a base boot environment without them" >&2
 		exit 1
 	fi
 done
-for _d in etc/rc.conf.d boot/loader.conf.d; do
-	if [ -d "$MNT/$_d" ] && grep -Erq '^[[:space:]]*(kld_list=.*nvidia|nvidia[A-Za-z0-9_-]*_load=.?[Yy])' "$MNT/$_d"; then
-		echo "make-be.sh: a file of $_d in $BASE loads an nvidia module by itself" >&2; exit 1
-	fi
+for _d in etc/rc.conf.d usr/local/etc/rc.conf.d boot/loader.conf.d; do
+	[ -d "$MNT/$_d" ] || continue
+	_hit=$(find "$MNT/$_d" -type f | while IFS= read -r _g; do if loads_nvidia "$_g"; then echo "$_g"; fi; done)
+	[ -z "$_hit" ] || { echo "make-be.sh: $_hit of $BASE loads an nvidia module by itself" >&2; exit 1; }
 done
 for _d in boot/modules boot/kernel; do
 	if ls "$MNT/$_d"/nvidia*.ko > /dev/null 2>&1; then
@@ -211,14 +225,14 @@ done
 # 4. the kit
 KROOT=$MNT/usr/local/share/nvidia-client-owner-test
 run install -d $ROOTOWN -m 0755 "$KROOT" "$KROOT/repo" "$MNT/usr/local/sbin" "$MNT/usr/local/etc/rc.d" "$MNT/etc/rc.conf.d" "$MNT/var/db"
-tar -xf "$SCRATCH/kit.tar" -C "$KROOT/repo"
+tar -xf "$SCRATCH/kit.tar" -C "$KROOT/repo" || { echo "make-be.sh: the kit does not unpack into the clone" >&2; exit 1; }
 [ -z "$ROOTOWN" ] || chown -R root:wheel "$KROOT"
 chmod -R go-w "$KROOT"
 run install $ROOTOWN -m 0444 "$SHAFILE" "$KROOT/SHA256-v5.txt"
-run install $ROOTOWN -m 0555 "$KITDIR/summarize.sh" "$KROOT/summarize.sh"
+run install $ROOTOWN -m 0555 "$ASRC/summarize.sh" "$KROOT/summarize.sh"
 run install $ROOTOWN -m 0555 "$CUDASRC" "$KROOT/run-linux-cuda.sh"
-run install $ROOTOWN -m 0555 "$KITDIR/testboot-return" "$MNT/usr/local/sbin/testboot-return"
-run install $ROOTOWN -m 0555 "$KITDIR/nvidia_client_owner_testboot" "$MNT/usr/local/etc/rc.d/nvidia_client_owner_testboot"
+run install $ROOTOWN -m 0555 "$ASRC/testboot-return" "$MNT/usr/local/sbin/testboot-return"
+run install $ROOTOWN -m 0555 "$ASRC/nvidia_client_owner_testboot" "$MNT/usr/local/etc/rc.d/nvidia_client_owner_testboot"
 printf '%s\n' "$COMMIT" > "$MNT/usr/local/etc/nvidia_client_owner_testboot.version"
 
 # every other test-boot kit of the clone is turned off (a second kit would load other modules and reboot on its own)
