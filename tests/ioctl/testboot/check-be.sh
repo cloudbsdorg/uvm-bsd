@@ -25,8 +25,9 @@
 #   - commit: the version file holds the commit, and the installed rc script, summarize.sh, testboot-return and
 #     check-be.sh are the ones of that commit;
 #   - dead-man (static): the installed rc script arms the dead-man timer (shutdown -r) before its first kldload and
-#     gates the loads on it, no rc.conf of the clone sets the timer to 0 or to a non-number, the default is a positive
-#     number of minutes, and shutdown(8) is in the clone;
+#     gates the loads on it, no rc.conf of the clone sets the timer to 0 or to a non-number or sets the shutdown, marker
+#     or bectl variable, the script has no bare shutdown call, the default is a positive number of minutes, and
+#     shutdown(8) is in the clone;
 #   - order: in the rc script the firmware kldload comes before the firmware-loaded gate, which comes before the load
 #     of nvidia.ko, and the root open of the GPU comes before the probe.
 # The dead-man proof is a static one (the script text and settings); the live proof is the one-shot's own deadman row.
@@ -36,6 +37,7 @@ PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/bin
 LC_ALL=C
 export PATH LC_ALL
 KITDIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+. "$(dirname "$0")/bare-shutdown-check.sh" || { echo "check-be.sh: cannot read bare-shutdown-check.sh next to this script" >&2; exit 2; }
 REPO=$(CDPATH= cd -- "$KITDIR/../../.." && pwd)
 SHAFILE=
 COMMIT=
@@ -106,7 +108,7 @@ linked() {	# linked <path relative to the clone>: succeeds when the path or one 
 	done
 	return 1
 }
-for _rel in boot/loader.conf boot/modules.nvco-test usr/local/share/nvidia-client-owner-test usr/local/etc/rc.d/nvidia_client_owner_testboot usr/local/etc/nvidia_client_owner_testboot.version usr/local/sbin/testboot-return etc/rc.conf.d/nvidia_client_owner_testboot sbin/shutdown; do
+for _rel in boot/loader.conf boot/modules.nvco-test usr/local/share/nvidia-client-owner-test usr/local/etc/rc.d/nvidia_client_owner_testboot usr/local/etc/nvidia_client_owner_testboot.version usr/local/etc/nvidia_client_owner_testboot.marker usr/local/sbin/testboot-return etc/rc.conf.d/nvidia_client_owner_testboot sbin/shutdown; do
 	if linked "$_rel"; then bad "$_rel is, or lies below, a symbolic link of the clone: the check would read the host's file"; fi
 done
 [ -z "$(find "$MODS" "$KROOT" -type l 2> /dev/null)" ] || bad "a symbolic link lies in /boot/modules.nvco-test or in the kit directory of the clone"
@@ -155,7 +157,19 @@ _pk=$(ls "$MNT"/boot/modules/nvidia*.ko "$MNT"/boot/kernel/nvidia*.ko 2> /dev/nu
 # the commit
 _v=$(cat "$MNT/usr/local/etc/nvidia_client_owner_testboot.version" 2> /dev/null || echo none)
 [ "$_v" = "$COMMIT" ] && ok "the clone records commit $_v" || bad "the clone records '$_v', not $COMMIT"
-for _f in nvidia_client_owner_testboot:"$RCS" summarize.sh:"$KROOT/summarize.sh" testboot-return:"$MNT/usr/local/sbin/testboot-return" check-be.sh:"$KROOT/repo/tests/ioctl/testboot/check-be.sh" gpu-detect.sh:"$KROOT/repo/tests/ioctl/testboot/gpu-detect.sh"; do
+_marker=$MNT/usr/local/etc/nvidia_client_owner_testboot.marker
+if [ ! -f "$_marker" ]; then
+	bad "the clone has no nvidia_client_owner_testboot.marker"
+elif [ "$(wc -l < "$_marker")" -ne 1 ]; then
+	bad "the dead-man marker does not hold exactly one line"
+elif [ -n "$BE" ]; then
+	_markbe=$(sed -n '1p' "$_marker")
+	[ "$_markbe" = "$BE" ] && ok "the dead-man marker names BE $BE" || bad "the dead-man marker names '$_markbe', not $BE"
+else
+	_markbe=$(sed -n '1p' "$_marker")
+	printf '%s\n' "$_markbe" | grep -Eq '^nvidia-client-owner-test-[0-9]{8}-[0-9]+$' && ok "the dead-man marker holds the test BE name $_markbe" || bad "the dead-man marker holds '$_markbe', not a test BE name"
+fi
+for _f in nvidia_client_owner_testboot:"$RCS" summarize.sh:"$KROOT/summarize.sh" testboot-return:"$MNT/usr/local/sbin/testboot-return" check-be.sh:"$KROOT/repo/tests/ioctl/testboot/check-be.sh" gpu-detect.sh:"$KROOT/repo/tests/ioctl/testboot/gpu-detect.sh" bare-shutdown-check.sh:"$KROOT/repo/tests/ioctl/testboot/bare-shutdown-check.sh"; do
 	_n=${_f%%:*}; _dst=${_f#*:}
 	if [ ! -f "$_dst" ]; then bad "$_n is not installed in the clone ($_dst)"; continue; fi
 	if ! git_ cat-file -e "$COMMIT:tests/ioctl/testboot/$_n" 2> /dev/null; then bad "$_n is not in commit $COMMIT of $REPO: run this script from a checkout that has the commit"; continue; fi
@@ -175,7 +189,11 @@ if [ -f "$RCS" ]; then
 	if [ -z "$_gate" ]; then bad "dead-man: the rc script has no line that skips the loads when the timer is not pending"
 	elif [ -n "$_first" ] && [ "$_gate" -ge "$_first" ]; then bad "dead-man: the gate on the timer (line $_gate) is after the first kldload (line $_first)"
 	else ok "dead-man: a timer that is not pending loads nothing (gate at line $_gate, before the first kldload)"; fi
-	grep -q 'shutdown -r "+\$nvidia_client_owner_testboot_deadman"' "$RCS" && ok "dead-man: the timer is shutdown -r +N" || bad "dead-man: no shutdown -r request in the rc script"
+	grep -q 'nvidia_client_owner_testboot_shutdown' "$RCS" && ok "dead-man: the rc script uses its shutdown variable" || bad "dead-man: the rc script has no nvidia_client_owner_testboot_shutdown variable"
+	# one detector, one file (bare-shutdown-check.sh, shared with the host test): any use of shutdown outside the guarded call
+	_bare=$(bare_shutdown_lines "$RCS")
+	if [ -n "$_bare" ]; then bad "dead-man: the rc script contains a bare shutdown call: $(printf '%s' "$_bare" | head -1)"; else ok "dead-man: the rc script contains no bare shutdown call"; fi
+	grep -q '"\$nvidia_client_owner_testboot_shutdown" -r "+\$nvidia_client_owner_testboot_deadman"' "$RCS" && ok "dead-man: the timer is shutdown -r +N through the shutdown variable" || bad "dead-man: no shutdown -r request through the shutdown variable in the rc script"
 	_def=$(sed -n 's/^: "\${nvidia_client_owner_testboot_deadman:=\([0-9]*\)}"$/\1/p' "$RCS")
 	case $_def in '' | 0*) bad "dead-man: the default is '$_def', not a positive number of minutes" ;; *) ok "dead-man: the default is $_def minutes" ;; esac
 	# every place rc.subr reads for this service: the rc.conf files, and etc and usr/local/etc rc.conf.d/<name> (a file, or a directory of files)
@@ -190,6 +208,11 @@ if [ -f "$RCS" ]; then
 			case ${_val#V} in '' | *[!0-9]* | 0*) _baddm="$_baddm $_f='${_val#V}'" ;; esac
 		done
 	done
+	_badov=
+	for _f in $_dmfiles; do
+		if grep -Eq '^[[:space:]]*(export[[:space:]]+)?nvidia_client_owner_testboot_(shutdown|marker|bectl)[[:space:]]*=' "$_f"; then _badov="$_badov $_f"; fi
+	done
+	[ -z "$_badov" ] && ok "dead-man: no rc.conf of the clone overrides the shutdown, marker or bectl variable" || bad "dead-man: an rc.conf file of the clone sets nvidia_client_owner_testboot_shutdown, _marker or _bectl:$_badov"
 	[ -z "$_baddm" ] && ok "dead-man: no rc.conf of the clone sets the timer to 0 or to a non-number" || bad "dead-man: the timer is set to 0 or to a non-number in:$_baddm"
 	[ -x "$MNT/sbin/shutdown" ] && ok "dead-man: shutdown(8) is in the clone" || bad "dead-man: no shutdown(8) in the clone"
 	_fw=$(lineof 'kldload "\$MODS/nvidia_gsp_ga10x_fw.ko"')
