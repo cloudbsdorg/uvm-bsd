@@ -70,6 +70,10 @@ stop_cmd=:
 : "${nvidia_client_owner_testboot_devdir:=/dev}"
 : "${nvidia_client_owner_testboot_lockfile:=/var/run/noshutdown}"
 : "${nvidia_client_owner_testboot_version:=/usr/local/etc/nvidia_client_owner_testboot.version}"
+: "${nvidia_client_owner_testboot_marker:=/usr/local/etc/nvidia_client_owner_testboot.marker}"
+: "${nvidia_client_owner_testboot_bectl:=bectl}"
+nvidia_client_owner_testboot_real_shutdown=/sbin/shutdown
+: "${nvidia_client_owner_testboot_shutdown:=$nvidia_client_owner_testboot_real_shutdown}"
 
 NORMAL=$nvidia_client_owner_testboot_normal_be
 KIT=$nvidia_client_owner_testboot_kit
@@ -80,7 +84,9 @@ STAMP=$(date -u +%Y%m%dT%H%M%SZ)
 OUT=$WORKROOT/$STAMP
 
 DM_OK=0
+DM_CHILD=
 DM_WHY="the dead-man timer was never armed"
+DM_DETAIL=
 row()	# row <name> <pass|fail|info|skip|running> <detail>
 {
 	printf '{"row":"%s","result":"%s","detail":"%s"}\n' "$1" "$2" \
@@ -94,23 +100,101 @@ running()	# running <name> <detail>: written and synced before a step that can p
 	sync
 }
 
+# dm_decide UID AUTOBOOT RC_FAST RC_ARG MARKER_LINE CURRENT_BE: the four real-case conditions, no side effects.
+# Prints the refusal reason and returns 1, or returns 0.  /etc/rc.subr strips the one/fast/force prefix, so rc_arg is
+# "start" for onestart too and cannot tell a boot from a hand run: only autoboot=yes (set by /etc/rc autoboot) and
+# rc_fast=yes (set by the faststart prefix /etc/rc uses) can.  A real boot therefore needs ALL of autoboot=yes,
+# rc_fast=yes and rc_arg=start, root, and the current boot environment named by the marker.
+dm_decide()
+{
+	_dd_uid=$1; _dd_autoboot=$2; _dd_fast=$3; _dd_arg=$4; _dd_mark=$5; _dd_cur=$6
+	if [ "$_dd_uid" != 0 ]; then echo "uid $_dd_uid is not 0"; return 1; fi
+	if [ "$_dd_autoboot" != yes ]; then echo "autoboot is '$_dd_autoboot', not yes (not the rc boot)"; return 1; fi
+	if [ "$_dd_fast" != yes ]; then echo "rc_fast is '$_dd_fast', not yes (not the rc boot)"; return 1; fi
+	if [ "$_dd_arg" != start ]; then echo "rc_arg is '$_dd_arg', not start"; return 1; fi
+	if [ -z "$_dd_mark" ]; then echo "the marker file is missing or its first line is empty"; return 1; fi
+	if [ -z "$_dd_cur" ]; then echo "the current boot environment is unknown"; return 1; fi
+	if [ "$_dd_cur" != "$_dd_mark" ]; then echo "current BE '$_dd_cur' does not match marker BE '$_dd_mark'"; return 1; fi
+	return 0
+}
+
+# deadman_allowed: when this is NOT the rc boot (autoboot is not yes), an override of the shutdown program is honoured
+# when it is an absolute path to an executable, non-setuid file; the stub branch is never taken at the rc boot, so a stray
+# rc.conf line cannot swap in a program there.  Otherwise the real program is used, and only when dm_decide allows it.
+# Decided: a root hand run (onestart) with a stub override is allowed, a stub cannot reboot; the host test pins it.
+deadman_allowed()
+{
+	DM_DETAIL=
+	if [ "${autoboot:-}" != yes ] && [ "$nvidia_client_owner_testboot_shutdown" != "$nvidia_client_owner_testboot_real_shutdown" ]; then
+		case $nvidia_client_owner_testboot_shutdown in
+		/*)
+			if [ -f "$nvidia_client_owner_testboot_shutdown" ] && [ -x "$nvidia_client_owner_testboot_shutdown" ] && [ ! -u "$nvidia_client_owner_testboot_shutdown" ]; then
+				DM_DETAIL="a stubbed shutdown is used; "
+				return 0
+			fi
+			;;
+		esac
+	fi
+	nvidia_client_owner_testboot_shutdown=$nvidia_client_owner_testboot_real_shutdown
+	_dm_marker_be=$(sed -n '1p' "$nvidia_client_owner_testboot_marker" 2> /dev/null)
+	_dm_current_be=$("$nvidia_client_owner_testboot_bectl" list -H 2>/dev/null | awk '$2 ~ /N/ {print $1}')
+	_dm_why=$(dm_decide "$(id -u)" "${autoboot:-}" "${rc_fast:-}" "${rc_arg:-}" "$_dm_marker_be" "$_dm_current_be") || {
+		DM_WHY="REFUSED: not calling shutdown: $_dm_why: this boot is NOT protected against a hang"
+		return 1
+	}
+	return 0
+}
+
+dm_child_pid()	# dm_child_pid FILE: the pid in the "[pid N]" line, digits only, or nothing
+{
+	sed -n 's/.*\[pid \([0-9][0-9]*\)\].*/\1/p' "$1" | head -1
+}
+
+dm_confirm()	# dm_confirm <pid> <uid>: 0 only when that exact pid is a shutdown owned by <uid>
+{
+	case $1 in ''|*[!0-9]*) return 1 ;; esac
+	_dm_ps=$(ps -o uid= -o comm= -p "$1" 2> /dev/null | tr -d ' ')
+	[ "$_dm_ps" = "$2shutdown" ]
+}
+
 # deadman_arm: sets DM_OK to 1 only when a timer is pending; DM_WHY says why not.  A timer disabled with 0
 # minutes is not pending: nothing is loaded without one (a hang would leave the host on the test kernel).
 deadman_arm()
 {
 	DM_OK=0
+	DM_CHILD=
 	case $nvidia_client_owner_testboot_deadman in
 	''|*[!0-9]*) DM_WHY="the setting nvidia_client_owner_testboot_deadman is '$nvidia_client_owner_testboot_deadman', not a number of minutes"; row deadman fail "$DM_WHY: no dead-man timer"; return 0 ;;
 	*[!0]*) ;;
 	*) DM_WHY="the dead-man timer is disabled (nvidia_client_owner_testboot_deadman is 0)"; row deadman fail "$DM_WHY: this boot is NOT protected against a hang"; return 0 ;;
 	esac
-	shutdown -r "+$nvidia_client_owner_testboot_deadman" "nvidia_client_owner_testboot dead-man: the machine restarts in $nvidia_client_owner_testboot_deadman minutes unless the run finishes" > /dev/null 2>&1 &
-	sleep 1
-	if [ -e "$nvidia_client_owner_testboot_lockfile" ] || ! pgrep -f "nvidia_client_owner_testboot dead-man" > /dev/null 2>&1; then
-		DM_WHY="the dead-man timer is not pending (lock file $nvidia_client_owner_testboot_lockfile, or the shutdown request failed)"
+	if ! deadman_allowed; then
+		row deadman fail "$DM_WHY"
+		return 0
+	fi
+	if [ -e "$nvidia_client_owner_testboot_lockfile" ]; then
+		DM_WHY="the dead-man timer is not pending (lock file $nvidia_client_owner_testboot_lockfile exists; the shutdown program was not called)"
+		row deadman fail "$DM_WHY: this boot is NOT protected against a hang"
+		return 0
+	fi
+	"$nvidia_client_owner_testboot_shutdown" -r "+$nvidia_client_owner_testboot_deadman" "nvidia_client_owner_testboot dead-man: the machine restarts in $nvidia_client_owner_testboot_deadman minutes unless the run finishes" > "$OUT/deadman.txt" 2>&1
+	_dm_status=$?
+	_dm_pid=$(dm_child_pid "$OUT/deadman.txt")
+	_dm_fail=
+	if [ "$_dm_status" -ne 0 ]; then
+		_dm_fail="shutdown exit status $_dm_status"
+	elif [ -z "$_dm_pid" ]; then
+		_dm_fail="no pid line"
+	elif ! dm_confirm "$_dm_pid" "$(id -u)"; then
+		_dm_fail="pid $_dm_pid is not a shutdown owned by uid $(id -u)"
+	fi
+	_dm_first=$(sed -n '1p' "$OUT/deadman.txt")
+	if [ -n "$_dm_fail" ]; then
+		DM_WHY="the dead-man timer is not pending ($_dm_fail; first line of deadman.txt: ${_dm_first:-<empty>})"
 		row deadman fail "$DM_WHY: this boot is NOT protected against a hang"
 	else
-		row deadman info "a dead-man timer is requested for $nvidia_client_owner_testboot_deadman minutes"
+		DM_CHILD=$_dm_pid
+		row deadman info "${DM_DETAIL}a dead-man timer is requested for $nvidia_client_owner_testboot_deadman minutes as pid $DM_CHILD"
 		DM_OK=1
 	fi
 	sync
@@ -118,7 +202,17 @@ deadman_arm()
 
 deadman_cancel()
 {
-	pkill -f "nvidia_client_owner_testboot dead-man" > /dev/null 2>&1 || :
+	case $DM_CHILD in
+	''|*[!0-9]*)
+		row deadman-cancel fail "no exact dead-man shutdown pid was confirmed; killed nothing"
+		return 0
+		;;
+	esac
+	if ! dm_confirm "$DM_CHILD" "$(id -u)"; then
+		row deadman-cancel fail "dead-man pid $DM_CHILD is no longer a shutdown owned by uid $(id -u); killed nothing"
+		return 0
+	fi
+	kill "$DM_CHILD" > /dev/null 2>&1
 }
 
 # check_hashes <list file> <dir>: each installed module has the full literal sha256 the list gives its staged file

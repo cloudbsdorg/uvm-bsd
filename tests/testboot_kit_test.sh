@@ -22,10 +22,78 @@ KIT=$REPO/tests/ioctl/testboot
 WORK=${GB10_WORK:-$HOME/work/gb10}
 mkdir -p "$WORK/tmp"
 T=$(mktemp -d "$WORK/tmp/testboot-kit.XXXXXXXX")
-trap 'rm -rf "$T"' EXIT HUP INT QUIT TERM
+cleanup() {
+	if [ -f "$T/shutdown.pids" ]; then
+		while IFS= read -r _pid; do
+			case $_pid in
+			''|*[!0-9]*) ;;
+			*) [ "$(ps -o uid= -o comm= -p "$_pid" 2> /dev/null | tr -d ' ')" = "$(id -u)shutdown" ] && kill "$_pid" > /dev/null 2>&1 || : ;;
+			esac
+		done < "$T/shutdown.pids"
+	fi
+	rm -rf "$T"
+}
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 131' QUIT
+trap 'exit 143' TERM
 rc=0
 ok() { echo "ok   $*"; }
 bad() { echo "FAIL $*"; rc=1; }
+
+# ---- (guard) no path reaches /sbin/shutdown during host tests
+# G1: sentinels and the non-setuid stub precede every kit run.  The stub follows shutdown's foreground protocol:
+# its child is a copy of sleep named shutdown, so ps confirms that exact pid without matching argument lists.
+SENT=$T/sent
+mkdir -p "$SENT" "$T/shutdown-stub" "$T/shutdown-child"
+cat > "$SENT/shutdown" <<'EOF'
+#!/bin/sh
+printf 'REACHED %s %s\n' "$0" "$*" >> "$SENT/hits"
+exit 99
+EOF
+cp /bin/sleep "$T/shutdown-child/shutdown"
+cat > "$T/shutdown-stub/stub-shutdown" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >> "$SHUTDOWN_STUB_ARGS"
+if [ -n "${FAKE_NO_DEADMAN:-}" ]; then
+	echo 'shutdown: request refused by the test'
+	exit 1
+fi
+"$SHUTDOWN_STUB_CHILD" 600 &
+_pid=$!
+# the child is a file already named shutdown, but between fork and exec its name is still the stub's: poll ps itself
+# (bounded, no timer) until ps says shutdown, else fail
+_i=0
+while [ "$(ps -o comm= -p "$_pid" 2> /dev/null | tr -d ' ')" != shutdown ]; do
+	_i=$((_i + 1))
+	if [ "$_i" -ge 2000 ]; then echo 'shutdown: the stub child never became shutdown'; kill "$_pid" > /dev/null 2>&1; exit 1; fi
+done
+printf '%s\n' "$_pid" >> "$SHUTDOWN_STUB_PIDS"
+printf '%s\n' "$_pid" > "$SHUTDOWN_STUB_LAST"
+printf 'shutdown: [pid %s]\n' "$_pid"
+exit 0
+EOF
+chmod +x "$SENT/shutdown" "$T/shutdown-stub/stub-shutdown" "$T/shutdown-child/shutdown"
+: > "$T/shutdown.args"
+: > "$T/shutdown.pids"
+SHUTDOWN_STUB_ARGS=$T/shutdown.args
+SHUTDOWN_STUB_PIDS=$T/shutdown.pids
+SHUTDOWN_STUB_LAST=$T/shutdown.lastpid
+SHUTDOWN_STUB_CHILD=$T/shutdown-child/shutdown
+nvidia_client_owner_testboot_shutdown=$T/shutdown-stub/stub-shutdown
+export SENT SHUTDOWN_STUB_ARGS SHUTDOWN_STUB_PIDS SHUTDOWN_STUB_LAST SHUTDOWN_STUB_CHILD nvidia_client_owner_testboot_shutdown
+PATH=$SENT:$PATH
+export PATH
+if [ -z "$nvidia_client_owner_testboot_shutdown" ] || [ "$nvidia_client_owner_testboot_shutdown" = /sbin/shutdown ] || [ ! -x "$nvidia_client_owner_testboot_shutdown" ] || [ -u "$nvidia_client_owner_testboot_shutdown" ]; then
+	echo 'guard: the harness left nvidia_client_owner_testboot_shutdown at /sbin/shutdown' >&2
+	exit 1
+fi
+ok "G1: PATH sentinel and non-setuid exact-pid shutdown stub are armed before any kit run"
+pid_is_shutdown() {
+	case $1 in ''|*[!0-9]*) return 1 ;; esac
+	[ "$(ps -o uid= -o comm= -p "$1" 2> /dev/null | tr -d ' ')" = "$(id -u)shutdown" ]
+}
 
 # ---- fixtures: staged modules and their list
 STAGE=$T/stage
@@ -98,6 +166,18 @@ grep -q '^foo_testboot_enable="NO"$' "$M/etc/rc.conf.d/other" && ok "another tes
 cmp -s "$KIT/testboot-return" "$M/usr/local/sbin/testboot-return" && ok "testboot-return is installed" || bad "testboot-return is not installed"
 [ -f "$M/usr/local/share/nvidia-client-owner-test/repo/tests/ioctl/run_owner_boot.sh" ] && [ -f "$M/usr/local/share/nvidia-client-owner-test/SHA256-v6.txt" ] && ok "the kit and the hash list are in the clone" || bad "the kit or the hash list is missing from the clone"
 grep -q 'nvidia-client-owner-test-20261122-1' "$T/be.log" && ok "the clone is named nvidia-client-owner-test-<date>-<n>" || bad "the clone name is wrong"
+# G6: the staged BE's name is its dead-man marker, and assembly never invokes shutdown.
+MARKER=$M/usr/local/etc/nvidia_client_owner_testboot.marker
+if [ "$(cat "$MARKER" 2> /dev/null)" = nvidia-client-owner-test-20261122-1 ] && [ "$(stat -f %Lp "$MARKER" 2> /dev/null)" = 444 ]; then
+	ok "G6: make-be.sh writes the clone's BE name in a mode-0444 marker"
+else
+	bad "G6: make-be.sh did not write the BE marker with mode 0444"
+fi
+if sed 's/#.*//' "$KIT/make-be.sh" | grep -Eq '(^|[[:space:];&|])(/sbin/shutdown|shutdown)([[:space:]]|$)'; then
+	bad "G6: make-be.sh mentions shutdown as a command"
+else
+	ok "G6: make-be.sh never mentions shutdown as a command"
+fi
 [ ! -e "$T/mnt1/kit.tar" ] && ok "the scratch archive is removed" || bad "the scratch archive is left"
 
 # ---- 2. --activate arms; a failed activation says so
@@ -224,6 +304,9 @@ pl_commit() { echo 0000000000000000000000000000000000000000 > "$1/usr/local/etc/
 pl_rc() { printf '# changed\n' >> "$1/usr/local/etc/rc.d/nvidia_client_owner_testboot"; }
 pl_deadman_zero() { printf 'nvidia_client_owner_testboot_deadman="0"\n' >> "$1/etc/rc.conf.d/nvidia_client_owner_testboot"; }
 pl_deadman_text() { printf 'nvidia_client_owner_testboot_deadman="soon"\n' >> "$1/etc/rc.conf.d/nvidia_client_owner_testboot"; }
+pl_override_shutdown() { printf 'nvidia_client_owner_testboot_shutdown="/bin/true"\n' >> "$1/etc/rc.conf.d/nvidia_client_owner_testboot"; }
+pl_override_marker() { printf 'nvidia_client_owner_testboot_marker="/nonexistent"\n' >> "$1/etc/rc.conf"; }
+pl_override_bectl() { printf 'nvidia_client_owner_testboot_bectl="true"\n' >> "$1/etc/rc.conf.local"; }
 pl_no_shutdown() { rm -f "$1/sbin/shutdown"; }
 pl_disabled() { sed 's/="YES"/="NO"/' "$1/etc/rc.conf.d/nvidia_client_owner_testboot" > "$1/rcd.new"; mv "$1/rcd.new" "$1/etc/rc.conf.d/nvidia_client_owner_testboot"; }
 pl_none() { :; }
@@ -243,6 +326,9 @@ cbplant rc-not-the-committed pl_rc
 cbplant deadman-zero pl_deadman_zero
 cbplant deadman-not-a-number pl_deadman_text
 cbplant no-shutdown pl_no_shutdown
+cbplant override-shutdown-var pl_override_shutdown
+cbplant override-marker-var pl_override_marker
+cbplant override-bectl-var pl_override_bectl
 cbplant one-shot-disabled pl_disabled
 # a different rc script in the clone (the commit check also fires): the dead-man or order check must name it too
 rcplant() {	# rcplant <name> <sed>
@@ -255,6 +341,7 @@ rcplant() {	# rcplant <name> <sed>
 	rm -rf "$_t"
 }
 rcplant deadman-ungated 's/^\tif \[ "\$DM_OK" != 1 \]; then ok=0; .*$/\t:/'
+rcplant bare-call-after-if 's/^\t"\$nvidia_client_owner_testboot_shutdown" -r /\tif ! shutdown -r /' 's/^\(\tif ! shutdown -r .*\) > "\$OUT\/deadman.txt" 2>&1$/\1 > "$OUT\/deadman.txt" 2>\&1; then :; fi/'
 rcplant deadman-never-armed 's/^\tdeadman_arm$/\t:/'
 rcplant root-open-removed 's/^\t*running root-open /\t\trunning root-skipped /'
 rcplant firmware-never-loaded 's/kldload "\$MODS\/nvidia_gsp_ga10x_fw.ko"/kldload "$MODS\/nvidia_gsp_ga10x_fw-x.ko"/'
@@ -460,12 +547,6 @@ case "$*" in
 esac
 exit 0
 EOF
-cat > "$T/rc/bin/pgrep" <<'EOF'
-#!/bin/sh
-echo "pgrep $*" >> "$FAKE_LOG"
-[ -z "${FAKE_NO_DEADMAN:-}" ] || exit 1
-exit 0
-EOF
 cat > "$T/rc/bin/pciconf" <<'EOF'
 #!/bin/sh
 f=$FAKE_PCI
@@ -475,7 +556,7 @@ if [ -n "${FAKE_FLIP_AFTER:-}" ] && [ -n "${FAKE_LOG:-}" ]; then
 fi
 if [ "$1" = -l ] && [ -n "${2:-}" ]; then grep "^$2@" "$f"; else cat "$f"; fi
 EOF
-for c in dmesg bectl shutdown pkill sync; do
+for c in dmesg bectl sync; do
 	cat > "$T/rc/bin/$c" <<EOF
 #!/bin/sh
 echo "$c \$*" >> "\$FAKE_LOG"
@@ -494,16 +575,20 @@ run_rc_command() { nvidia_client_owner_testboot_start; wait; }
 EOF
 RCS=$KIT/nvidia_client_owner_testboot
 runrc() {	# runrc <script> <verdict> [uvm fails]: the script is a copy pointed at fakes
+	(
 	rm -rf "$T/rc/work" "$T/rc/copyout" "$T/rc/fallback"; mkdir -p "$T/rc/work" "$T/rc/copyout"
-	: > "$T/rc/log"; rm -f "$T/rc/log.fw" "$T/rc/log.pcicalls"
+	: > "$T/rc/log"; rm -f "$T/rc/log.fw" "$T/rc/log.pcicalls" "$SHUTDOWN_STUB_LAST"
+	: > "$SHUTDOWN_STUB_ARGS"
 	sed -e "s#/etc/rc.subr#$T/rc/rc.subr#" "$1" > "$T/rc/script.sh"
+	if [ "${RC_UNSET_SHUTDOWN:-0}" = 1 ]; then unset nvidia_client_owner_testboot_shutdown; fi
 	FAKE_LOG=$T/rc/log FAKE_VERDICT=$2 FAKE_UVM_FAILS=${3:-} PATH=$T/rc/bin:$PATH \
 	    nvidia_client_owner_testboot_kit=$T/rc/kit nvidia_client_owner_testboot_mods=$T/rc/mods \
 	    nvidia_client_owner_testboot_work=${RC_WORK:-$T/rc/work} nvidia_client_owner_testboot_copyout=$T/rc/copyout \
 	    nvidia_client_owner_testboot_return=$T/rc/bin/testboot-return nvidia_client_owner_testboot_cudarun=/kit/cuda.sh \
-	    nvidia_client_owner_testboot_devdir=${RC_LAYOUT:-$LAY/amp001}/dev FAKE_PCI=${RC_LAYOUT:-$LAY/amp001}/pci FAKE_PARENTS=${RC_LAYOUT:-$LAY/amp001}/par FAKE_FLIP_AFTER=${FAKE_FLIP_AFTER-} nvidia_client_owner_testboot_version=/nonexistent nvidia_client_owner_testboot_lockfile=/nonexistent/lock \
+	    nvidia_client_owner_testboot_devdir=${RC_LAYOUT:-$LAY/amp001}/dev FAKE_PCI=${RC_LAYOUT:-$LAY/amp001}/pci FAKE_PARENTS=${RC_LAYOUT:-$LAY/amp001}/par FAKE_FLIP_AFTER=${FAKE_FLIP_AFTER-} nvidia_client_owner_testboot_version=/nonexistent nvidia_client_owner_testboot_lockfile=${RC_LOCKFILE:-/nonexistent/lock} \
 	    nvidia_client_owner_testboot_deadman=${RC_DEADMAN:-1} nvidia_client_owner_testboot_fallback=${RC_FALLBACK:-$T/rc/fallback} \
-	    sh "$T/rc/script.sh" start > "$T/rc/out" 2>&1
+	    sh "$T/rc/script.sh" "${RC_ARG:-start}" > "$T/rc/out" 2>&1
+	)
 }
 runrc "$RCS" PASS
 RUN=$(ls -d "$T/rc/work"/2* 2>/dev/null | head -1)
@@ -531,12 +616,28 @@ grep -q '"row":"test-uids","result":"pass","detail":"uids 60003 60004 60001 6000
 grep -q '"row":"done","result":"info"' "$RUN/results.jsonl" && ok "rc: the done row is written" || bad "rc: no done row"
 tail -1 "$RUN/summary.txt" | grep -q '^GO$' && ok "rc: a PASS run is read as GO" || { cat "$RUN/summary.txt"; bad "rc: a PASS run is not GO"; }
 [ -f "$T/rc/copyout"/*/summary.txt ] && ok "rc: the run is copied out" || bad "rc: the run is not copied out"
-grep -q '^pkill' "$T/rc/log" && bad "rc: the dead-man timer was cancelled although the return was not held" || ok "rc: the dead-man timer stays pending after a return that exited 0"
-# a held return (exit 3) cancels the dead-man timer; a failed return (exit 2) leaves it
+_normal_pid=$(cat "$SHUTDOWN_STUB_LAST" 2> /dev/null)
+case $_normal_pid in ''|*[!0-9]*) bad "rc: the normal-return stub recorded no numeric dead-man pid" ;; esac
+if pid_is_shutdown "$_normal_pid" && grep -q '"row":"deadman","result":"info".*a stubbed shutdown is used' "$RUN/results.jsonl"; then ok "rc: a normal return leaves the confirmed exact-pid stub dead-man pending"; else bad "rc: the normal return did not leave the confirmed stub child pending"; fi
+# A held return (exit 3) kills only the confirmed pid; a same-name decoy remains alive.
+"$SHUTDOWN_STUB_CHILD" 600 &
+_decoy=$!
+printf '%s\n' "$_decoy" >> "$SHUTDOWN_STUB_PIDS"
 with FAKE_RETURN_RC=3 runrc "$RCS" PASS
-grep -q '^pkill' "$T/rc/log" && ok "rc: a held return (exit 3) cancels the dead-man timer" || bad "rc: a held return left the dead-man timer"
+_held_pid=$(cat "$SHUTDOWN_STUB_LAST" 2> /dev/null)
+RUN=$(ls -dt "$T/rc/work"/2* | head -1)
+# F6: the recorded child must be a real number that the stub started and that the deadman row names (so the kill is not vacuous)
+case $_held_pid in ''|*[!0-9]*) bad "rc: the held-return stub recorded no numeric dead-man pid" ;; *)
+	if grep -qx "$_held_pid" "$SHUTDOWN_STUB_PIDS" && grep -q "\"row\":\"deadman\",\"result\":\"info\".*as pid $_held_pid\"" "$RUN/results.jsonl" && ! grep -q '"row":"deadman-cancel"' "$RUN/results.jsonl"; then ok "rc: the held-return dead-man pid $_held_pid was a started, confirmed shutdown and the cancel confirmed it"; else bad "rc: the held-return dead-man pid is not the confirmed started child"; fi ;;
+esac
+if ! pid_is_shutdown "$_held_pid"; then ok "rc: a held return (exit 3) kills the confirmed dead-man pid"; else bad "rc: a held return left dead-man pid $_held_pid alive"; fi
+if pid_is_shutdown "$_decoy"; then ok "rc: exact-pid cancel leaves a same-name decoy alive"; else bad "rc: exact-pid cancel killed the same-name decoy"; fi
+kill "$_decoy" > /dev/null 2>&1 || :
+wait "$_decoy" 2> /dev/null || :
 with FAKE_RETURN_RC=2 runrc "$RCS" PASS
-grep -q '^pkill' "$T/rc/log" && bad "rc: a failed return cancelled the dead-man timer" || ok "rc: a failed return (exit 2) leaves the dead-man timer pending"
+_failed_pid=$(cat "$SHUTDOWN_STUB_LAST" 2> /dev/null)
+case $_failed_pid in ''|*[!0-9]*) bad "rc: the failed-return stub recorded no numeric dead-man pid" ;; *) ok "rc: the failed-return stub recorded numeric dead-man pid $_failed_pid" ;; esac
+if pid_is_shutdown "$_failed_pid"; then ok "rc: a failed return (exit 2) leaves the exact dead-man pid pending"; else bad "rc: a failed return killed the dead-man pid"; fi
 # a module that fails to load: still returns, and NO-GO
 runrc "$RCS" PASS yes
 tail -1 "$T/rc/log" | grep -q '^testboot-return cloudbsd-rx7600$' && ok "rc: a failed load still ends with testboot-return" || bad "rc: a failed load did not end with testboot-return"
@@ -574,6 +675,278 @@ RUN=$(newest); tail -1 "$RUN/summary.txt" | grep -q '^KIT$' && ok "rc: a disable
 with RC_DEADMAN=10m runrc "$RCS" PASS
 grep -q '^kldload' "$T/rc/log" && bad "rc: modules were loaded with a bad dead-man setting" || ok "rc: a bad dead-man setting loads nothing"
 RUN=$(newest); grep -q '"row":"load-skipped-no-deadman".*not a number' "$RUN/results.jsonl" && ok "rc: the reason says the setting is not a number" || bad "rc: the reason does not name the setting"
+
+# G3: run the real-default refusal only after replacing its one real path with a second sentinel.
+SENT2=$T/sent2
+mkdir -p "$SENT2"
+cat > "$SENT2/real-shutdown" <<'XEOF'
+#!/bin/sh
+printf 'REAL REACHED %s\n' "$*" >> "$SENT2/hits"
+exit 99
+XEOF
+chmod +x "$SENT2/real-shutdown"
+export SENT2
+G3RC=$T/rc-guard-real-default
+G3OK=0
+if [ "$(grep -c '/sbin/shutdown' "$RCS")" = 1 ]; then ok "G3: the original rc has exactly one real shutdown path"; else bad "G3: the original rc does not have exactly one real shutdown path"; fi
+sed "s|/sbin/shutdown|$SENT2/real-shutdown|" "$RCS" > "$G3RC"
+if [ "$(grep -c '/sbin/shutdown' "$RCS")" = 1 ] && ! grep -q '/sbin/shutdown' "$G3RC" && ! cmp -s "$RCS" "$G3RC"; then
+	G3OK=1
+	ok "G3: the refusal copy replaces the real path and differs from the original"
+else
+	bad "G3: the sentinel substitution is not real; the copy is not run"
+fi
+if [ "$G3OK" = 1 ] && [ "$(id -u)" != 0 ]; then
+	with RC_UNSET_SHUTDOWN=1 with RC_ARG=onestart runrc "$G3RC" PASS
+	RUN=$(newest)
+	if [ ! -s "$SENT2/hits" ] && grep -q '"row":"deadman","result":"fail","detail":"REFUSED: not calling shutdown: uid [^0].*this boot is NOT protected against a hang' "$RUN/results.jsonl"; then
+		ok "G3: the unset real default is refused as non-root, names uid, carries the not-protected suffix, and never reaches the sentinel"
+	else
+		cat "$RUN/results.jsonl"; bad "G3: the real default was not safely refused with a uid reason"
+	fi
+	# F1/F2: faking the whole boot (autoboot, rc_fast, rc_arg) cannot bypass the uid refusal
+	with RC_UNSET_SHUTDOWN=1 with autoboot=yes with rc_fast=yes with rc_arg=start runrc "$G3RC" PASS
+	RUN=$(newest)
+	if [ ! -s "$SENT2/hits" ] && grep -q '"row":"deadman","result":"fail","detail":"REFUSED: not calling shutdown: uid [^0]' "$RUN/results.jsonl"; then
+		ok "G3: faking autoboot, rc_fast and rc_arg does not bypass the uid refusal"
+	else
+		bad "G3: the boot-condition control reached the sentinel or lost the uid refusal"
+	fi
+	# F1: at an rc boot (autoboot=yes) a stub override is ignored: the real conditions apply and the stub is not called
+	: > "$SHUTDOWN_STUB_ARGS"
+	with autoboot=yes with rc_fast=yes with rc_arg=start runrc "$G3RC" PASS
+	RUN=$(newest)
+	if [ ! -s "$SENT2/hits" ] && [ ! -s "$SHUTDOWN_STUB_ARGS" ] && grep -q '"row":"deadman","result":"fail","detail":"REFUSED: not calling shutdown: uid [^0]' "$RUN/results.jsonl" && ! grep -q 'stubbed shutdown' "$RUN/results.jsonl"; then
+		ok "G3/F1: a stub override at an rc boot is ignored: refused as non-root, stub and sentinel untouched"
+	else
+		cat "$RUN/results.jsonl"; bad "G3/F1: the stub override was honoured at an rc boot"
+	fi
+	# the same stub override on a hand run (no autoboot) is honoured: the control that the refusal above is the boot rule
+	with RC_ARG=onestart runrc "$G3RC" PASS
+	RUN=$(newest)
+	if [ -s "$SHUTDOWN_STUB_ARGS" ] && grep -q 'a stubbed shutdown is used' "$RUN/results.jsonl"; then
+		ok "G3/F1: control: the same stub override on a hand run is used"
+	else
+		bad "G3/F1: control: the stub override on a hand run was not used"
+	fi
+	# fix 3 G3: overrides that are not a usable stub fall to the real conditions: refused, stub log empty, no sentinel hit
+	cp "$T/shutdown-stub/stub-shutdown" "$T/shutdown-stub/stub-suid"; chmod u+s "$T/shutdown-stub/stub-suid"	# a mode on our own copy; the real shutdown is untouched
+	if [ -u "$T/shutdown-stub/stub-suid" ]; then
+		ovr_case() {	# ovr_case <name> <value>
+			: > "$SHUTDOWN_STUB_ARGS"
+			with nvidia_client_owner_testboot_shutdown="$2" with RC_ARG=onestart runrc "$G3RC" PASS
+			RUN=$(newest)
+			if [ ! -s "$SENT2/hits" ] && [ ! -s "$SHUTDOWN_STUB_ARGS" ] && [ ! -s "$SENT/hits" ] && grep -q '"row":"deadman","result":"fail","detail":"REFUSED: not calling shutdown: uid [^0]' "$RUN/results.jsonl" && ! grep -q 'stubbed shutdown' "$RUN/results.jsonl"; then
+				ok "G3: the override '$1' is refused as non-root: REFUSED row, empty stub log, no sentinel hit"
+			else
+				cat "$RUN/results.jsonl"; bad "G3: the override '$1' was not refused"
+			fi
+			rm -f "$SENT2/hits" "$SENT/hits"
+		}
+		ovr_case "true (not an absolute path)" true
+		ovr_case "a relative path" "shutdown-stub/stub-shutdown"
+		ovr_case "an absolute path of a setuid file" "$T/shutdown-stub/stub-suid"
+	else
+		bad "G3: could not make the setuid stub copy for the override cases"
+	fi
+fi
+rm -f "$SENT2/hits"
+
+# F4: a lock file stops the dead-man before shutdown is called (no orphaned pending reboot)
+: > "$T/rc/lockfile"
+: > "$SHUTDOWN_STUB_ARGS"
+with RC_LOCKFILE=$T/rc/lockfile runrc "$RCS" PASS
+RUN=$(newest)
+if [ ! -s "$SHUTDOWN_STUB_ARGS" ] && grep -q '"row":"deadman","result":"fail","detail":"[^"]*lock file [^"]*exists[^"]*this boot is NOT protected against a hang' "$RUN/results.jsonl"; then
+	ok "F4: with the lock file present shutdown is not called and the deadman row fails"
+else
+	cat "$RUN/results.jsonl"; bad "F4: shutdown was called, or no lock-file fail row, with the lock file present"
+fi
+rm -f "$T/rc/lockfile"
+
+# F3: the pure decision function, extracted from the rc script and run on a table
+dm_extract() { sed -n '/^dm_decide()$/,/^}$/p' "$1"; }
+dm_table() {	# dm_table <rc file>: 0 when every row of the table gives the expected result
+	dm_extract "$1" > "$T/dm_decide.sh"
+	[ -s "$T/dm_decide.sh" ] || return 1
+	(
+	. "$T/dm_decide.sh"
+	_bad=0
+	row_() {	# row_ <expect 0|1> UID AUTOBOOT RC_FAST RC_ARG MARKER CURRENT
+		_e=$1; shift
+		_out=$(dm_decide "$@"); _r=$?
+		[ "$_r" = "$_e" ] || _bad=1
+		if [ "$_e" = 1 ] && [ -z "$_out" ]; then _bad=1; fi
+		if [ "$_e" = 0 ] && [ -n "$_out" ]; then _bad=1; fi
+	}
+	row_ 0 0 yes yes start be1 be1
+	row_ 1 1001 yes yes start be1 be1
+	row_ 1 0 '' yes start be1 be1
+	row_ 1 0 no yes start be1 be1
+	row_ 1 0 yes '' start be1 be1
+	row_ 1 0 yes no start be1 be1
+	row_ 1 0 yes yes stop be1 be1
+	row_ 1 0 yes yes onestart be1 be1
+	row_ 1 0 yes yes start '' be1
+	row_ 1 0 yes yes start be1 be2
+	row_ 1 0 yes yes start be1 ''
+	[ "$_bad" = 0 ]
+	)
+}
+if dm_table "$RCS"; then ok "F3: dm_decide table: every single-condition failure refuses with a reason, only the all-true row returns 0"; else bad "F3: dm_decide table has a wrong result on the real rc"; fi
+dm_mutant() {	# dm_mutant <name> <sed>: the table must go wrong on the mutant
+	sed -e "$2" "$RCS" > "$T/rc-mutant-dm-$1"
+	if cmp -s "$RCS" "$T/rc-mutant-dm-$1"; then bad "control: mutant dm-$1 changed nothing"
+	elif dm_table "$T/rc-mutant-dm-$1"; then bad "control: mutant dm-$1 is not seen"
+	else ok "control: mutant dm-$1 is seen"; fi
+}
+dm_mutant uid-dropped 's/^\tif \[ "\$_dd_uid" != 0 \]; then/\tif false; then/'
+dm_mutant autoboot-flipped 's/^\tif \[ "\$_dd_autoboot" != yes \]; then/\tif [ "$_dd_autoboot" = yes ]; then/'
+dm_mutant rcfast-dropped 's/^\tif \[ "\$_dd_fast" != yes \]; then/\tif false; then/'
+dm_mutant be-compare-dropped 's/^\tif \[ "\$_dd_cur" != "\$_dd_mark" \]; then/\tif false; then/'
+
+# One bare-call detector for check-be.sh and this test: bare-shutdown-check.sh (bare_shutdown_lines FILE prints the offending lines)
+. "$KIT/bare-shutdown-check.sh"
+bare_shutdown() { [ -n "$(bare_shutdown_lines "$1")" ]; }
+# G4: static guard contract, also used as the detector for planted mutants M3 and M4; GS_WHY names the rule that failed.
+guard_static() {
+	_gs=$1; GS_WHY=
+	[ "$(grep -c '/sbin/shutdown' "$_gs")" = 1 ] || { GS_WHY=real-literal; return 1; }
+	[ "$(grep -c '^nvidia_client_owner_testboot_real_shutdown=/sbin/shutdown$' "$_gs")" = 1 ] || { GS_WHY=real-assignment; return 1; }
+	_gsbody=$(sed -n '/^dm_decide()$/,/^}$/p;/^deadman_allowed()$/,/^}$/p' "$_gs")
+	[ -n "$_gsbody" ] || { GS_WHY=no-guard; return 1; }
+	for _needle in 'id -u' 'autoboot' 'rc_fast' 'rc_arg' 'nvidia_client_owner_testboot_marker'; do
+		printf '%s\n' "$_gsbody" | grep -qF "$_needle" || { GS_WHY="missing-$_needle"; return 1; }
+	done
+	printf '%s\n' "$_gsbody" | grep -Eq 'bectl" list -H' || { GS_WHY=missing-bectl; return 1; }
+	printf '%s\n' "$_gsbody" | grep -qF '[ "$_dd_cur" != "$_dd_mark" ]' || { GS_WHY=missing-be-compare; return 1; }
+	[ "$(grep -c '"\$nvidia_client_owner_testboot_shutdown" -r' "$_gs")" = 1 ] || { GS_WHY=call-count; return 1; }
+	if bare_shutdown "$_gs"; then GS_WHY=bare-call; return 1; fi
+	if sed 's/#.*//' "$_gs" | grep -Eq '(^|[^A-Za-z0-9_])(pgrep|pkill)([^A-Za-z0-9_]|$)'; then GS_WHY=pattern-kill; return 1; fi
+	return 0
+}
+if guard_static "$RCS"; then ok "G4: the rc guard (id -u, autoboot, rc_fast, rc_arg, marker, BE comparison), single variable call and exact-pid-only contract pass"; else bad "G4: the rc static guard contract failed ($GS_WHY)"; fi
+
+# F11: the PATH sentinel must be first and executable before any mutant that makes a bare call runs
+sentinel_first() {
+	case $PATH in "$SENT":*) ;; *) return 1 ;; esac
+	[ -x "$SENT/shutdown" ] && [ "$(command -v shutdown)" = "$SENT/shutdown" ]
+}
+# G5/M1: replacing the variable call with a bare command must hit the PATH sentinel, proving G2 can fail.
+M1=$T/rc-mutant-M1
+sed 's/"\$nvidia_client_owner_testboot_shutdown" -r/shutdown -r/' "$RCS" > "$M1"
+if cmp -s "$RCS" "$M1"; then
+	bad "control: mutant M1 changed nothing"
+elif ! sentinel_first; then
+	bad "F11: the PATH sentinel is not first with an executable shutdown: mutant M1 is not run"
+else
+	if [ -s "$SENT/hits" ]; then bad "G2: a non-mutant rc run reached the PATH sentinel before M1"; fi
+	runrc "$M1" PASS
+	if [ -s "$SENT/hits" ] && grep -q '^REACHED ' "$SENT/hits"; then ok "control: mutant M1 is seen"; else bad "control: mutant M1 is not seen"; fi
+	rm -f "$SENT/hits"
+fi
+# G5/M2: removing the refusal from the sentinel-substituted copy must hit only SENT2.
+M2=$T/rc-mutant-M2
+sed 's/^\tif ! deadman_allowed; then$/\tif false; then/' "$G3RC" > "$M2"
+if [ "$G3OK" != 1 ]; then
+	bad "control: mutant M2 not run (the G3 sentinel copy is not valid)"
+elif cmp -s "$G3RC" "$M2"; then
+	bad "control: mutant M2 changed nothing"
+else
+	with RC_UNSET_SHUTDOWN=1 with RC_ARG=onestart runrc "$M2" PASS
+	if [ -s "$SENT2/hits" ] && grep -q '^REAL REACHED' "$SENT2/hits"; then ok "control: mutant M2 is seen"; else bad "control: mutant M2 is not seen"; fi
+	rm -f "$SENT2/hits"
+fi
+# G5/M3: a pattern kill planted in deadman_cancel must fail ONLY the pattern-kill rule of the G4 static detector.
+M3=$T/rc-mutant-M3
+awk '
+/^deadman_cancel\(\)$/ { in_cancel=1 }
+in_cancel && /^}/ { print "\tpkill -f \"nvidia_client_owner_testboot dead-man\" > /dev/null 2>&1 || :"; in_cancel=0 }
+{ print }
+' "$RCS" > "$M3"
+if cmp -s "$RCS" "$M3"; then
+	bad "control: mutant M3 changed nothing"
+elif guard_static "$M3"; then
+	bad "control: mutant M3 is not seen"
+elif [ "$GS_WHY" = pattern-kill ]; then
+	ok "control: mutant M3 is seen (only the pattern-kill rule failed)"
+else
+	bad "control: mutant M3 failed for another reason ($GS_WHY)"
+fi
+# G5/M4: the call rewritten as `if ! shutdown ...` is a bare call the detector must see, and the PATH sentinel is reached
+M4=$T/rc-mutant-M4
+sed 's/^\t"\$nvidia_client_owner_testboot_shutdown" -r /\tif ! shutdown -r /; s/^\(\tif ! shutdown -r .*\) > "\$OUT\/deadman.txt" 2>&1$/\1 > "$OUT\/deadman.txt" 2>\&1; then :; fi/' "$RCS" > "$M4"
+if cmp -s "$RCS" "$M4"; then
+	bad "control: mutant M4 changed nothing"
+elif guard_static "$M4"; then
+	bad "control: mutant M4 is not seen by the static detector"
+elif ! bare_shutdown "$M4"; then
+	bad "control: mutant M4 is not a bare call for the detector"
+elif ! sentinel_first; then
+	bad "F11: the PATH sentinel is not first with an executable shutdown: mutant M4 is not run"
+else
+	runrc "$M4" PASS
+	if [ -s "$SENT/hits" ] && grep -q '^REACHED ' "$SENT/hits"; then ok "control: mutant M4 is seen (detector and PATH sentinel)"; else bad "control: mutant M4 did not reach the PATH sentinel"; fi
+	rm -f "$SENT/hits"
+fi
+# fix 3 G1: the detector sees shutdown inside quotes, and flags nothing in the clean cases
+BD_CLEAN=$T/bd-clean.sh
+cat > "$BD_CLEAN" <<'BDEOF'
+# a comment that says shutdown -r now
+nvidia_client_owner_testboot_real_shutdown=/sbin/shutdown
+	"$nvidia_client_owner_testboot_shutdown" -r "+5" "kit dead-man: shutdown -r now unless the run finishes" > "$OUT/deadman.txt" 2>&1
+	row deadman fail "REFUSED: not calling shutdown: shutdown -r now; shutdown now"
+	echo "run shutdown -r now by hand"
+	printf '%s\n' 'shutdown -r now'
+	DM_DETAIL="a stubbed shutdown is used; "
+BDEOF
+if [ -z "$(bare_shutdown_lines "$BD_CLEAN")" ] && [ -z "$(bare_shutdown_lines "$RCS")" ]; then ok "G1: detector control: the allowlisted lines, comments, row/echo/printf messages and the real rc script are not flagged"; else bare_shutdown_lines "$BD_CLEAN"; bad "G1: detector control: a clean case was flagged"; fi
+bd_mutant() {	# bd_mutant <name> <line>: the clean control plus one added line must be seen
+	cp "$BD_CLEAN" "$T/bd-$1.sh"; printf '%s\n' "$2" >> "$T/bd-$1.sh"
+	cp "$RCS" "$T/rc-mutant-$1"; printf '%s\n' "$2" >> "$T/rc-mutant-$1"
+	if cmp -s "$BD_CLEAN" "$T/bd-$1.sh" || cmp -s "$RCS" "$T/rc-mutant-$1"; then bad "control: mutant $1 changed nothing"
+	elif [ -n "$(bare_shutdown_lines "$T/bd-$1.sh")" ] && [ -n "$(bare_shutdown_lines "$T/rc-mutant-$1")" ] && ! guard_static "$T/rc-mutant-$1"; then ok "control: mutant $1 is seen (detector on the control file and on the rc copy; the line is never run)"
+	else bad "control: mutant $1 is not seen"; fi
+}
+bd_mutant M6 '	sh -c "shutdown -r now"'
+bd_mutant M7 "	eval 'shutdown -r now'"
+bd_mutant M8 '	bash -c "exec /sbin/shutdown -r now"'
+# the allowlisted call line with a second command appended is flagged (the rest of that line is searched)
+sed 's/^\t"\$nvidia_client_owner_testboot_shutdown" -r \(.*\)$/\t"$nvidia_client_owner_testboot_shutdown" -r \1; shutdown -r now/' "$RCS" > "$T/rc-mutant-M9"
+if cmp -s "$RCS" "$T/rc-mutant-M9"; then bad "control: mutant M9 changed nothing"; elif [ -n "$(bare_shutdown_lines "$T/rc-mutant-M9")" ]; then ok "control: mutant M9 (a command appended to the allowlisted call line) is seen"; else bad "control: mutant M9 is not seen"; fi
+# the shared file is mutated: a detector that finds nothing, and a missing file; both users of it must notice
+sed 's/^\t| grep -E .*$/\t| grep -E zz_never_zz/' "$KIT/bare-shutdown-check.sh" > "$T/shared-blind.sh"
+if cmp -s "$KIT/bare-shutdown-check.sh" "$T/shared-blind.sh"; then bad "control: the blind shared-file mutant changed nothing"
+elif ( . "$T/shared-blind.sh"; [ -z "$(bare_shutdown_lines "$T/bd-M6.sh")" ] ); then ok "control: a broken shared detector is seen by the host test (M6 goes unflagged, so the M6 control above would fail)"
+else bad "control: a broken shared detector still flags M6 in the host test"; fi
+# copies of the fixture repository (check-be.sh finds its repository from its own place), one with a broken shared file, one without it
+rm -rf "$T/gr-blind" "$T/gr-missing"; cp -R "$GR" "$T/gr-blind"; cp -R "$GR" "$T/gr-missing"
+chmod -R u+w "$T/gr-blind" "$T/gr-missing"
+cp "$T/shared-blind.sh" "$T/gr-blind/tests/ioctl/testboot/bare-shutdown-check.sh"
+rm -f "$T/gr-missing/tests/ioctl/testboot/bare-shutdown-check.sh"
+rm -rf "$T/cbp-sharedmut"; cp -R "$T/mnt-git/root" "$T/cbp-sharedmut"; chmod -R u+w "$T/cbp-sharedmut"
+chmod 0444 "$T"/cbp-sharedmut/boot/modules.nvco-test/*.ko
+cp "$T/rc-mutant-M6" "$T/cbp-sharedmut/usr/local/etc/rc.d/nvidia_client_owner_testboot"
+sh "$CB" -U -m "$T/cbp-sharedmut" -s "$STAGE/SHA256-v6.txt" -c "$GCOMMIT" > "$T/cbm-real.out" 2>&1
+sh "$T/gr-blind/tests/ioctl/testboot/check-be.sh" -U -m "$T/cbp-sharedmut" -s "$STAGE/SHA256-v6.txt" -c "$GCOMMIT" > "$T/cbm-blind.out" 2>&1
+sh "$T/gr-missing/tests/ioctl/testboot/check-be.sh" -U -m "$T/cbp-sharedmut" -s "$STAGE/SHA256-v6.txt" -c "$GCOMMIT" > "$T/cbm-missing.out" 2>&1; _rm=$?
+if grep -q '^FAIL dead-man: the rc script contains a bare shutdown call' "$T/cbm-real.out" && grep -q '^ok   dead-man: the rc script contains no bare shutdown call' "$T/cbm-blind.out"; then ok "control: a broken shared detector is seen by check-be.sh (the real run flags M6, the broken one passes it)"; else head -5 "$T/cbm-real.out" "$T/cbm-blind.out"; bad "control: check-be.sh does not depend on the shared detector"; fi
+if [ "$_rm" != 0 ] && [ "$_rm" != 1 ] && ! grep -q '^ok ' "$T/cbm-missing.out"; then ok "control: check-be.sh without the shared file stops (exit $_rm) and checks nothing"; else bad "control: check-be.sh runs without the shared detector ($_rm)"; fi
+rm -rf "$T/gr-blind" "$T/gr-missing"
+rm -rf "$T/cbp-sharedmut"
+# F1 mutant (M5): the stub branch taken at the rc boot too: the stub is called where the refusal is required
+M5=$T/rc-mutant-M5
+sed 's/^\tif \[ "\${autoboot:-}" != yes \] && \[ "\$nvidia_client_owner_testboot_shutdown"/\tif [ "$nvidia_client_owner_testboot_shutdown"/' "$G3RC" > "$M5"
+if [ "$G3OK" != 1 ] || [ "$(id -u)" = 0 ]; then
+	bad "control: mutant M5 not run"
+elif cmp -s "$G3RC" "$M5"; then
+	bad "control: mutant M5 changed nothing"
+else
+	: > "$SHUTDOWN_STUB_ARGS"
+	with autoboot=yes with rc_fast=yes with rc_arg=start runrc "$M5" PASS
+	if [ -s "$SHUTDOWN_STUB_ARGS" ]; then ok "control: mutant M5 is seen (a stub at an rc boot would be called)"; else bad "control: mutant M5 is not seen"; fi
+fi
+
 # the run directory cannot be made: the fallback directory of /var/db is used (no /tmp), results are there, the return still runs
 : > "$T/rc/afile"
 with RC_WORK=$T/rc/afile/sub runrc "$RCS" PASS
@@ -681,7 +1054,7 @@ cp "$LAY/amp001/pci" "$LAY/amp001/pci2"; sed -i '' 's/device=0x2d04/device=0x999
 ( RC_LAYOUT=$LAY/amp001 FAKE_FLIP_AFTER=1 runrc "$RCS" PASS ); RUN=$(newest)
 grep -q '"row":"gpu-verify","result":"fail","detail":"expected [^"]*nvidia1 at bus pci13:1:0:0 vendor 0x10de device 0x2d04, found bus pci13:1:0:0 vendor 0x10de device 0x9999' "$RUN/results.jsonl" && ! grep -q '^run_owner_boot$' "$T/rc/log" && tail -1 "$RUN/summary.txt" | grep -q '^NO-GO$' && grep -q '"status": "fail"' "$RUN/gpu-verify.json" && ok "rc: a node that is not the chosen card fails gpu-verify naming expected and found, NO-GO, no probe" || { cat "$RUN/results.jsonl"; bad "rc: a changed identity is not caught"; }
 # no hard-coded unit: the kit and the probe name no /dev/nvidia0
-for f in "$KIT/nvidia_client_owner_testboot" "$KIT/make-be.sh" "$KIT/check-be.sh" "$REPO/tests/ioctl/run_owner_boot.sh" "$REPO/tests/ioctl/uvm_owner_probe.c" "$KIT/gpu-detect.sh"; do
+for f in "$KIT/nvidia_client_owner_testboot" "$KIT/make-be.sh" "$KIT/check-be.sh" "$KIT/bare-shutdown-check.sh" "$REPO/tests/ioctl/run_owner_boot.sh" "$REPO/tests/ioctl/uvm_owner_probe.c" "$KIT/gpu-detect.sh"; do
 	grep -v '^[[:space:]]*\(#\|/\?\*\)' "$f" | grep -q '/dev/nvidia0' && bad "$(basename "$f") names /dev/nvidia0" || ok "$(basename "$f") does not hard-code /dev/nvidia0"
 done
 # the probe finds its GPU node by itself (-d overrides): the selection logic on a fixture /dev
@@ -756,7 +1129,9 @@ fi
 sed -e 's/^\t\[ "\$_trc" != 3 \] || deadman_cancel$/\tdeadman_cancel/' "$RCS" > "$T/rc-plant-deadman-always"
 if cmp -s "$RCS" "$T/rc-plant-deadman-always"; then bad "plant deadman-always changed nothing"; else
 	with FAKE_RETURN_RC=2 runrc "$T/rc-plant-deadman-always" PASS
-	if grep -q '^pkill' "$T/rc/log"; then ok "plant deadman-always is red (a failed return loses the dead-man timer)"; else bad "plant deadman-always stays green"; fi
+	_plant_pid=$(cat "$SHUTDOWN_STUB_LAST" 2> /dev/null)
+	case $_plant_pid in ''|*[!0-9]*) _plant_pid= ;; esac
+	if [ -n "$_plant_pid" ] && grep -qx "$_plant_pid" "$SHUTDOWN_STUB_PIDS" && ! pid_is_shutdown "$_plant_pid"; then ok "plant deadman-always is red (a failed return kills the exact dead-man pid)"; else bad "plant deadman-always stays green"; fi
 fi
 plant_fb() {	# plant_fb <name> <sed> <expect>: a plant on the run-directory branches
 	sed -e "$2" "$RCS" > "$T/rc-plant-$1"
@@ -945,6 +1320,13 @@ for w in 'nvidia-client-owner-test-' 'modules.nvco-test' 'testboot-return' 'pani
 	grep -q -- "$w" "$KIT/make-be.sh" "$KIT/nvidia_client_owner_testboot" || bad "the kit does not mention $w"
 done
 sh "$KIT/make-be.sh" --help > "$T/help.out" 2>&1; [ "$?" = 2 ] && grep -q 'Usage: make-be.sh' "$T/help.out" && ok "make-be.sh --help prints the usage" || bad "make-be.sh --help"
+
+# G2: after every normal run and all safe mutants, no bare path may have reached the sentinel.
+if [ -s "$SENT/hits" ]; then
+	bad "G2: PATH sentinel hit: $(tr '\n' ';' < "$SENT/hits")"
+else
+	ok "G2: the PATH sentinel has no hits"
+fi
 
 if [ "$rc" = 0 ]; then echo "testboot_kit_test.sh: all checks passed"; else echo "testboot_kit_test.sh: FAILED"; fi
 exit $rc

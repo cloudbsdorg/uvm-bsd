@@ -236,6 +236,8 @@ run install $ROOTOWN -m 0555 "$CUDASRC" "$KROOT/run-linux-cuda.sh"
 run install $ROOTOWN -m 0555 "$ASRC/testboot-return" "$MNT/usr/local/sbin/testboot-return"
 run install $ROOTOWN -m 0555 "$ASRC/nvidia_client_owner_testboot" "$MNT/usr/local/etc/rc.d/nvidia_client_owner_testboot"
 printf '%s\n' "$COMMIT" > "$MNT/usr/local/etc/nvidia_client_owner_testboot.version"
+printf '%s\n' "$BE" > "$MNT/usr/local/etc/nvidia_client_owner_testboot.marker"
+run chmod 0444 "$MNT/usr/local/etc/nvidia_client_owner_testboot.marker"
 
 # every other test-boot kit of the clone is turned off (a second kit would load other modules and reboot on its own)
 turn_off() {
