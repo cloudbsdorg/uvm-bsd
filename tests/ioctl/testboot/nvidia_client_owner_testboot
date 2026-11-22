@@ -1,0 +1,209 @@
+#!/bin/sh
+#
+# PROVIDE: nvidia_client_owner_testboot
+# REQUIRE: LOGIN kld
+# KEYWORD: nojail
+#
+# Copyright (c) 2026 REVYTECH, Inc.
+# SPDX-License-Identifier: BSD-2-Clause
+#
+# One-shot test-boot recorder for the RM client ownership of nvidia.ko and nvidia-uvm.ko (Track #2373).
+# make-be.sh installs it into a test boot environment; it runs once, in the background, and:
+#   1. sets kern.panic_reboot_wait_time=5 and debug.debugger_on_panic=0 (the loader.conf of the boot
+#      environment carries them too) and records them;
+#   2. checks the staged modules against SHA256-v5.txt (full literal hashes), as root, from the root-owned
+#      directory /boot/modules.nvco-test;
+#   3. loads linux64 (nvidia-uvm and nvidia-modeset still depend on it), nvidia.ko, nvidia-modeset.ko and
+#      nvidia-uvm.ko by full path.  nvidia-drm.ko is NOT loaded: it is not in the directory;
+#   4. runs run_owner_boot.sh as root, with the dedicated test uids, its results under
+#      /var/db/nvidia-client-owner-test/<run>/work/logs/uvm-2373-boot/<stamp>/;
+#   5. applies the reading rule (summarize.sh) and copies the run out to the home directory (a separate
+#      dataset: it survives the return to the normal boot environment);
+#   6. ALWAYS ends with testboot-return NORMAL_BE, so the host comes back to the normal boot environment
+#      (a failure of any step above, a PANIC excepted, still ends here; a panic reboots in 5 seconds and the
+#      one-shot activation is already used up).
+#
+# Rows go to results.jsonl: {"row","result","detail"} with result pass, fail, info or skip; a "running" row is
+# written and synced before each step that can panic.  A dead-man timer (an ordinary shutdown -r +N) covers a
+# hang; it is cancelled before testboot-return.
+#
+# rc.conf variables (make-be.sh writes _enable, _normal_be, _copyout and _cudarun): nvidia_client_owner_testboot_enable,
+# _normal_be (default cloudbsd-rx7600), _seconds (the race loop length, 60), _deadman (minutes, 60),
+# _uid_a, _uid_b (probe uids, 60003 and 60004; the race loops use the uids defined in uvm_owner_race.c, read
+# from the kit), _kit (/usr/local/share/nvidia-client-owner-test), _mods (/boot/modules.nvco-test), _work
+# (/var/db/nvidia-client-owner-test), _copyout (a directory in the home dataset), _cudarun (the root-owned CUDA
+# vecadd script of the kit), _return (testboot-return), and _load_modeset (YES).  tests/testboot_kit_test.sh
+# points them at fakes.
+
+. /etc/rc.subr
+
+name=nvidia_client_owner_testboot
+rcvar=nvidia_client_owner_testboot_enable
+start_cmd=nvidia_client_owner_testboot_start
+stop_cmd=:
+
+: "${nvidia_client_owner_testboot_normal_be:=cloudbsd-rx7600}"
+: "${nvidia_client_owner_testboot_seconds:=60}"
+: "${nvidia_client_owner_testboot_deadman:=60}"
+: "${nvidia_client_owner_testboot_uid_a:=60003}"
+: "${nvidia_client_owner_testboot_uid_b:=60004}"
+: "${nvidia_client_owner_testboot_kit:=/usr/local/share/nvidia-client-owner-test}"
+: "${nvidia_client_owner_testboot_mods:=/boot/modules.nvco-test}"
+: "${nvidia_client_owner_testboot_work:=/var/db/nvidia-client-owner-test}"
+: "${nvidia_client_owner_testboot_copyout:=/home/mlapointe/work/gb10/logs/uvm-2373-testboot}"
+: "${nvidia_client_owner_testboot_cudarun:=/usr/local/share/nvidia-client-owner-test/run-linux-cuda.sh}"
+: "${nvidia_client_owner_testboot_return:=/usr/local/sbin/testboot-return}"
+: "${nvidia_client_owner_testboot_load_modeset:=YES}"
+: "${nvidia_client_owner_testboot_lockfile:=/var/run/noshutdown}"
+: "${nvidia_client_owner_testboot_version:=/usr/local/etc/nvidia_client_owner_testboot.version}"
+
+NORMAL=$nvidia_client_owner_testboot_normal_be
+KIT=$nvidia_client_owner_testboot_kit
+MODS=$nvidia_client_owner_testboot_mods
+WORKROOT=$nvidia_client_owner_testboot_work
+STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+OUT=$WORKROOT/$STAMP
+
+row()	# row <name> <pass|fail|info|skip|running> <detail>
+{
+	printf '{"row":"%s","result":"%s","detail":"%s"}\n' "$1" "$2" \
+	    "$(printf '%s' "$3" | tr -c '[:print:]' ' ' | tr '"\\' "''")" >> "$OUT/results.jsonl"
+	echo "== row $1: $2: $3"
+}
+
+running()	# running <name> <detail>: written and synced before a step that can panic
+{
+	row "$1" running "$2"
+	sync
+}
+
+deadman_arm()
+{
+	case $nvidia_client_owner_testboot_deadman in
+	''|*[!0-9]*) row deadman fail "the dead-man setting '$nvidia_client_owner_testboot_deadman' is not a number of minutes: no dead-man timer"; return 0 ;;
+	*[!0]*) ;;
+	*) row deadman info "the dead-man timer is disabled"; return 0 ;;
+	esac
+	shutdown -r "+$nvidia_client_owner_testboot_deadman" "nvidia_client_owner_testboot dead-man: the machine restarts in $nvidia_client_owner_testboot_deadman minutes unless the run finishes" > /dev/null 2>&1 &
+	sleep 1
+	if [ -e "$nvidia_client_owner_testboot_lockfile" ] || ! pgrep -f "nvidia_client_owner_testboot dead-man" > /dev/null 2>&1; then
+		row deadman fail "the dead-man timer is not pending (lock file $nvidia_client_owner_testboot_lockfile, or the request failed): this boot is NOT protected against a hang"
+	else
+		row deadman info "a dead-man timer is requested for $nvidia_client_owner_testboot_deadman minutes"
+	fi
+	sync
+}
+
+deadman_cancel()
+{
+	pkill -f "nvidia_client_owner_testboot dead-man" > /dev/null 2>&1 || :
+}
+
+# check_hashes <list file> <dir>: each installed module has the full literal sha256 the list gives its staged file
+# (the staged names are the v5 ones: the list is SHA256-v5.txt)
+check_hashes()
+{
+	_bad=0
+	for _pair in nvidia:nvidia-v5-phase0.ko nvidia-modeset:nvidia-modeset-v5.ko nvidia-uvm:nvidia-uvm-v5.ko; do
+		_m=${_pair%%:*}; _staged=${_pair#*:}
+		[ -f "$2/$_m.ko" ] || { row "hash-$_m" fail "$2/$_m.ko is missing"; _bad=1; continue; }
+		_got=$(sha256 -q "$2/$_m.ko")
+		_hits=$(awk -v n="($_staged)" -v h="$_got" '$1 == "SHA256" && $2 == n && $3 == "=" && length($4) == 64 && $4 == h { c++ } END { print c + 0 }' "$1")
+		if [ "$_hits" = 1 ]; then row "hash-$_m" pass "$_got"; else row "hash-$_m" fail "$_got is not the full literal hash of $_staged in $1"; _bad=1; fi
+	done
+	return $_bad
+}
+
+nvidia_client_owner_testboot_start()
+{
+	# a failure to make the run directory must not skip the return to the normal boot environment: fall back to a
+	# temporary directory (and, failing that, to /tmp) and go on
+	if mkdir -p "$WORKROOT" 2> /dev/null && chmod 0700 "$WORKROOT" 2> /dev/null && mkdir -m 0700 "$OUT" 2> /dev/null; then :; else
+		echo "cannot create $OUT: using a temporary directory"
+		OUT=$(mktemp -d /tmp/nvco-testboot.XXXXXXXX 2> /dev/null) || OUT=/tmp
+	fi
+	cd "$OUT" 2> /dev/null || cd /
+	: > "$OUT/results.jsonl"
+	(
+	deadman_arm
+	row kit-version info "kit commit $(cat "$nvidia_client_owner_testboot_version" 2>/dev/null || echo unknown), BE $(bectl list -H 2>/dev/null | awk '$2 ~ /N/ {print $1}'), kernel $(sysctl -n kern.bootfile 2>/dev/null)"
+	sysctl kern.panic_reboot_wait_time=5 debug.debugger_on_panic=0 > "$OUT/sysctl-set.txt" 2>&1
+	_ps=$(sysctl -n kern.panic_reboot_wait_time debug.debugger_on_panic 2>&1 | tr '\n' ' ')
+	ok=1
+	if [ "$_ps" = "5 0 " ]; then row panic-settings pass "kern.panic_reboot_wait_time 5, debug.debugger_on_panic 0"; else row panic-settings fail "read back '$_ps', not '5 0': a panic could wait in the debugger; nothing is loaded"; ok=0; fi
+	# run_owner_boot.sh reloads nvidia-uvm by name after its unload test: the staged directory is on the module path
+	# (the staged directory comes FIRST: a name lookup walks the path in order)
+	sysctl kern.module_path="$MODS;$(sysctl -n kern.module_path)" > "$OUT/module-path.txt" 2>&1
+	row module-path info "$(sysctl -n kern.module_path 2>&1)"
+	kldstat > "$OUT/kldstat-before.txt" 2>&1
+	dmesg > "$OUT/dmesg-before.txt" 2>&1
+
+	if kldstat -q -m nvidia > /dev/null 2>&1; then row preloaded fail "nvidia is already loaded before the kit loads it: a base that loads the stack is not testable"; ok=0; fi
+	if check_hashes "$KIT/SHA256-v5.txt" "$MODS"; then :; else ok=0; fi
+	if [ -f "$MODS/nvidia-drm.ko" ]; then row no-drm fail "nvidia-drm.ko is in $MODS: this kit does not load it"; ok=0; else row no-drm pass "nvidia-drm.ko is not staged"; fi
+	_ra=$(sed -n 's/^#define[[:space:]]*UID_STRANGER[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$KIT/repo/tests/ioctl/uvm_owner_race.c" 2> /dev/null)
+	_rb=$(sed -n 's/^#define[[:space:]]*UID_VICTIM[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$KIT/repo/tests/ioctl/uvm_owner_race.c" 2> /dev/null)
+	if [ -z "$_ra" ] || [ -z "$_rb" ]; then row test-uids fail "the race uids could not be read from $KIT/repo/tests/ioctl/uvm_owner_race.c"; ok=0; fi
+	for _u in "$nvidia_client_owner_testboot_uid_a" "$nvidia_client_owner_testboot_uid_b" $_ra $_rb; do
+		if getent passwd "$_u" > /dev/null 2>&1; then row test-uids fail "uid $_u belongs to a real user: the dedicated test uids must be free"; ok=0; fi
+	done
+	[ "$ok" = 1 ] && row test-uids pass "uids $nvidia_client_owner_testboot_uid_a $nvidia_client_owner_testboot_uid_b $_ra $_rb are unused"
+
+	if [ "$ok" = 1 ]; then
+		running load "kldload linux64, nvidia, nvidia-modeset, nvidia-uvm: a panic from here leaves this row last"
+		kldload linux64 > "$OUT/kldload-linux64.txt" 2>&1 || kldstat -q -m linux64elf || { row load-linux64 fail "kldload linux64 failed: $(cat "$OUT/kldload-linux64.txt")"; ok=0; }
+		if [ "$ok" = 1 ]; then
+			for _k in nvidia $( [ "$nvidia_client_owner_testboot_load_modeset" = YES ] && echo nvidia-modeset ) nvidia-uvm; do
+				if kldload "$MODS/$_k.ko" > "$OUT/kldload-$_k.txt" 2>&1; then
+					row "load-$_k" pass "loaded $MODS/$_k.ko"
+				else
+					row "load-$_k" fail "kldload $_k failed: $(cat "$OUT/kldload-$_k.txt")"
+					ok=0
+					break
+				fi
+			done
+		fi
+		kldstat -v > "$OUT/kldstat-v.txt" 2>&1
+		dmesg > "$OUT/dmesg-loaded.txt" 2>&1
+		if kldstat | grep -q 'nvidia-drm'; then row no-drm-loaded fail "nvidia-drm is loaded"; ok=0; fi
+		if [ "$ok" = 1 ]; then row load pass "linux64, nvidia, nvidia-modeset and nvidia-uvm are loaded"; else row load fail "a module did not load: see the rows above"; fi
+	fi
+
+	if [ "$ok" = 1 ]; then
+		running owner-boot "run_owner_boot.sh runs the probe and the five race loops: a panic from here leaves this row last"
+		GB10_WORK=$OUT/work NVIDIA_KO=$MODS/nvidia.ko CUDA_VECADD=$nvidia_client_owner_testboot_cudarun \
+		    PROBE_UID_A=$nvidia_client_owner_testboot_uid_a PROBE_UID_B=$nvidia_client_owner_testboot_uid_b \
+		    sh "$KIT/repo/tests/ioctl/run_owner_boot.sh" "$nvidia_client_owner_testboot_seconds" > "$OUT/owner-boot.out" 2>&1
+		orc=$?
+		row owner-boot info "run_owner_boot.sh exit $orc (0 PASS, 1 FAIL, 3 RE-RUN); its last line is the verdict"
+	else
+		row owner-boot skip "not run: a step before it failed (see the rows above)"
+	fi
+	dmesg > "$OUT/dmesg-after.txt" 2>&1
+	row done info "the run is over; summarize.sh gives the reading"
+	sh "$KIT/summarize.sh" "$OUT" > "$OUT/summary.txt" 2>&1
+	src=$?
+	row summary info "summarize.sh exit $src: $(tail -1 "$OUT/summary.txt")"
+	sync
+	# copy out: the home directory is a separate dataset and survives the return to the normal boot environment.  The
+	# destination is made here (never reused) and is not a symbolic link
+	_dst=$nvidia_client_owner_testboot_copyout/$STAMP
+	if mkdir -p "$nvidia_client_owner_testboot_copyout" && mkdir "$_dst" && [ ! -L "$_dst" ] && cp -Rp "$OUT/." "$_dst/"; then
+		echo "== copied the run to $_dst"
+	else
+		echo "== COULD NOT copy the run to $_dst: it stays in $OUT of this boot environment"
+	fi
+	sync
+	# the last step, always: back to the normal boot environment.  The dead-man timer stays pending unless the return
+	# is deliberately held (exit 3: a live agent holds the host): a failed return must still end in a restart
+	"$nvidia_client_owner_testboot_return" "$NORMAL" > "$OUT/testboot-return.txt" 2>&1
+	_trc=$?
+	echo "== testboot-return exit $_trc"
+	cat "$OUT/testboot-return.txt"
+	[ "$_trc" != 3 ] || deadman_cancel
+	) > "$OUT/rc.log" 2>&1 &
+	return 0
+}
+
+load_rc_config $name
+run_rc_command "$1"

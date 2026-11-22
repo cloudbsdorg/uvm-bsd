@@ -1,0 +1,213 @@
+#!/bin/sh
+# SPDX-License-Identifier: BSD-2-Clause
+# Copyright (c) 2026 REVYTECH, Inc.
+#
+# testboot-return -- the LAST step of a one-shot test-boot kit: refuse to
+# leave the host running a test boot environment, and reboot it back into the
+# normal one.
+#
+# usage: testboot-return [-n] [--hold FILE] NORMAL_BE
+#        testboot-return --help
+#
+#   -n           dry run: say what would be done, change nothing, never reboot
+#   --hold FILE  the reboot hold (default /var/db/testboot-return.hold)
+#
+# Exit codes:
+#   0  on NORMAL_BE, and the pool boots NORMAL_BE (a one-shot of another BE
+#      is a queued test boot: reported, left alone); or the reboot into
+#      NORMAL_BE was started; or (with -n) it would have been
+#   1  refused: the pool would not boot NORMAL_BE and it could not be made
+#      so; on NORMAL_BE while the pool boots another BE for good; or the
+#      reboot command failed
+#   2  bad usage, NORMAL_BE does not exist, or bectl could not be read
+#   3  on a test BE, the pool now boots NORMAL_BE, but the reboot is held
+#      (with -n: the reboot would be held)
+#
+# WHY (Track #2398): on 2026-11-20 a one-shot test BE finished its test at
+# 12:17Z and nothing returned the host to the normal BE. amp001 ran the debug
+# test kernel for 23 hours, a package install went into the test BE, and the
+# storage hang of 2026-11-21 happened on that kernel. A one-shot activation
+# (`bectl activate -t`) only decides the boot AFTER the test boot; it does not
+# end the test boot itself.
+#
+# WHEN: Mark's rule is that test boots are automatic and never wait for a
+# person. So the kit calls this as its final step, after its results are
+# written and copied out -- never on its own, never from cron, never in the
+# middle of a test.
+#
+# THE HOLD: no reboot while another agent (Fable) runs on the host. Whoever
+# starts such an agent writes its PID, alone on the first line, into the
+# hold file. While the hold is live the script does every bectl repair but
+# does not reboot, and exits 3; so a crash under the hold still lands on
+# NORMAL_BE. A held return is still owed: it is logged at user.err, and
+# whoever removes the hold runs this script again. A hold is STALE, and is
+# logged and ignored, when its first line is not a PID (digits only, not 0),
+# when that PID is not running, or when the file is older than the current
+# boot (a PID names a process only within one boot; /var/db survives reboots
+# and is copied into a cloned BE): a crashed agent must not pin the host on
+# a test kernel. Within the current boot a live PID is never overruled by
+# age.
+#
+# What it does, in order:
+#   1. reads `bectl list -H`: the BE running now (N), the one the pool boots
+#      (R) and a one-shot boot (T), if any.
+#   2. on NORMAL_BE: nothing to end. A T row on another BE is a queued test
+#      boot and is left alone; an R row on another BE (the pool boots a test
+#      BE for good) is refused (exit 1) and left for a person, because from
+#      the normal BE it may be a deliberate upgrade.
+#   3. on a test BE: the pool must boot NORMAL_BE (R) and no other BE may
+#      hold a one-shot (T). If not: `bectl activate NORMAL_BE`, then
+#      `bectl activate -T` for a one-shot of another BE; it reads the list
+#      again and refuses (exit 1) unless both now hold.
+#   4. unless the hold is live, it logs to syslog and reboots
+#      (/sbin/shutdown -r now).
+#
+# Environment (honoured only when not run as root, for the tests):
+#   TBR_BECTL, TBR_REBOOT, TBR_LOGGER, TBR_HOLD, TBR_BOOTTIME (epoch)
+
+set -u
+
+PROG=testboot-return
+BECTL=/sbin/bectl
+REBOOT="/sbin/shutdown -r now"
+LOGGER=/usr/bin/logger
+HOLD=/var/db/testboot-return.hold
+BOOTTIME=
+if [ "$(id -u)" != 0 ]; then
+	BECTL=${TBR_BECTL:-$BECTL}
+	REBOOT=${TBR_REBOOT:-$REBOOT}
+	LOGGER=${TBR_LOGGER:-$LOGGER}
+	HOLD=${TBR_HOLD:-$HOLD}
+	BOOTTIME=${TBR_BOOTTIME:-}
+fi
+# The boot time in seconds since the epoch: "{ sec = N, usec = M } ..."
+: "${BOOTTIME:=$(/sbin/sysctl -n kern.boottime 2>/dev/null | sed -n 's/^{ sec = \([0-9]*\),.*/\1/p')}"
+DRY=0
+
+usage() {
+	echo "usage: $PROG [-n] [--hold FILE] NORMAL_BE" >&2
+	echo "       $PROG --help" >&2
+	exit 2
+}
+
+say() { echo "$PROG: $*"; }
+err() { echo "$PROG: $*" >&2; }
+log() { $LOGGER -t "$PROG" "$*" 2>/dev/null || :; }
+# fail CODE MSG: say it on stderr and in syslog (user.err), then exit.
+fail() { c=$1; shift; err "$*"; $LOGGER -p user.err -t "$PROG" "$*" 2>/dev/null || :; exit "$c"; }
+
+while [ $# -gt 0 ]; do
+	case $1 in
+	-h|--help) sed -n '5,/^# WHY/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0 ;;
+	-n) DRY=1; shift ;;
+	--hold) [ $# -ge 2 ] || usage; HOLD=$2; shift 2 ;;
+	--) shift; break ;;
+	-*) usage ;;
+	*) break ;;
+	esac
+done
+[ $# -eq 1 ] || usage
+NORMAL=$1
+case $NORMAL in
+''|*[!A-Za-z0-9._-]*) err "bad BE name: '$NORMAL' (letters, digits, . _ - only)"; exit 2 ;;
+esac
+
+# read_list: sets NOW (N), BOOT (R), ONCE (T) and FOUND (NORMAL_BE exists).
+read_list() {
+	list=$($BECTL list -H) || { err "could not read 'bectl list -H'; nothing was changed"; exit 2; }
+	NOW= BOOT= ONCE= FOUND=0
+	tab=$(printf '\t')
+	while IFS=$tab read -r name flags _rest; do
+		[ -n "$name" ] || continue
+		[ "$name" = "$NORMAL" ] && FOUND=1
+		case $flags in *N*) NOW=$name ;; esac
+		case $flags in *R*) BOOT=$name ;; esac
+		case $flags in *T*) ONCE=$name ;; esac
+	done <<EOF
+$list
+EOF
+}
+
+# boots_normal: the pool boots NORMAL_BE and no other BE holds a one-shot.
+boots_normal() {
+	[ "$BOOT" = "$NORMAL" ] && { [ -z "$ONCE" ] || [ "$ONCE" = "$NORMAL" ]; }
+}
+
+# act CMD...: run a bectl repair, or show it under -n. A dry run cannot read
+# the list again after a step, so it shows every step the state calls for.
+act() {
+	if [ "$DRY" = 1 ]; then
+		say "dry run: would run: bectl $*"
+		return 0
+	fi
+	say "bectl $*"
+	$BECTL "$@" || fail 1 "refused: 'bectl $*' failed; not rebooting. Check 'bectl list' and run 'bectl activate $NORMAL' by hand."
+	read_list
+}
+
+# hold_live: the hold file exists and is not stale.
+hold_live() {
+	[ -e "$HOLD" ] || return 1
+	pid=$(head -n 1 "$HOLD" 2>/dev/null)
+	case $pid in
+	''|*[!0-9]*|0*)
+		say "stale hold $HOLD: its first line is not a PID; ignored"; log "stale hold $HOLD (no PID) ignored"; return 1 ;;
+	esac
+	if ! ps -p "$pid" >/dev/null 2>&1; then
+		say "stale hold $HOLD: PID $pid is not running; ignored"; log "stale hold $HOLD (PID $pid gone) ignored"; return 1
+	fi
+	case $BOOTTIME in
+	''|*[!0-9]*) fail 2 "could not read kern.boottime to judge the hold $HOLD; not rebooting" ;;
+	esac
+	# 600 s of slack: an early-boot clock step (ntpd_sync_on_start) moves
+	# kern.boottime, and must not make a hold of this boot look older.
+	if [ "$(stat -f %m "$HOLD")" -lt $((BOOTTIME - 600)) ]; then
+		say "stale hold $HOLD: written before this boot; ignored"; log "stale hold $HOLD (from an earlier boot) ignored"; return 1
+	fi
+	return 0
+}
+
+read_list
+[ "$FOUND" = 1 ] || fail 2 "no boot environment named $NORMAL (see 'bectl list'); nothing was changed"
+[ -n "$NOW" ] || fail 2 "could not tell which BE is running: no 'bectl list' row has the N flag; nothing was changed"
+say "running $NOW; pool boots ${BOOT:--}; one-shot ${ONCE:--}; normal $NORMAL"
+
+if [ "$NOW" = "$NORMAL" ]; then
+	if [ -z "$BOOT" ]; then
+		fail 1 "refused: on $NORMAL, but no BE has the R flag (the pool's bootfs is unset); left for a person: 'bectl activate $NORMAL'"
+	fi
+	if [ "$BOOT" != "$NORMAL" ]; then
+		fail 1 "refused: on $NORMAL, but the pool boots $BOOT for good (not a one-shot); left for a person: 'bectl activate $NORMAL' if $BOOT is a test BE"
+	fi
+	[ -z "$ONCE" ] || [ "$ONCE" = "$NORMAL" ] || say "note: one-shot boot of $ONCE queued; left alone"
+	say "already on $NORMAL: nothing to do"
+	exit 0
+fi
+
+if ! boots_normal; then
+	[ "$BOOT" = "$NORMAL" ] || act activate "$NORMAL"
+	if [ -n "$ONCE" ] && [ "$ONCE" != "$NORMAL" ]; then
+		act activate -T "$ONCE"
+	fi
+	if [ "$DRY" = 0 ]; then
+		boots_normal || fail 1 "refused: after bectl activate the pool still boots ${BOOT:--} (one-shot ${ONCE:--}), not $NORMAL; not rebooting. Check 'bectl list' and 'zpool get bootfs'."
+		say "the pool now boots $NORMAL"
+	fi
+fi
+
+if hold_live; then
+	[ "$DRY" = 0 ] || { say "dry run: the reboot into $NORMAL would be held by $HOLD (PID $pid)"; exit 3; }
+	fail 3 "HELD: still running test BE $NOW; the pool boots $NORMAL, but the reboot is held by $HOLD (PID $pid). When that agent ends, run: $0 $NORMAL"
+fi
+
+if [ "$DRY" = 1 ]; then
+	say "dry run: would reboot into $NORMAL: $REBOOT"
+	exit 0
+fi
+
+say "rebooting from test BE $NOW into $NORMAL"
+log "rebooting from test BE $NOW into $NORMAL"
+# REBOOT is a command line by design (word splitting wanted).
+# shellcheck disable=SC2086
+$REBOOT || fail 1 "refused: the reboot command failed; still on test BE $NOW"
+exit 0

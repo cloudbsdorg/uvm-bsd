@@ -30,6 +30,9 @@
 #     a valid base-0 number, ends RE-RUN (a FAIL stands whatever else could not be read).
 # Results: $GB10_WORK/logs/uvm-2373-boot/<time>/ ; the last line is PASS, FAIL or RE-RUN.
 #
+# Environment: GB10_WORK (required), NVIDIA_KO, CUDA_VECADD, PROBE_UID_A and PROBE_UID_B (the two dedicated
+# uids of the probe; default 65533 and 65534, the probe's own; the race loops use 60001 and 60002).
+#
 # Usage: sh tests/ioctl/run_owner_boot.sh [SECONDS]
 
 set -u
@@ -212,7 +215,7 @@ fi
 fstat 2>/dev/null | grep nvidiactl > "$OUT/fstat.before" || true
 
 # 2. the probe
-"$T/probe" -j > "$OUT/probe.jsonl" 2>&1; prc=$?
+"$T/probe" -j ${PROBE_UID_A:+-a "$PROBE_UID_A"} ${PROBE_UID_B:+-b "$PROBE_UID_B"} > "$OUT/probe.jsonl" 2>&1; prc=$?
 [ "$prc" = 0 ] && say "ok   probe exit 0" || fail "probe exit $prc"
 say "     probe rows: $(grep -c '"row"' "$OUT/probe.jsonl"), not ok: $(grep -c '"ok":false' "$OUT/probe.jsonl"), summaries: $(grep -c summary "$OUT/probe.jsonl")"
 neg=$(grep -c '"expected":"refused"' "$OUT/probe.jsonl"); pos=$(grep -c '"expected":"not refused"' "$OUT/probe.jsonl")

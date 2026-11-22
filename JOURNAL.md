@@ -51,3 +51,6 @@
 
 ## 2026-11-22T02:10:00Z (#2373 reader fixes, new commit on 7c6e669, own 2-round budget)
 - Orchestrator: fix leading-zero-89 (numbers read base 0 as strtoul: 0x hex, leading 0 octal, invalid is RE-RUN), grep-error-collapse (grep exit status: 1 no match, 2 or more RE-RUN), a FAIL stands when sysctl or kenv failed, remedy names the right tunable, colon/equals-glued key. Gate round 1 running.
+
+## 2026-11-22T02:40:00Z (#2373 one-shot BE kit, new commit on e5d29d7, own 2-round budget)
+- Reader fixes committed e5d29d7 (round 1 6e744db5, round 2 7645ca8e). Next commit: tests/ioctl/testboot (make-be.sh, rc one-shot, summarize.sh, vendored testboot-return pinned in VENDOR) and tests/testboot_kit_test.sh; run_owner_boot.sh takes PROBE_UID_A/B. Gate round 1 running; then the dry run on the real host (a BE built, not armed).

@@ -135,6 +135,24 @@ only from the process that holds the `/dev/nvidiactl` file the client was alloca
   `tests/ioctl/uvm_owner_race.c`, leftover checks, the CUDA vecadd regression; run as root with
   both modules loaded). `tests/stress/uvm_stress.sh -O SECONDS` adds the race loops to the stress
   run. Track #2373.
+- **One-shot test boot:** `tests/ioctl/testboot/make-be.sh` builds a boot environment named
+  `nvidia-client-owner-test-<date>-<n>` from the staged modules (`-m DIR`, hash list
+  `SHA256-v5.txt`: each module is checked against its full 64-digit hash, as staged and again as
+  copied into the root-owned `/boot/modules.nvco-test` of the clone). It is a dry run by default
+  (everything except `bectl activate`; it prints the arm command); `--activate` arms the one-shot.
+  The `loader.conf` of the clone gets `kern.panic_reboot_wait_time=5` and `debug.debugger_on_panic=0`.
+  The rc one-shot `nvidia_client_owner_testboot` loads `linux64` (nvidia-uvm still depends on it),
+  `nvidia.ko`, `nvidia-modeset.ko` and `nvidia-uvm.ko` (never `nvidia-drm.ko`), runs
+  `run_owner_boot.sh` as root with dedicated test uids (60001 to 60004), writes the run under
+  `/var/db/nvidia-client-owner-test/<stamp>/` (copied to the home directory), reads it with
+  `summarize.sh` (GO, NO-GO or NEITHER: PASS is GO evidence, FAIL is NO-GO, RE-RUN is neither; loop 5
+  counts only with `iterations_b` above 0, that is when the stranger's frees met a client; this boot cannot
+  show close-path, the case where the owner of a converted record closes it: the model row and the glue
+  scenario of nvidia-gb10-freebsd are its evidence) and always ends with
+  `testboot-return NORMAL_BE`, a vendored copy (see `tests/ioctl/testboot/VENDOR`) of the skill
+  script that reboots the host back into the normal boot environment. `tests/testboot_kit_test.sh`
+  tests it on a fake `bectl` and fake commands, and runs mutated copies of the kit that each of its
+  checks must catch.
 
 ## Tunables
 

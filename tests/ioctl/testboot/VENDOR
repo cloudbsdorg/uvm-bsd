@@ -1,0 +1,7 @@
+testboot-return is a vendored copy, not yet merged:
+repository = skills (cloudbsd skills), worktree ~/work/amp001/skills-wt
+branch = agent/2398-amp001-crash-hardening
+commit = 963715f6937e8bdeeb5e96e3ebf33901f4fd36f9
+path = skills/bectl-safe-deploy/scripts/testboot-return
+sha256 = 3a88d17547c013ce93631d5aa4a414bcae6ccadb6e6653f641553f6df77f4d9d
+When the branch is merged, delete the copy and install the skill's script instead; make-be.sh refuses a copy that differs from the pin above.

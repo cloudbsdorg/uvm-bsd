@@ -96,7 +96,7 @@ else
 	echo "FAIL uvm_stress.sh does not parse"
 	rc=1
 fi
-for t in dma_tag_size_test giant_yield_log_test client_owner_pins_test client_owner_glue_test; do
+for t in dma_tag_size_test giant_yield_log_test client_owner_pins_test client_owner_glue_test testboot_kit_test; do
 	if sh "$REPO/tests/$t.sh"; then :; else rc=1; fi
 done
 exit $rc
