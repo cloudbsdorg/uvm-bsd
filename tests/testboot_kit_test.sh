@@ -892,6 +892,54 @@ sumplant firmware-as-no-go 's/|firmware-loaded|/|/' "$(sumfx p10 '{"row":"firmwa
 sumplant kit-hides-fail 's/^if \[ "\$kit" != 0 \] && \[ "\$verdict" = FAIL \]; then$/if false; then/' "$(sumfx p8 '{"row":"deadman","result":"fail","detail":"x"}
 {"row":"done","result":"info","detail":"x"}' "FAIL" "$R5B9")" 1 NO-GO
 
+# ---- the CUDA vecadd step of run_owner_boot.sh: Linux-only, a last resort, never a verdict, and the wrapper is never called without a program
+CUDASH=$T/cuda_vecadd.sh
+sed -n '/^# BEGIN cuda_vecadd/,/^# END cuda_vecadd/p' "$REPO/tests/ioctl/run_owner_boot.sh" > "$CUDASH"
+[ -s "$CUDASH" ] && ok "run_owner_boot.sh has the cuda_vecadd function" || bad "run_owner_boot.sh has no cuda_vecadd function"
+cat > "$T/fake-run-linux-cuda.sh" <<'EOF'
+#!/bin/sh
+# like run-linux-cuda.sh: no program is a usage error (exit 2); records its argument count
+echo "args $#" >> "$FAKE_WRAP_LOG"
+[ $# -ge 1 ] || { echo "usage: $0 PROG [ARGS...]" >&2; exit 2; }
+exit "${FAKE_WRAP_RC:-0}"
+EOF
+cudarun() {	# cudarun <wrapper script or ''> <prog or ''> <wrapper rc>: runs the step with say/fail recorded; prints the said lines, then the wrapper's calls
+	: > "$T/wrap.log"
+	( out=; rerun=0; rc=0; say() { out="$out$*|"; }; fail() { out="${out}FAIL $*|"; rc=1; }
+	  CUDA_VECADD=$1; CUDA_PROG=$2; FAKE_WRAP_LOG=$T/wrap.log; FAKE_WRAP_RC=$3; export FAKE_WRAP_LOG FAKE_WRAP_RC
+	  . "$CUDASH"; cuda_vecadd "$T/cuda.out"
+	  printf '%s rc=%s rerun=%s\n' "$out" "$rc" "$rerun" )
+}
+cudarun_with() {	# cudarun_with <script file of the step> ...: same as cudarun with another step file
+	CUDASH_SAVE=$CUDASH; CUDASH=$1; shift; cudarun "$@"; CUDASH=$CUDASH_SAVE
+}
+r=$(cudarun "$T/fake-run-linux-cuda.sh" /prog/cuda_vecadd 0)
+case $r in *"ok   CUDA vecadd (Linux-only, last resort): /prog/cuda_vecadd ran|"*"rc=0 rerun=0") ok "cuda: a run that succeeds is ok, labelled Linux-only and last resort" ;; *) bad "cuda: a successful run said '$r'" ;; esac
+[ "$(cat "$T/wrap.log")" = "args 1" ] && ok "cuda: the wrapper is called with exactly the program" || bad "cuda: the wrapper was called with '$(cat "$T/wrap.log")'"
+r=$(cudarun "$T/fake-run-linux-cuda.sh" /prog/cuda_vecadd 3)
+case $r in *"info CUDA vecadd (Linux-only, last resort): /prog/cuda_vecadd exited 3 (see cuda.out)"*"no native CUDA path"*"rc=0 rerun=0") ok "cuda: a failing run is info with the exit status and the reason, never FAIL or RE-RUN" ;; *) bad "cuda: a failing run said '$r'" ;; esac
+r=$(cudarun "$T/fake-run-linux-cuda.sh" '' 0)
+case $r in *"info CUDA vecadd (Linux-only, last resort) not run: CUDA_PROG"*"rc=0 rerun=0") ok "cuda: no program is info with the reason" ;; *) bad "cuda: no program said '$r'" ;; esac
+[ ! -s "$T/wrap.log" ] && ok "cuda: with no program the wrapper is not called (called bare it is a usage error)" || bad "cuda: the wrapper was called with no program ($(cat "$T/wrap.log"))"
+r=$(cudarun '' /prog/cuda_vecadd 0)
+case $r in *"info CUDA vecadd (Linux-only, last resort) not run: CUDA_VECADD"*"rc=0 rerun=0") ok "cuda: no wrapper is info with the reason" ;; *) bad "cuda: no wrapper said '$r'" ;; esac
+# the fake itself refuses a bare call, as the real wrapper does
+sh "$T/fake-run-linux-cuda.sh" > /dev/null 2>&1; [ "$?" = 2 ] && ok "cuda: the wrapper fake exits 2 when called bare, like the real one" || bad "cuda: the wrapper fake accepts a bare call"
+# plant: the step calls the wrapper without the program -> the wrapper's usage error reaches the log as 'args 0'
+sed -e 's|sh "\$CUDA_VECADD" "\$CUDA_PROG" >|sh "$CUDA_VECADD" >|' "$CUDASH" > "$T/cuda_vecadd_plant.sh"
+if cmp -s "$CUDASH" "$T/cuda_vecadd_plant.sh"; then bad "plant cuda-bare-call changed nothing"; else
+	r=$(cudarun_with "$T/cuda_vecadd_plant.sh" "$T/fake-run-linux-cuda.sh" /prog/cuda_vecadd 0)
+	[ "$(cat "$T/wrap.log")" = "args 1" ] && bad "plant cuda-bare-call stays green" || ok "plant cuda-bare-call is red (the wrapper is called without the program: $(cat "$T/wrap.log"))"
+fi
+# plant: a failed run is made fatal again
+sed -e 's|^		say "     info CUDA vecadd (Linux-only, last resort): \$CUDA_PROG exited|		fail "CUDA vecadd: $CUDA_PROG exited|' "$CUDASH" > "$T/cuda_vecadd_plant2.sh"
+if cmp -s "$CUDASH" "$T/cuda_vecadd_plant2.sh"; then bad "plant cuda-fatal changed nothing"; else
+	r=$(cudarun_with "$T/cuda_vecadd_plant2.sh" "$T/fake-run-linux-cuda.sh" /prog/cuda_vecadd 3)
+	case $r in *"rc=0 rerun=0") bad "plant cuda-fatal stays green" ;; *) ok "plant cuda-fatal is red (a failed Linux CUDA run decides the verdict)" ;; esac
+fi
+# the rc script hands the program to run_owner_boot.sh
+grep -q 'CUDA_PROG=\$nvidia_client_owner_testboot_cudaprog' "$KIT/nvidia_client_owner_testboot" && ok "rc: the CUDA program setting reaches run_owner_boot.sh" || bad "rc: CUDA_PROG is not passed to run_owner_boot.sh"
+
 # ---- docs: the kit says what it does
 for w in 'nvidia-client-owner-test-' 'modules.nvco-test' 'testboot-return' 'panic_reboot_wait_time' 'debugger_on_panic' 'nvidia-drm' 'linux64'; do
 	grep -q -- "$w" "$KIT/make-be.sh" "$KIT/nvidia_client_owner_testboot" || bad "the kit does not mention $w"

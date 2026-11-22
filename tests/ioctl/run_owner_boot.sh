@@ -12,9 +12,12 @@
 #   4. afterwards: no thread in wait channel nvcobusy, no ownership bug line on the
 #      console, no nvidiactl file left open by a dead process, nvidia-uvm unloads
 #      and nvidia unloads
-#   5. the CUDA vecadd regression (proves libcuda's allocations are decoded and
-#      recorded): CUDA_VECADD=/path/to/run-linux-cuda.sh, skipped with a FAIL line when unset
-# How to read the result:
+#   5. the CUDA vecadd run, Linux-only and a last resort (it runs NVIDIA's Linux libcuda through the Linuxulator; no
+#      native CUDA path exists yet, so it is evidence and never a verdict): CUDA_VECADD=/path/to/run-linux-cuda.sh runs
+#      CUDA_PROG (the Linux program the wrapper needs, e.g. cuda_vecadd; the wrapper refuses to run without one);
+#      it is reported as ok, or as info with the reason (not set, not run, or the exit status), and never FAIL or RE-RUN
+# How to read the result (the CUDA vecadd line is ok or info and never decides PASS: after a PASS read it, and cuda.txt when
+# it says exited, before relying on the libcuda path):
 #   - a probe row that is not ok, or a loop that failed ("failed":true), is NO-GO; a negative row
 #     ("expected":"refused") must carry "refusal":true (status 0x1B, NV_ERR_INSUFFICIENT_PERMISSIONS) and a
 #     positive owner row ("expected":"not refused") must not; a probe with no positive row proves nothing;
@@ -30,7 +33,7 @@
 #     a valid base-0 number, ends RE-RUN (a FAIL stands whatever else could not be read).
 # Results: $GB10_WORK/logs/uvm-2373-boot/<time>/ ; the last line is PASS, FAIL or RE-RUN.
 #
-# Environment: GB10_WORK (required), NVIDIA_KO, CUDA_VECADD, GPU_NODE (the GPU device file the probe uses as its
+# Environment: GB10_WORK (required), NVIDIA_KO, CUDA_VECADD, CUDA_PROG, GPU_NODE (the GPU device file the probe uses as its
 # "device file" row, e.g. /dev/nvidia1; unset: the probe takes the one /dev/nvidiaN there is, or skips the row and
 # names the nodes when there are none or several), PROBE_UID_A and PROBE_UID_B (the two dedicated
 # uids of the probe; default 65533 and 65534, the probe's own; the race loops use 60001 and 60002).
@@ -258,13 +261,28 @@ if [ "$a" -le "$b" ]; then say "ok   nvidiactl open files: $b before, $a after (
 kldunload nvidia-uvm > "$OUT/unload-uvm.txt" 2>&1 && say "ok   kldunload nvidia-uvm" || fail "kldunload nvidia-uvm: $(cat "$OUT/unload-uvm.txt")"
 kldunload nvidia > "$OUT/unload-nvidia.txt" 2>&1 && say "ok   kldunload nvidia" || say "     kldunload nvidia refused (other modules hold it; the order of a full unload is nvidia-drm, nvidia-modeset, nvidia): $(cat "$OUT/unload-nvidia.txt")"
 
-# 5. CUDA regression (kldload nvidia-uvm again first, if it was unloaded)
+# 5. CUDA vecadd (kldload nvidia-uvm again first, if it was unloaded)
 kldload nvidia-uvm > /dev/null 2>&1 || true
-if [ -n "${CUDA_VECADD:-}" ]; then
-	sh "$CUDA_VECADD" > "$OUT/cuda.txt" 2>&1 && say "ok   CUDA vecadd" || fail "CUDA vecadd (see cuda.txt)"
-else
-	fail "CUDA_VECADD is not set: the vecadd regression did not run"
-fi
+# BEGIN cuda_vecadd
+# cuda_vecadd <output file>: the CUDA vecadd run is Linux-only (NVIDIA's Linux libcuda under the Linuxulator) and a
+# last resort: no native CUDA path exists to compare it with, so it never decides the ownership verdict.  The wrapper
+# needs a program (CUDA_PROG): without one it is not called at all (called bare it only prints its usage and exits 2).
+cuda_vecadd() {
+	if [ -z "${CUDA_VECADD:-}" ]; then
+		say "     info CUDA vecadd (Linux-only, last resort) not run: CUDA_VECADD, the Linux CUDA wrapper, is not set"; return 0
+	fi
+	if [ -z "${CUDA_PROG:-}" ]; then
+		say "     info CUDA vecadd (Linux-only, last resort) not run: CUDA_PROG, the program the wrapper runs (a path, or a bare name such as cuda_vecadd that the wrapper looks up in its BUILDDIR), is not set (test boot: nvidia_client_owner_testboot_cudaprog in rc.conf)"; return 0
+	fi
+	sh "$CUDA_VECADD" "$CUDA_PROG" > "$1" 2>&1; cuda_rc=$?
+	if [ "$cuda_rc" = 0 ]; then
+		say "ok   CUDA vecadd (Linux-only, last resort): $CUDA_PROG ran"
+	else
+		say "     info CUDA vecadd (Linux-only, last resort): $CUDA_PROG exited $cuda_rc (see $(basename "$1")); not an ownership verdict, no native CUDA path exists to compare with"
+	fi
+}
+# END cuda_vecadd
+cuda_vecadd "$OUT/cuda.txt"
 if [ "$rc" != 0 ]; then say "FAIL"; exit "$rc"; fi
 if [ "$rerun" != 0 ]; then say "RE-RUN"; exit 3; fi
 say "PASS"

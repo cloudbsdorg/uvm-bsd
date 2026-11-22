@@ -43,7 +43,7 @@
 # _uid_a, _uid_b (probe uids, 60003 and 60004; the race loops use the uids defined in uvm_owner_race.c, read
 # from the kit), _kit (/usr/local/share/nvidia-client-owner-test), _mods (/boot/modules.nvco-test), _work
 # (/var/db/nvidia-client-owner-test), _copyout (a directory in the home dataset), _cudarun (the root-owned CUDA
-# vecadd script of the kit), _return (testboot-return), and _load_modeset (YES), and _devdir (where gpu-detect.sh looks for the nvidiaN nodes, /dev).  tests/testboot_kit_test.sh
+# vecadd wrapper of the kit, Linux-only and a last resort), _cudaprog (the Linux program the wrapper runs; empty: the vecadd run is reported as info and not made), _return (testboot-return), _load_modeset (YES) and _devdir (where gpu-detect.sh looks for the nvidiaN nodes, /dev).  tests/testboot_kit_test.sh
 # points them at fakes.
 
 . /etc/rc.subr
@@ -64,6 +64,7 @@ stop_cmd=:
 : "${nvidia_client_owner_testboot_fallback:=/var/db/nvco-testboot}"
 : "${nvidia_client_owner_testboot_copyout:=/home/mlapointe/work/gb10/logs/uvm-2373-testboot}"
 : "${nvidia_client_owner_testboot_cudarun:=/usr/local/share/nvidia-client-owner-test/run-linux-cuda.sh}"
+: "${nvidia_client_owner_testboot_cudaprog:=}"
 : "${nvidia_client_owner_testboot_return:=/usr/local/sbin/testboot-return}"
 : "${nvidia_client_owner_testboot_load_modeset:=YES}"
 : "${nvidia_client_owner_testboot_devdir:=/dev}"
@@ -275,7 +276,7 @@ nvidia_client_owner_testboot_start()
 
 	if [ "$ok" = 1 ]; then
 		running owner-boot "run_owner_boot.sh runs the probe and the five race loops: a panic from here leaves this row last"
-		GB10_WORK=$OUT/work GPU_NODE=$GPUNODE NVIDIA_KO=$MODS/nvidia.ko CUDA_VECADD=$nvidia_client_owner_testboot_cudarun \
+		GB10_WORK=$OUT/work GPU_NODE=$GPUNODE NVIDIA_KO=$MODS/nvidia.ko CUDA_VECADD=$nvidia_client_owner_testboot_cudarun CUDA_PROG=$nvidia_client_owner_testboot_cudaprog \
 		    PROBE_UID_A=$nvidia_client_owner_testboot_uid_a PROBE_UID_B=$nvidia_client_owner_testboot_uid_b \
 		    sh "$KIT/repo/tests/ioctl/run_owner_boot.sh" "$nvidia_client_owner_testboot_seconds" > "$OUT/owner-boot.out" 2>&1
 		orc=$?
