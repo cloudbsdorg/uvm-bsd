@@ -5,8 +5,15 @@
 # The install/deinstall engine behind the root Makefile.  A root invocation
 # copies the two inputs into a private stage before validating anything; a
 # normal-user invocation is permitted only with an existing DESTDIR.
+#
+# Test seams require UVM_TEST_HOOKS=1, a non-empty DESTDIR and effective uid != 0;
+# they are never honoured by root.  MK_KO names a planted module and skips the
+# build, UVM_TEST_KLDXREF names the kldxref executable, and the hidden
+# _check-dest-owner/_check-destdir-ancestors entries expose read-only checks.
+# MAKE and MK_SYSDIR are ordinary build configuration, not test seams.
 
 set -eu
+umask 022
 PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin
 LC_ALL=C
 export PATH LC_ALL
@@ -31,6 +38,10 @@ note() {
 
 yes_set() {
 	[ "${MK_YES:-0}" = 1 ] || [ "${MK_ASSUME_YES:-0}" = 1 ]
+}
+
+test_hooks_enabled() {
+	[ "${UVM_TEST_HOOKS:-0}" = 1 ] && [ -n "$DESTDIR" ] && [ "$(id -u)" != 0 ]
 }
 
 # Without YES=1, a missing terminal is a refusal, never an implicit answer.
@@ -93,6 +104,7 @@ dest_ok() {
 }
 
 # Manifest records are whitespace-delimited, so their paths reject whitespace.
+# Keep this check compatible with paths recorded before PREFIX was narrowed.
 path_ok() {
 	dest_ok "$1" || return 1
 	case $1 in
@@ -101,8 +113,21 @@ path_ok() {
 	return 0
 }
 
+# Only a command-line PREFIX gets the narrower character check.  A recorded
+# PREFIX remains usable by deinstall even when it predates this restriction.
+prefix_ok() {
+	path_ok "$1" || return 1
+	case $1 in
+	*[!A-Za-z0-9._/+-]*) return 1 ;;
+	esac
+	return 0
+}
+
 validate_paths() {
-	path_ok "$PREFIX" || die "PREFIX must be an absolute path without ., .., whitespace, or empty components"
+	prefix_ok "$PREFIX" || {
+		printf 'make.sh: PREFIX must be an absolute path without ., .., whitespace, or empty components; allowed characters are A-Z, a-z, 0-9, ., _, /, +, -\n' >&2
+		exit 2
+	}
 	if [ -n "$DESTDIR" ]; then
 		dest_ok "$DESTDIR" || die "DESTDIR must be an absolute path without ., .., or empty components"
 		[ -d "$DESTDIR" ] && [ ! -L "$DESTDIR" ] || die "DESTDIR $DESTDIR must be an existing real directory"
@@ -143,6 +168,75 @@ check_dest_owner() {
 	[ "$(stat -f '%u' "$DESTDIR")" = 0 ] || die "refusing DESTDIR $DESTDIR as root: not owned by root"
 }
 
+# walk_components BASE ABSOLUTE_PATH CALLBACK: visit BASE and each component
+# below it, without inspecting anything above BASE.  Callers choose / for the
+# root ancestor check or DESTDIR for directory creation.
+walk_components() {
+	_wc_base=$1
+	_wc_path=$2
+	_wc_callback=$3
+	case $_wc_base in
+	/)
+		_wc_acc=/
+		_wc_rest=${_wc_path#/}
+		;;
+	/*)
+		case $_wc_path in
+		"$_wc_base") _wc_rest= ;;
+		"$_wc_base"/*) _wc_rest=${_wc_path#"$_wc_base"/} ;;
+		*) die "internal error: path $_wc_path is outside $_wc_base" ;;
+		esac
+		_wc_acc=$_wc_base
+		;;
+	*) die "internal error: component walk needs an absolute base" ;;
+	esac
+	"$_wc_callback" "$_wc_acc"
+	while [ -n "$_wc_rest" ]; do
+		case $_wc_rest in
+		*/*)
+			_wc_comp=${_wc_rest%%/*}
+			_wc_rest=${_wc_rest#*/}
+			;;
+		*)
+			_wc_comp=$_wc_rest
+			_wc_rest=
+			;;
+		esac
+		_wc_acc=${_wc_acc%/}/$_wc_comp
+		"$_wc_callback" "$_wc_acc"
+	done
+}
+
+check_dest_component() {
+	_ca_path=$1
+	[ -e "$_ca_path" ] || [ -L "$_ca_path" ] || return 0
+	[ -d "$_ca_path" ] && [ ! -L "$_ca_path" ] ||
+	    die "refusing DESTDIR component $_ca_path: not a real directory"
+	_ca_uid=$(stat -f '%u' "$_ca_path") ||
+	    die "refusing DESTDIR component $_ca_path: cannot read owner"
+	if [ "$_ca_uid" != 0 ] &&
+	    { [ -z "$_ca_test_uid" ] || [ "$_ca_uid" != "$_ca_test_uid" ]; }; then
+		die "refusing DESTDIR component $_ca_path as root: not owned by root"
+	fi
+	# %p retains special-mode bits; FreeBSD's %Lp omits the sticky bit.
+	_ca_mode=$(stat -f '%p' "$_ca_path") ||
+	    die "refusing DESTDIR component $_ca_path: cannot read mode"
+	# The ownership check above makes sticky + trusted owner the sole exception.
+	if [ "$((0$_ca_mode & 0022))" -ne 0 ] && [ "$((0$_ca_mode & 01000))" -eq 0 ]; then
+		die "refusing DESTDIR component $_ca_path as root: writable by group or other without sticky-bit protection"
+	fi
+}
+
+# check_dest_ancestors user|root DESTDIR [TEST_UID]: only root mode checks the
+# ancestors above DESTDIR.  TEST_UID is supplied only by the read-only hidden
+# test entry, whose own temporary directories stand in for root-owned ones.
+check_dest_ancestors() {
+	[ "$1" = root ] || return 0
+	[ -n "$2" ] || return 0
+	_ca_test_uid=${3:-}
+	walk_components / "$2" check_dest_component
+}
+
 stage_files() {
 	(cd "$1" && find . \( -type f -o -type l \) | sed 's|^\.||' | sort)
 }
@@ -153,6 +247,25 @@ allowed_path() {
 
 manifest_prefix() {
 	awk 'NR == 1 && $1 == "prefix" && NF == 2 { print $2; found = 1 } END { exit !found }' "$1"
+}
+
+mkdir_component() {
+	_mp_path=$1
+	if [ -L "$_mp_path" ] || { [ -e "$_mp_path" ] && [ ! -d "$_mp_path" ]; }; then
+		die "cannot create directory $_mp_path: not a real directory"
+	fi
+	[ -d "$_mp_path" ] || mkdir -m 755 -- "$_mp_path" || die "cannot create directory $_mp_path"
+}
+
+# mkdir_p755 ABSOLUTE_PATH: create only missing components at or below DESTDIR
+# (or below / for a live install), with an explicit mode.  Existing directories
+# are left alone.  Private mktemp directories stay 700.
+mkdir_p755() {
+	case $1 in
+	/*) ;;
+	*) die "internal error: mkdir_p755 needs an absolute path" ;;
+	esac
+	walk_components "${DESTDIR:-/}" "$1" mkdir_component
 }
 
 # The private input copy prevents a user-owned source from changing between
@@ -168,8 +281,11 @@ copy_source() {
 	case $_cbase in
 	''|.|..|*[!A-Za-z0-9_.-]*) die "input $_cs has an unsafe basename" ;;
 	esac
-	mkdir -- "$_cwork"
-	tar -C "$_cdir" -cf - "./$_cbase" | tar -C "$_cwork" -xpf - || die "cannot privately copy $_cs"
+	mkdir -m 755 -- "$_cwork"
+	_carchive=$_cwork.tar
+	tar -C "$_cdir" -cf "$_carchive" "./$_cbase" || die "cannot read private source $_cs"
+	tar -C "$_cwork" -xpf "$_carchive" || die "cannot extract private source $_cs"
+	rm -f -- "$_carchive"
 	[ -f "$_cwork/$_cbase" ] && [ ! -L "$_cwork/$_cbase" ] || die "input $_cs changed or is not a regular file"
 	install -m "$_cmode" -- "$_cwork/$_cbase" "$_cdest"
 }
@@ -211,6 +327,24 @@ EOF
 	return "$_so"
 }
 
+# kldxref is a post-install refresh, not a reason to undo completed files.
+# UVM_TEST_KLDXREF replaces only the command when the test hooks are enabled.
+run_kldxref() {
+	_kx=kldxref
+	if test_hooks_enabled && [ -n "${UVM_TEST_KLDXREF:-}" ]; then
+		_kx=$UVM_TEST_KLDXREF
+	fi
+	if "$_kx" "$1"; then
+		return 0
+	fi
+	if [ -z "$DESTDIR" ]; then
+		note "kldxref $1 failed: the module is installed but the loader index is stale; run doas kldxref $1"
+		return 1
+	fi
+	note "kldxref $1 failed"
+	return 0
+}
+
 # install_stage DESTDIR PREFIX user|root KO MAN: validate all destinations
 # before copying either payload, write pending records, then replace atomically.
 install_stage() {
@@ -222,6 +356,7 @@ install_stage() {
 	_manifest=$_d$STATEDIR/installed.manifest
 	[ "$_mode" != root ] || [ "$(id -u)" = 0 ] || die "the root install step was not entered through as_root"
 	check_dest_owner "$_mode"
+	check_dest_ancestors "$_mode" "$_d"
 	safe_parents "$_d" "$STATEDIR/x" "$_mode" || die "refusing $_d$STATEDIR: a directory on the way is a symbolic link or not root's"
 	if [ -e "$_manifest" ] || [ -L "$_manifest" ]; then
 		[ -f "$_manifest" ] && [ ! -L "$_manifest" ] || die "refusing $_manifest: not a regular manifest"
@@ -237,10 +372,15 @@ install_stage() {
 $_newdirs"
 		_dir=$(dirname -- "$_dir")
 	done
+	_w=
+	trap '[ -z "$_w" ] || rm -rf -- "$_w"' EXIT
+	trap 'exit 129' HUP
+	trap 'exit 130' INT
+	trap 'exit 143' TERM
 	_w=$(mktemp -d "$_d/.uvm-bsd.install.XXXXXX") || die "cannot create a private directory in $_d"
-	trap 'rm -rf -- "$_w"' EXIT
 	_s=$_w/stage
-	mkdir -p -- "$_s/boot/modules" "$_s$_pfx/share/man/man4"
+	mkdir_p755 "$_s/boot/modules"
+	mkdir_p755 "$_s$_pfx/share/man/man4"
 	copy_source "$_ko_source" "$_s/boot/modules/nvidia-uvm.ko" 555 "$_w/input-ko"
 	copy_source "$_man_source" "$_s$_pfx/share/man/man4/nvidia-uvm.4" 444 "$_w/input-man"
 	stage_files "$_s" > "$_w/list"
@@ -263,7 +403,7 @@ $_newdirs"
 	done < "$_w/list"
 
 	# No refusal above has created STATEDIR or any of its parents.
-	mkdir -p -- "$_d$STATEDIR"
+	mkdir_p755 "$_d$STATEDIR"
 	while read -r _f; do
 		_dir=$(dirname -- "$_f")
 		while [ "$_dir" != / ] && [ ! -d "$_d$_dir" ]; do
@@ -271,7 +411,7 @@ $_newdirs"
 $_dir"
 			_dir=$(dirname -- "$_dir")
 		done
-		mkdir -p -- "$(dirname -- "$_d$_f")"
+		mkdir_p755 "$(dirname -- "$_d$_f")"
 	done < "$_w/list"
 	{
 		printf 'prefix %s\n' "$_pfx"
@@ -304,18 +444,17 @@ $_dir"
 	mv -f -- "$_manifest.new" "$_manifest"
 	chmod 444 "$_manifest"
 	rm -rf -- "$_w"
-	trap - EXIT
+	_w=
+	trap - EXIT HUP INT TERM
 
-	if [ -z "$_d" ]; then
-		kldxref /boot/modules
-	else
-		kldxref "$_d/boot/modules" || note "kldxref $_d/boot/modules failed (DESTDIR staging)"
-	fi
+	run_kldxref "$_d/boot/modules"
 }
 
 do_install() {
-	_ko=${MK_KO:-$repo/sys/nvidia-uvm.ko}
-	if [ ! -f "$_ko" ]; then
+	_ko=$repo/sys/nvidia-uvm.ko
+	if test_hooks_enabled && [ -n "${MK_KO:-}" ]; then
+		_ko=$MK_KO
+	else
 		(cd "$repo/sys" && ${MAKE:-make} SYSDIR="$SYSDIR") || die "install: building nvidia-uvm.ko failed"
 	fi
 	[ -f "$_ko" ] && [ ! -L "$_ko" ] || die "install: $_ko is not a regular file"
@@ -344,6 +483,7 @@ deinstall_manifest() {
 	_mode=$3
 	_manifest=$_d$STATEDIR/installed.manifest
 	check_dest_owner "$_mode"
+	check_dest_ancestors "$_mode" "$_d"
 	[ -f "$_manifest" ] || return 0
 	[ ! -L "$_manifest" ] || die "refusing $_manifest: symbolic link"
 	safe_parents "$_d" "$STATEDIR/installed.manifest" "$_mode" || die "refusing $_manifest: a directory on the way is a symbolic link or not root's"
@@ -403,11 +543,7 @@ deinstall_manifest() {
 	# hints behind if another file now needs that directory.
 	if [ -d "$_d/boot/modules" ] && [ ! -L "$_d/boot/modules" ] &&
 	    safe_parents "$_d" /boot/modules/linker.hints "$_mode"; then
-		if [ -z "$_d" ]; then
-			kldxref /boot/modules
-		else
-			kldxref "$_d/boot/modules" || note "kldxref $_d/boot/modules failed (DESTDIR staging)"
-		fi
+		run_kldxref "$_d/boot/modules"
 		if [ "$_modules_created" = 1 ] &&
 		    [ -z "$(find "$_d/boot/modules" -mindepth 1 -maxdepth 1 ! -name linker.hints -print -quit)" ]; then
 			rm -f -- "$_d/boot/modules/linker.hints"
@@ -444,15 +580,26 @@ do_deinstall() {
 
 case ${1:-} in
 _check-dest-owner)
-	[ "${UVM_TEST_HOOKS:-0}" = 1 ] || die "test hooks are disabled"
 	[ "$#" = 3 ] || die "usage: UVM_TEST_HOOKS=1 make.sh _check-dest-owner user|root DESTDIR"
 	case $2 in
 	user|root) ;;
 	*) die "usage: UVM_TEST_HOOKS=1 make.sh _check-dest-owner user|root DESTDIR" ;;
 	esac
 	DESTDIR=$3
+	test_hooks_enabled || die "test hooks are disabled"
 	validate_paths
 	check_dest_owner "$2"
+	;;
+_check-destdir-ancestors)
+	[ "$#" = 3 ] || die "usage: UVM_TEST_HOOKS=1 make.sh _check-destdir-ancestors user|root DESTDIR"
+	case $2 in
+	user|root) ;;
+	*) die "usage: UVM_TEST_HOOKS=1 make.sh _check-destdir-ancestors user|root DESTDIR" ;;
+	esac
+	DESTDIR=$3
+	test_hooks_enabled || die "test hooks are disabled"
+	validate_paths
+	check_dest_ancestors "$2" "$DESTDIR" "$(id -u)"
 	;;
 install-prereqs)
 	_missing=
@@ -477,7 +624,11 @@ deinstall)
 	do_deinstall
 	;;
 _install-stage)
-	[ "$#" = 6 ] || die "usage: make.sh _install-stage DESTDIR PREFIX root KO MAN"
+	[ "$#" = 6 ] || die "usage: make.sh _install-stage DESTDIR PREFIX user|root KO MAN"
+	case $4 in
+	user|root) ;;
+	*) printf 'make.sh: invalid install mode: %s\n' "$4" >&2; exit 2 ;;
+	esac
 	DESTDIR=$2
 	PREFIX=$3
 	MANIFEST=$DESTDIR$STATEDIR/installed.manifest
@@ -485,7 +636,11 @@ _install-stage)
 	install_stage "$DESTDIR" "$PREFIX" "$4" "$5" "$6"
 	;;
 _deinstall)
-	[ "$#" = 4 ] || die "usage: make.sh _deinstall DESTDIR PREFIX root"
+	[ "$#" = 4 ] || die "usage: make.sh _deinstall DESTDIR PREFIX user|root"
+	case $4 in
+	user|root) ;;
+	*) printf 'make.sh: invalid deinstall mode: %s\n' "$4" >&2; exit 2 ;;
+	esac
 	DESTDIR=$2
 	PREFIX=$3
 	MANIFEST=$DESTDIR$STATEDIR/installed.manifest

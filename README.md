@@ -111,7 +111,7 @@ kernel cannot load ("symbol nvUvmInterfaceChannelDestroy undefined").
 ## Install
 
 ```sh
-make install            # build if needed, then install as root
+make install            # run the incremental build, then install as root
 make deinstall          # remove exactly what install wrote
 ```
 
