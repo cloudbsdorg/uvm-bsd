@@ -137,7 +137,7 @@ only from the process that holds the `/dev/nvidiactl` file the client was alloca
   run. Track #2373.
 - **One-shot test boot:** `tests/ioctl/testboot/make-be.sh` builds a boot environment named
   `nvidia-client-owner-test-<date>-<n>` from the staged modules (`-m DIR`, hash list
-  `SHA256-v5.txt`: each module is checked against its full 64-digit hash, as staged and again as
+  `SHA256-v6.txt`, the kit generation: nvidia.ko is the v6 build with the #2417 fix, the other three modules are the unchanged v5 builds; each module is checked against its full 64-digit hash, as staged and again as
   copied into the root-owned `/boot/modules.nvco-test` of the clone). It is a dry run by default
   (everything except `bectl activate`; it prints the arm command); `--activate` arms the one-shot.
   The `loader.conf` of the clone gets `kern.panic_reboot_wait_time=5` and `debug.debugger_on_panic=0`.

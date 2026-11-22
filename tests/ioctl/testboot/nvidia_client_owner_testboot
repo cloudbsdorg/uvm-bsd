@@ -11,7 +11,7 @@
 # make-be.sh installs it into a test boot environment; it runs once, in the background, and:
 #   1. sets kern.panic_reboot_wait_time=5 and debug.debugger_on_panic=0 (the loader.conf of the boot
 #      environment carries them too) and records them;
-#   2. checks the staged modules against SHA256-v5.txt (full literal hashes), as root, from the root-owned
+#   2. checks the staged modules against SHA256-v6.txt (full literal hashes), as root, from the root-owned
 #      directory /boot/modules.nvco-test;
 #   3. loads linux64 (nvidia-uvm and nvidia-modeset still depend on it), then the GSP firmware module
 #      nvidia_gsp_ga10x_fw.ko as root, THEN nvidia.ko, nvidia-modeset.ko and nvidia-uvm.ko, by full path.  The firmware
@@ -118,11 +118,11 @@ deadman_cancel()
 }
 
 # check_hashes <list file> <dir>: each installed module has the full literal sha256 the list gives its staged file
-# (the staged names are the v5 ones: the list is SHA256-v5.txt)
+# (the staged names: nvidia-v6-phase0.ko is the v6 build with the #2417 fix, the other modules are the v5 builds; the list is SHA256-v6.txt)
 check_hashes()
 {
 	_bad=0
-	for _pair in nvidia:nvidia-v5-phase0.ko nvidia-modeset:nvidia-modeset-v5.ko nvidia-uvm:nvidia-uvm-v5.ko nvidia_gsp_ga10x_fw:nvidia_gsp_ga10x_fw-v5.ko; do
+	for _pair in nvidia:nvidia-v6-phase0.ko nvidia-modeset:nvidia-modeset-v5.ko nvidia-uvm:nvidia-uvm-v5.ko nvidia_gsp_ga10x_fw:nvidia_gsp_ga10x_fw-v5.ko; do
 		_m=${_pair%%:*}; _staged=${_pair#*:}
 		[ -f "$2/$_m.ko" ] || { row "hash-$_m" fail "$2/$_m.ko is missing"; _bad=1; continue; }
 		_got=$(sha256 -q "$2/$_m.ko")
@@ -171,7 +171,7 @@ nvidia_client_owner_testboot_start()
 	dmesg > "$OUT/dmesg-before.txt" 2>&1
 
 	if kldstat -q -m nvidia > /dev/null 2>&1; then row preloaded fail "nvidia is already loaded before the kit loads it: a base that loads the stack is not testable"; ok=0; fi
-	if check_hashes "$KIT/SHA256-v5.txt" "$MODS"; then :; else ok=0; fi
+	if check_hashes "$KIT/SHA256-v6.txt" "$MODS"; then :; else ok=0; fi
 	if [ -f "$MODS/nvidia-drm.ko" ]; then row no-drm fail "nvidia-drm.ko is in $MODS: this kit does not load it"; ok=0; else row no-drm pass "nvidia-drm.ko is not staged"; fi
 	_ra=$(sed -n 's/^#define[[:space:]]*UID_STRANGER[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$KIT/repo/tests/ioctl/uvm_owner_race.c" 2> /dev/null)
 	_rb=$(sed -n 's/^#define[[:space:]]*UID_VICTIM[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$KIT/repo/tests/ioctl/uvm_owner_race.c" 2> /dev/null)

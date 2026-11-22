@@ -30,9 +30,9 @@ bad() { echo "FAIL $*"; rc=1; }
 # ---- fixtures: staged modules and their list
 STAGE=$T/stage
 mkdir -p "$STAGE"
-for f in nvidia-v5-phase0.ko nvidia-modeset-v5.ko nvidia-drm-v5.ko nvidia-uvm-v5.ko nvidia_gsp_ga10x_fw-v5.ko; do printf 'module %s\n' "$f" > "$STAGE/$f"; done
-( cd "$STAGE" && sha256 nvidia-v5-phase0.ko nvidia-modeset-v5.ko nvidia-drm-v5.ko nvidia-uvm-v5.ko nvidia_gsp_ga10x_fw-v5.ko > SHA256-v5.txt )
-cp "$STAGE/SHA256-v5.txt" "$T/list.save"
+for f in nvidia-v6-phase0.ko nvidia-modeset-v5.ko nvidia-drm-v5.ko nvidia-uvm-v5.ko nvidia_gsp_ga10x_fw-v5.ko; do printf 'module %s\n' "$f" > "$STAGE/$f"; done
+( cd "$STAGE" && sha256 nvidia-v6-phase0.ko nvidia-modeset-v5.ko nvidia-drm-v5.ko nvidia-uvm-v5.ko nvidia_gsp_ga10x_fw-v5.ko > SHA256-v6.txt )
+cp "$STAGE/SHA256-v6.txt" "$T/list.save"
 cp "$STAGE/nvidia-uvm-v5.ko" "$T/uvm.save"
 cp "$STAGE/nvidia_gsp_ga10x_fw-v5.ko" "$T/fw.save"
 GBW=$T/gbwork
@@ -80,7 +80,7 @@ if grep -q '^bectl activate' "$T/be.log"; then bad "a dry run called bectl activ
 grep -qF 'arm it with: bectl activate -t nvidia-client-owner-test-20261122-1' "$T/mk.out" && ok "the arm command is printed" || bad "the arm command is not printed"
 grep -q 'no Fable agent runs on this host' "$T/mk.out" && ok "the arm command carries the no-Fable condition" || bad "the arm command lacks the no-Fable condition"
 M=$T/mnt1/root
-for pair in nvidia-v5-phase0.ko:nvidia.ko nvidia-modeset-v5.ko:nvidia-modeset.ko nvidia-uvm-v5.ko:nvidia-uvm.ko nvidia_gsp_ga10x_fw-v5.ko:nvidia_gsp_ga10x_fw.ko; do
+for pair in nvidia-v6-phase0.ko:nvidia.ko nvidia-modeset-v5.ko:nvidia-modeset.ko nvidia-uvm-v5.ko:nvidia-uvm.ko nvidia_gsp_ga10x_fw-v5.ko:nvidia_gsp_ga10x_fw.ko; do
 	s=${pair%%:*}; d=${pair#*:}
 	if [ -f "$M/boot/modules.nvco-test/$d" ] && [ "$(sha256 -q "$M/boot/modules.nvco-test/$d")" = "$(sha256 -q "$STAGE/$s")" ]; then ok "$d is in the clone with the staged hash"; else bad "$d is not in the clone with the staged hash"; fi
 	[ "$(stat -f %Lp "$M/boot/modules.nvco-test/$d")" = 444 ] && ok "$d is mode 0444" || bad "$d is not mode 0444"
@@ -96,7 +96,7 @@ grep -q '^nvidia_client_owner_testboot_cudarun="/usr/local/share/nvidia-client-o
 grep -q '^prime_import_testboot_enable="NO"$' "$M/etc/rc.conf" && ok "another test-boot kit is turned off in rc.conf" || bad "another test-boot kit stays on in rc.conf"
 grep -q '^foo_testboot_enable="NO"$' "$M/etc/rc.conf.d/other" && ok "another test-boot kit is turned off in rc.conf.d" || bad "another test-boot kit stays on in rc.conf.d"
 cmp -s "$KIT/testboot-return" "$M/usr/local/sbin/testboot-return" && ok "testboot-return is installed" || bad "testboot-return is not installed"
-[ -f "$M/usr/local/share/nvidia-client-owner-test/repo/tests/ioctl/run_owner_boot.sh" ] && [ -f "$M/usr/local/share/nvidia-client-owner-test/SHA256-v5.txt" ] && ok "the kit and the hash list are in the clone" || bad "the kit or the hash list is missing from the clone"
+[ -f "$M/usr/local/share/nvidia-client-owner-test/repo/tests/ioctl/run_owner_boot.sh" ] && [ -f "$M/usr/local/share/nvidia-client-owner-test/SHA256-v6.txt" ] && ok "the kit and the hash list are in the clone" || bad "the kit or the hash list is missing from the clone"
 grep -q 'nvidia-client-owner-test-20261122-1' "$T/be.log" && ok "the clone is named nvidia-client-owner-test-<date>-<n>" || bad "the clone name is wrong"
 [ ! -e "$T/mnt1/kit.tar" ] && ok "the scratch archive is removed" || bad "the scratch archive is left"
 
@@ -116,25 +116,25 @@ refuse() {	# refuse <name> <n> <args...>: make-be.sh must fail and leave no boot
 printf 'tampered\n' > "$STAGE/nvidia-uvm-v5.ko"
 refuse changed-module 3
 cp "$T/uvm.save" "$STAGE/nvidia-uvm-v5.ko"
-sed 's/^\(SHA256 (nvidia-v5-phase0.ko) = [0-9a-f]\{63\}\)[0-9a-f]$/\1/' "$T/list.save" > "$STAGE/SHA256-v5.txt"
-cmp -s "$T/list.save" "$STAGE/SHA256-v5.txt" && bad "the short-hash fixture changed nothing"
+sed 's/^\(SHA256 (nvidia-v6-phase0.ko) = [0-9a-f]\{63\}\)[0-9a-f]$/\1/' "$T/list.save" > "$STAGE/SHA256-v6.txt"
+cmp -s "$T/list.save" "$STAGE/SHA256-v6.txt" && bad "the short-hash fixture changed nothing"
 refuse short-hash 4
-sed 's/^\(SHA256 (nvidia-v5-phase0.ko) = \)\([0-9a-f]\{8\}\).*$/\1\2/' "$T/list.save" > "$STAGE/SHA256-v5.txt"
+sed 's/^\(SHA256 (nvidia-v6-phase0.ko) = \)\([0-9a-f]\{8\}\).*$/\1\2/' "$T/list.save" > "$STAGE/SHA256-v6.txt"
 refuse prefix-hash 5
-grep -v 'nvidia-drm-v5.ko' "$T/list.save" > "$STAGE/SHA256-v5.txt"
+grep -v 'nvidia-drm-v5.ko' "$T/list.save" > "$STAGE/SHA256-v6.txt"
 refuse missing-entry 6
-grep -v 'nvidia_gsp_ga10x_fw-v5.ko' "$T/list.save" > "$STAGE/SHA256-v5.txt"
+grep -v 'nvidia_gsp_ga10x_fw-v5.ko' "$T/list.save" > "$STAGE/SHA256-v6.txt"
 refuse missing-firmware-entry 35
-sed 's/^\(SHA256 (nvidia_gsp_ga10x_fw-v5.ko) = \)\([0-9a-f]\{8\}\).*$/\1\2/' "$T/list.save" > "$STAGE/SHA256-v5.txt"
+sed 's/^\(SHA256 (nvidia_gsp_ga10x_fw-v5.ko) = \)\([0-9a-f]\{8\}\).*$/\1\2/' "$T/list.save" > "$STAGE/SHA256-v6.txt"
 refuse firmware-prefix-hash 36
-cp "$T/list.save" "$STAGE/SHA256-v5.txt"
+cp "$T/list.save" "$STAGE/SHA256-v6.txt"
 printf 'tampered firmware\n' > "$STAGE/nvidia_gsp_ga10x_fw-v5.ko"
 refuse changed-firmware 37
 cp "$T/fw.save" "$STAGE/nvidia_gsp_ga10x_fw-v5.ko"
 mv "$STAGE/nvidia_gsp_ga10x_fw-v5.ko" "$T/fw.moved"
 refuse missing-firmware-file 38
 mv "$T/fw.moved" "$STAGE/nvidia_gsp_ga10x_fw-v5.ko"
-cp "$T/list.save" "$STAGE/SHA256-v5.txt"
+cp "$T/list.save" "$STAGE/SHA256-v6.txt"
 printf 'kld_list="filemon amdgpu nvidia"\n' > "$T/basetree/etc/rc.conf"
 refuse base-kld-list-nvidia 7
 base_tree
@@ -196,7 +196,7 @@ done
 CB=$GR/tests/ioctl/testboot/check-be.sh
 GCOMMIT=$(gitq rev-parse HEAD)
 cb() {	# cb <mounted root>: runs check-be.sh on a mounted tree with the fixture list
-	sh "$CB" -U -m "$1" -s "$STAGE/SHA256-v5.txt" -c "$GCOMMIT" > "$T/cb.out" 2>&1
+	sh "$CB" -U -m "$1" -s "$STAGE/SHA256-v6.txt" -c "$GCOMMIT" > "$T/cb.out" 2>&1
 }
 mkdir -p "$T/mnt-git/root/sbin"; : > "$T/mnt-git/root/sbin/shutdown"; chmod +x "$T/mnt-git/root/sbin/shutdown"
 cb "$T/mnt-git/root"; r=$?
@@ -217,7 +217,7 @@ pl_fw_gone() { rm -f "$1/boot/modules.nvco-test/nvidia_gsp_ga10x_fw.ko"; }
 pl_fw_changed() { printf 'tampered\n' > "$1/boot/modules.nvco-test/nvidia_gsp_ga10x_fw.ko"; }
 pl_fw_mode() { chmod 0644 "$1/boot/modules.nvco-test/nvidia_gsp_ga10x_fw.ko"; }
 pl_drm() { : > "$1/boot/modules.nvco-test/nvidia-drm.ko"; }
-pl_list() { printf '# edit\n' >> "$1/usr/local/share/nvidia-client-owner-test/SHA256-v5.txt"; }
+pl_list() { printf '# edit\n' >> "$1/usr/local/share/nvidia-client-owner-test/SHA256-v6.txt"; }
 pl_loader() { grep -v 'panic_reboot_wait_time' "$1/boot/loader.conf" > "$1/boot/loader.conf.new"; mv "$1/boot/loader.conf.new" "$1/boot/loader.conf"; }
 pl_loads_nvidia() { printf 'nvidia_load="YES"\n' >> "$1/boot/loader.conf"; }
 pl_commit() { echo 0000000000000000000000000000000000000000 > "$1/usr/local/etc/nvidia_client_owner_testboot.version"; }
@@ -259,7 +259,7 @@ rcplant deadman-never-armed 's/^\tdeadman_arm$/\t:/'
 rcplant root-open-removed 's/^\t*running root-open /\t\trunning root-skipped /'
 rcplant firmware-never-loaded 's/kldload "\$MODS\/nvidia_gsp_ga10x_fw.ko"/kldload "$MODS\/nvidia_gsp_ga10x_fw-x.ko"/'
 # the check refuses a list with no entry for the firmware
-grep -v 'nvidia_gsp_ga10x_fw-v5.ko' "$STAGE/SHA256-v5.txt" > "$T/list.nofw"
+grep -v 'nvidia_gsp_ga10x_fw-v5.ko' "$STAGE/SHA256-v6.txt" > "$T/list.nofw"
 sh "$CB" -U -m "$T/mnt-git/root" -s "$T/list.nofw" -c "$GCOMMIT" > "$T/cb.out" 2>&1 && bad "check-be: a list without the firmware entry passed" || ok "check-be: a list without the firmware entry fails"
 # more damage that the check must see: other places that load nvidia, rc.subr's own places for the timer, symbolic links, an emptied script
 pl_loaderconfd() { mkdir -p "$1/boot/loader.conf.d"; printf 'nvidia_load="YES"\n' > "$1/boot/loader.conf.d/nv.conf"; }
@@ -293,18 +293,18 @@ rcplant firmware-gate-removed 's/kldstat -q -n nvidia_gsp_ga10x_fw/kldstat -q -n
 rcplant owner-boot-renamed 's/running owner-boot /running owner-x /'
 grep -q '^FAIL order: no owner-boot step in the rc script' "$T/cb.out" && ok "check-be: a missing owner-boot step is named, not blamed on the root open" || { cat "$T/cb.out"; bad "check-be: the owner-boot message blames the wrong step"; }
 # usage and argument rules
-sh "$CB" -U -m "$T/mnt-git/root" -s "$STAGE/SHA256-v5.txt" -c 0123456789abcdef0123456789abcdef01234567 > "$T/cb.out" 2>&1; [ "$?" = 2 ] && ok "check-be: a commit that is not in the repository is a usage error" || bad "check-be: a foreign commit was accepted"
-sh "$CB" -U -m "$T/mnt-git/root" -s "$STAGE/SHA256-v5.txt" -c "--output=$T/cb-injected" > "$T/cb.out" 2>&1; _r=$?
+sh "$CB" -U -m "$T/mnt-git/root" -s "$STAGE/SHA256-v6.txt" -c 0123456789abcdef0123456789abcdef01234567 > "$T/cb.out" 2>&1; [ "$?" = 2 ] && ok "check-be: a commit that is not in the repository is a usage error" || bad "check-be: a foreign commit was accepted"
+sh "$CB" -U -m "$T/mnt-git/root" -s "$STAGE/SHA256-v6.txt" -c "--output=$T/cb-injected" > "$T/cb.out" 2>&1; _r=$?
 if [ "$_r" = 2 ] && ! ls "$T"/cb-injected* > /dev/null 2>&1; then ok "check-be: a commit that starts with a dash is refused and writes nothing"; else bad "check-be: a dash commit was not refused (exit $_r) or wrote a file"; fi
-sh "$CB" -U -s "$STAGE/SHA256-v5.txt" -c "$GCOMMIT" somebe > "$T/cb.out" 2>&1; [ "$?" = 2 ] && ok "check-be: -U without -m is refused" || bad "check-be: -U works on a boot environment"
+sh "$CB" -U -s "$STAGE/SHA256-v6.txt" -c "$GCOMMIT" somebe > "$T/cb.out" 2>&1; [ "$?" = 2 ] && ok "check-be: -U without -m is refused" || bad "check-be: -U works on a boot environment"
 env -u GB10_WORK sh "$CB" -m "$T/mnt-git/root" -c "$GCOMMIT" > "$T/cb.out" 2>&1; _r=$?
 [ "$_r" = 2 ] && grep -q 'GB10_WORK' "$T/cb.out" && ok "check-be: no -s and no GB10_WORK is a usage error naming GB10_WORK" || bad "check-be: the default list path is taken from nowhere"
 if [ "$(id -u)" != 0 ]; then
-	NVCO_NOT_ROOT=1 sh "$CB" -m "$T/mnt-git/root" -s "$STAGE/SHA256-v5.txt" -c "$GCOMMIT" > "$T/cb.out" 2>&1; _r=$?
+	NVCO_NOT_ROOT=1 sh "$CB" -m "$T/mnt-git/root" -s "$STAGE/SHA256-v6.txt" -c "$GCOMMIT" > "$T/cb.out" 2>&1; _r=$?
 	[ "$_r" = 1 ] && grep -q 'must be root-owned' "$T/cb.out" && ok "check-be: NVCO_NOT_ROOT in the environment no longer turns off the ownership check" || bad "check-be: the environment still relaxes the ownership check"
 	cb "$T/mnt-git/root"; grep -q 'owner NOT checked: -U' "$T/cb.out" && ! grep -q 'root-owned' "$T/cb.out" && ok "check-be: with -U the line says the owner was not checked" || bad "check-be: -U still claims root ownership"
 fi
-{ cat "$STAGE/SHA256-v5.txt"; echo 'SHA256 (extra.ko) = 0000000000000000000000000000000000000000000000000000000000000000'; } > "$T/list.six"
+{ cat "$STAGE/SHA256-v6.txt"; echo 'SHA256 (extra.ko) = 0000000000000000000000000000000000000000000000000000000000000000'; } > "$T/list.six"
 sh "$CB" -U -m "$T/mnt-git/root" -s "$T/list.six" -c "$GCOMMIT" > "$T/cb.out" 2>&1; grep -q '^FAIL the list .* five' "$T/cb.out" && ok "check-be: a list of six entries fails" || bad "check-be: a list of six entries passed"
 # the three module tables agree (make-be.sh, check-be.sh, the rc script)
 _mk=$(sed -n 's/^INSTALL="\(.*\)"$/\1/p' "$KIT/make-be.sh" | tr ' ' '\n' | sort)
@@ -380,7 +380,7 @@ plant_refused() {	# plant_refused <name> <seq> <setup fn> <sed args...>: the pla
 	if cmp -s "$KIT/make-be.sh" "$T/pk-$_pn/tests/ioctl/testboot/make-be.sh"; then bad "plant $_pn changed nothing"; return; fi
 	"$_setup"
 	NVCO_MNT=$T/mnt-pk-$_pn/root sh "$T/pk-$_pn/tests/ioctl/testboot/make-be.sh" -m "$STAGE" -D 20261122 -n "$_pseq" > "$T/mk.out" 2>&1 && r=0 || r=$?
-	base_tree; cp "$T/list.save" "$STAGE/SHA256-v5.txt"
+	base_tree; cp "$T/list.save" "$STAGE/SHA256-v6.txt"
 	if [ "$r" = 0 ]; then ok "plant $_pn is red (the refused case is accepted)"; else bad "plant $_pn stays green"; fi
 }
 setup_loader() { printf 'nvidia_load="YES"\n' >> "$T/basetree/boot/loader.conf"; }
@@ -394,9 +394,9 @@ plant_refused packaged-module-guard-off 25 setup_pkg 's/for _d in boot\/modules 
 
 # ---- the rc one-shot on fake commands
 mkdir -p "$T/rc/bin" "$T/rc/kit/repo/tests/ioctl" "$T/rc/mods" "$T/rc/work" "$T/rc/copyout"
-cp "$STAGE/nvidia-v5-phase0.ko" "$T/rc/mods/nvidia.ko"; cp "$STAGE/nvidia-modeset-v5.ko" "$T/rc/mods/nvidia-modeset.ko"; cp "$STAGE/nvidia-uvm-v5.ko" "$T/rc/mods/nvidia-uvm.ko"; cp "$STAGE/nvidia_gsp_ga10x_fw-v5.ko" "$T/rc/mods/nvidia_gsp_ga10x_fw.ko"
+cp "$STAGE/nvidia-v6-phase0.ko" "$T/rc/mods/nvidia.ko"; cp "$STAGE/nvidia-modeset-v5.ko" "$T/rc/mods/nvidia-modeset.ko"; cp "$STAGE/nvidia-uvm-v5.ko" "$T/rc/mods/nvidia-uvm.ko"; cp "$STAGE/nvidia_gsp_ga10x_fw-v5.ko" "$T/rc/mods/nvidia_gsp_ga10x_fw.ko"
 : > "$T/rc/gpu"
-cp "$T/list.save" "$T/rc/kit/SHA256-v5.txt"
+cp "$T/list.save" "$T/rc/kit/SHA256-v6.txt"
 cp "$KIT/summarize.sh" "$T/rc/kit/summarize.sh"
 cp "$REPO/tests/ioctl/uvm_owner_race.c" "$T/rc/kit/repo/tests/ioctl/"
 cat > "$T/rc/kit/repo/tests/ioctl/run_owner_boot.sh" <<'EOF'
@@ -517,7 +517,7 @@ grep -q '^kldload' "$T/rc/log" && bad "rc: a module with a wrong hash was loaded
 tail -1 "$T/rc/log" | grep -q '^testboot-return cloudbsd-rx7600$' && ok "rc: a hash failure still ends with testboot-return" || bad "rc: a hash failure did not end with testboot-return"
 RUN=$(ls -d "$T/rc/work"/2* | head -1)
 tail -1 "$RUN/summary.txt" | grep -q '^KIT$' && ok "rc: a hash failure is KIT, not NO-GO" || bad "rc: a hash failure is not KIT"
-cp "$STAGE/nvidia-v5-phase0.ko" "$T/rc/mods/nvidia.ko"
+cp "$STAGE/nvidia-v6-phase0.ko" "$T/rc/mods/nvidia.ko"
 # panic settings that do not read back as 5 and 0: nothing is loaded
 with FAKE_PANIC_WAIT=15 runrc "$RCS" PASS
 grep -q '^kldload' "$T/rc/log" && bad "rc: modules were loaded with wrong panic settings" || ok "rc: wrong panic settings load nothing"
@@ -615,7 +615,7 @@ sed -e 's/^\tif check_hashes .*$/\tif true; then :; else ok=0; fi/' "$RCS" > "$T
 if cmp -s "$RCS" "$T/rc-plant-hash-unchecked"; then bad "plant hash-unchecked changed nothing"; else
 	printf 'tampered\n' > "$T/rc/mods/nvidia.ko"; runrc "$T/rc-plant-hash-unchecked" PASS
 	if grep -q '^kldload' "$T/rc/log"; then ok "plant hash-unchecked is red (the changed module is loaded)"; else bad "plant hash-unchecked stays green"; fi
-	cp "$STAGE/nvidia-v5-phase0.ko" "$T/rc/mods/nvidia.ko"
+	cp "$STAGE/nvidia-v6-phase0.ko" "$T/rc/mods/nvidia.ko"
 fi
 sed -e 's/if \[ "\$_ps" = "5 0 " \]; then/if true; then/' "$RCS" > "$T/rc-plant-panic-unchecked"
 if cmp -s "$RCS" "$T/rc-plant-panic-unchecked"; then bad "plant panic-unchecked changed nothing"; else

@@ -10,16 +10,17 @@
 #                  brings the host back to it after the run
 #   -b BASE_BE     the boot environment to clone (default NORMAL_BE)
 #   -D DATE, -n SEQ   the name is nvidia-client-owner-test-<DATE>-<SEQ> (today, 1)
-#   -m MODDIR      the directory holding the staged v5 modules, the firmware module included, and the hash list (default
-#                  $GB10_WORK/logs/uvm-2373)
-#   -s FILE        the hash list (default MODDIR/SHA256-v5.txt)
+#   -m MODDIR      the directory holding the staged modules, the firmware module included, and the hash list
+#                  (default $GB10_WORK/logs/uvm-2373)
+#   -s FILE        the hash list (default MODDIR/SHA256-v6.txt: v6 is the kit generation; nvidia.ko is nvidia-v6-phase0.ko,
+#                  the other three modules are the unchanged v5 builds)
 #   --dry-run      everything except `bectl activate`: the boot environment is built and checked, never armed
 #                  (this is the default; the option says so)
 #   --activate     finish with `bectl activate -t BE`: arms the one-shot boot.  Arming is the orchestrator's
 #                  decision: do not use it while a Fable agent runs on the host
 #
 # What it does, in order (any failure after the clone exists removes the half-built boot environment):
-#   1. reads the hash list: the five staged v5 files (nvidia-v5-phase0.ko, nvidia-modeset-v5.ko,
+#   1. reads the hash list: the five staged files (nvidia-v6-phase0.ko, nvidia-modeset-v5.ko,
 #      nvidia-drm-v5.ko, nvidia-uvm-v5.ko and the GSP firmware module nvidia_gsp_ga10x_fw-v5.ko) each need a full literal 64-digit sha256 entry and each staged file
 #      must equal its entry (nvidia-drm is checked and NOT installed: the kit does not load it); the vendored
 #      testboot-return must equal the pin in VENDOR; the kit must be committed (git status clean in sys/ and
@@ -80,7 +81,7 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$BASE" ] || BASE=$NORMAL
 [ -n "$MODDIR" ] || MODDIR=$WORK/logs/uvm-2373
-[ -n "$SHAFILE" ] || SHAFILE=$MODDIR/SHA256-v5.txt
+[ -n "$SHAFILE" ] || SHAFILE=$MODDIR/SHA256-v6.txt
 case $DATE in [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;; *) echo "make-be.sh: -D must be YYYYMMDD" >&2; exit 2 ;; esac
 case $SEQ in '' | *[!0-9]*) echo "make-be.sh: -n must be a number" >&2; exit 2 ;; esac
 for _n in "$NORMAL" "$BASE"; do
@@ -123,9 +124,9 @@ fi
 literal() {	# literal <name>: the single full 64-digit hash the list gives the file, or nothing
 	awk -v n="($1)" '$1 == "SHA256" && $2 == n && $3 == "=" && length($4) == 64 && $4 ~ /^[0-9a-f]+$/ { print $4; c++ } END { exit (c == 1 ? 0 : 1) }' "$SHAFILE"
 }
-[ -f "$SHAFILE" ] || { echo "make-be.sh: no hash list $SHAFILE" >&2; exit 1; }
-[ "$(grep -c '^SHA256 (' "$SHAFILE")" = 5 ] || { echo "make-be.sh: $SHAFILE must hold exactly five lines of the form SHA256 (name) = <64 hex digits>, one each for nvidia-v5-phase0.ko, nvidia-modeset-v5.ko, nvidia-drm-v5.ko, nvidia-uvm-v5.ko and nvidia_gsp_ga10x_fw-v5.ko (sha256 FILE prints that form)" >&2; exit 1; }
-INSTALL="nvidia-v5-phase0.ko:nvidia.ko nvidia-modeset-v5.ko:nvidia-modeset.ko nvidia-uvm-v5.ko:nvidia-uvm.ko nvidia_gsp_ga10x_fw-v5.ko:nvidia_gsp_ga10x_fw.ko"
+[ -f "$SHAFILE" ] || { echo "make-be.sh: no hash list $SHAFILE (the default is MODDIR/SHA256-v6.txt; give -m DIR or -s FILE)" >&2; exit 1; }
+[ "$(grep -c '^SHA256 (' "$SHAFILE")" = 5 ] || { echo "make-be.sh: $SHAFILE must hold exactly five lines of the form SHA256 (name) = <64 hex digits>, one each for nvidia-v6-phase0.ko, nvidia-modeset-v5.ko, nvidia-drm-v5.ko, nvidia-uvm-v5.ko and nvidia_gsp_ga10x_fw-v5.ko (sha256 FILE prints that form)" >&2; exit 1; }
+INSTALL="nvidia-v6-phase0.ko:nvidia.ko nvidia-modeset-v5.ko:nvidia-modeset.ko nvidia-uvm-v5.ko:nvidia-uvm.ko nvidia_gsp_ga10x_fw-v5.ko:nvidia_gsp_ga10x_fw.ko"
 for _p in $INSTALL nvidia-drm-v5.ko:; do
 	_f=${_p%%:*}
 	_want=$(literal "$_f") || { echo "make-be.sh: $SHAFILE has no single full 64-digit sha256 entry for $_f" >&2; exit 1; }
@@ -229,7 +230,7 @@ run install -d $ROOTOWN -m 0755 "$KROOT" "$KROOT/repo" "$MNT/usr/local/sbin" "$M
 tar -xf "$SCRATCH/kit.tar" -C "$KROOT/repo" || { echo "make-be.sh: the kit does not unpack into the clone" >&2; exit 1; }
 [ -z "$ROOTOWN" ] || chown -R root:wheel "$KROOT"
 chmod -R go-w "$KROOT"
-run install $ROOTOWN -m 0444 "$SHAFILE" "$KROOT/SHA256-v5.txt"
+run install $ROOTOWN -m 0444 "$SHAFILE" "$KROOT/SHA256-v6.txt"
 run install $ROOTOWN -m 0555 "$ASRC/summarize.sh" "$KROOT/summarize.sh"
 run install $ROOTOWN -m 0555 "$CUDASRC" "$KROOT/run-linux-cuda.sh"
 run install $ROOTOWN -m 0555 "$ASRC/testboot-return" "$MNT/usr/local/sbin/testboot-return"

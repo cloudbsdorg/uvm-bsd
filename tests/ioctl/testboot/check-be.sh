@@ -10,7 +10,7 @@
 # Usage: check-be.sh [-s SHA256FILE] [-c COMMIT] [-U] [-m MOUNTED_ROOT | BE]
 #   BE          a boot environment to mount with bectl (run as root)
 #   -m ROOT     check the tree already mounted at ROOT instead (no bectl)
-#   -s FILE     the hash list the boot environment was built from (default $GB10_WORK/logs/uvm-2373/SHA256-v5.txt;
+#   -s FILE     the hash list the boot environment was built from (default $GB10_WORK/logs/uvm-2373/SHA256-v6.txt;
 #               without -s, GB10_WORK must be set)
 #   -c COMMIT   the commit the kit must record (default: HEAD of the repository this script is in)
 #   -U          do not check that the files are owned by root (the tests install without root; only with -m)
@@ -58,8 +58,8 @@ BE=${1:-}
 [ -z "$MNT" ] || [ -z "$BE" ] || { echo "check-be.sh: give a boot environment or -m ROOT, not both" >&2; exit 2; }
 [ "$NOOWNER" = 0 ] || [ -n "$MNT" ] || { echo "check-be.sh: -U is only for a tree given with -m" >&2; exit 2; }
 if [ -z "$SHAFILE" ]; then
-	[ -n "${GB10_WORK:-}" ] || { echo "check-be.sh: no hash list: give -s FILE or set GB10_WORK (the list is \$GB10_WORK/logs/uvm-2373/SHA256-v5.txt)" >&2; exit 2; }
-	SHAFILE=$GB10_WORK/logs/uvm-2373/SHA256-v5.txt
+	[ -n "${GB10_WORK:-}" ] || { echo "check-be.sh: no hash list: give -s FILE or set GB10_WORK (the list is \$GB10_WORK/logs/uvm-2373/SHA256-v6.txt)" >&2; exit 2; }
+	SHAFILE=$GB10_WORK/logs/uvm-2373/SHA256-v6.txt
 fi
 [ -f "$SHAFILE" ] || { echo "check-be.sh: no hash list $SHAFILE" >&2; exit 2; }
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_COMMON_DIR
@@ -116,7 +116,7 @@ done
 literal nvidia-drm-v5.ko > /dev/null && ok "the list has a full entry for nvidia-drm-v5.ko (checked, never installed)" || bad "the list has no single full 64-digit entry for nvidia-drm-v5.ko"
 
 # firmware and hashes
-for _p in nvidia-v5-phase0.ko:nvidia.ko nvidia-modeset-v5.ko:nvidia-modeset.ko nvidia-uvm-v5.ko:nvidia-uvm.ko nvidia_gsp_ga10x_fw-v5.ko:nvidia_gsp_ga10x_fw.ko; do
+for _p in nvidia-v6-phase0.ko:nvidia.ko nvidia-modeset-v5.ko:nvidia-modeset.ko nvidia-uvm-v5.ko:nvidia-uvm.ko nvidia_gsp_ga10x_fw-v5.ko:nvidia_gsp_ga10x_fw.ko; do
 	_s=${_p%%:*}; _d=${_p#*:}
 	_want=$(literal "$_s") || { bad "the list has no single full 64-digit entry for $_s"; continue; }
 	if [ ! -f "$MODS/$_d" ]; then bad "$_d is not in /boot/modules.nvco-test"; continue; fi
@@ -130,7 +130,9 @@ for _p in nvidia-v5-phase0.ko:nvidia.ko nvidia-modeset-v5.ko:nvidia-modeset.ko n
 	fi
 done
 [ ! -e "$MODS/nvidia-drm.ko" ] && ok "nvidia-drm.ko is not installed" || bad "nvidia-drm.ko is installed"
-cmp -s "$SHAFILE" "$KROOT/SHA256-v5.txt" && ok "the installed hash list is the given one" || bad "the installed hash list differs from $SHAFILE (or is missing)"
+if [ ! -f "$KROOT/SHA256-v6.txt" ]; then bad "the clone has no SHA256-v6.txt in its kit directory (a clone built before the v6 kit, or a damaged one)"
+elif cmp -s "$SHAFILE" "$KROOT/SHA256-v6.txt"; then ok "the installed hash list is the given one"
+else bad "the installed hash list differs from $SHAFILE"; fi
 
 # loader.conf of the clone
 if grep -q '^kern.panic_reboot_wait_time="5"$' "$MNT/boot/loader.conf" 2> /dev/null && grep -q '^debug.debugger_on_panic="0"$' "$MNT/boot/loader.conf" 2> /dev/null; then ok "loader.conf has the panic settings (5 seconds, no debugger)"; else bad "loader.conf lacks kern.panic_reboot_wait_time=\"5\" or debug.debugger_on_panic=\"0\""; fi
