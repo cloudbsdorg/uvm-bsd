@@ -149,10 +149,19 @@ only from the process that holds the `/dev/nvidiactl` file the client was alloca
   `nvidia.ko`, `nvidia-modeset.ko` and `nvidia-uvm.ko` (never `nvidia-drm.ko`). The firmware comes
   first because firmware(9) refuses it to a non-root caller: the v5 boot loaded nvidia.ko without it,
   the setuid probe made the first GPU open, and the adapter's failure path panicked the host (vmcore.3).
-  Root then opens `/dev/nvidia0` once, before the probe: the `gpu-node` row (the node must exist: KIT when
-  it does not) and the `root-open` row (the open itself: NO-GO when it fails; it shows the adapter
-  initialises as root with the firmware loaded, it does not keep the adapter up). The probe never
-  starts after either failure. `tests/ioctl/testboot/check-be.sh BE` mounts a built boot environment
+  The GPU is found by what the machine reports, never by an index: `tests/ioctl/testboot/gpu-detect.sh`
+  enumerates `/dev/nvidia[0-9]*` (not nvidiactl, nvidia-modeset or nvidia-uvm), matches each node to its
+  PCI device through the driver (`sysctl dev.nvidia.N.%parent`, `pciconf -l`), keeps vendor 0x10de, lists the
+  other display devices (the ASPEED BMC, vendor 0x1a03) as excluded, and with several cards picks by a stated
+  rule (compute controllers before display controllers, then the lowest PCI address); `-d NODE` overrides it and
+  is never the default. On amp001 pciconf lists vgapci0 (AMD), vgapci1 (the NVIDIA card) and vgapci2 (the ASPEED BMC), so the GPU is `/dev/nvidia1`. The enumeration, the choice
+  and the excluded devices go into the results as `gpu-detect.json`. Root then opens the chosen node once,
+  before the probe (row `gpu-node`: KIT when there is no usable NVIDIA node; row `root-open`: NO-GO when the open
+  fails), and row `gpu-verify` (with `gpu-verify.json`) checks that the node that answered is the card that was
+  chosen, by bus address, vendor and device (NO-GO when not); the probe gets the node as `-d NODE`. The open shows
+  the adapter initialises as root with the firmware loaded, it does not keep the adapter up. The probe never
+  starts after a failure.
+  `tests/ioctl/testboot/check-be.sh BE` mounts a built boot environment
   and checks it (run it by hand before arming; make-be.sh does not): the firmware and the modules against the
   hash list, `loader.conf`, the recorded commit, the installed scripts against that commit, and a
   static dead-man proof. The one-shot then runs

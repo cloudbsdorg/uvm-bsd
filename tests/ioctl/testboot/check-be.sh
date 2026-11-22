@@ -155,7 +155,7 @@ _pk=$(ls "$MNT"/boot/modules/nvidia*.ko "$MNT"/boot/kernel/nvidia*.ko 2> /dev/nu
 # the commit
 _v=$(cat "$MNT/usr/local/etc/nvidia_client_owner_testboot.version" 2> /dev/null || echo none)
 [ "$_v" = "$COMMIT" ] && ok "the clone records commit $_v" || bad "the clone records '$_v', not $COMMIT"
-for _f in nvidia_client_owner_testboot:"$RCS" summarize.sh:"$KROOT/summarize.sh" testboot-return:"$MNT/usr/local/sbin/testboot-return" check-be.sh:"$KROOT/repo/tests/ioctl/testboot/check-be.sh"; do
+for _f in nvidia_client_owner_testboot:"$RCS" summarize.sh:"$KROOT/summarize.sh" testboot-return:"$MNT/usr/local/sbin/testboot-return" check-be.sh:"$KROOT/repo/tests/ioctl/testboot/check-be.sh" gpu-detect.sh:"$KROOT/repo/tests/ioctl/testboot/gpu-detect.sh"; do
 	_n=${_f%%:*}; _dst=${_f#*:}
 	if [ ! -f "$_dst" ]; then bad "$_n is not installed in the clone ($_dst)"; continue; fi
 	if ! git_ cat-file -e "$COMMIT:tests/ioctl/testboot/$_n" 2> /dev/null; then bad "$_n is not in commit $COMMIT of $REPO: run this script from a checkout that has the commit"; continue; fi

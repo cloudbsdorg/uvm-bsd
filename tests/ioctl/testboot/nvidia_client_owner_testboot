@@ -19,9 +19,12 @@
 #      setuid probe made the first GPU open, the adapter did not initialise and the failure path panicked the host
 #      (Track #2373, vmcore.3).  The precondition row firmware-loaded (kldstat -q -n nvidia_gsp_ga10x_fw) must pass or
 #      nothing else is loaded (KIT); nvidia-drm.ko is NOT loaded: it is not in the directory;
-#   3b. opens the GPU once as root (rows gpu-node, then root-open: /dev/nvidia0 opened read-write and closed), to show
-#      that the adapter initialises as root with the firmware loaded; a missing node is KIT, a failed open is NO-GO,
-#      and either way the probe never starts;
+#   3b. finds the GPU by what the machine reports (gpu-detect.sh: /dev/nvidiaN nodes matched to their PCI device through
+#      the driver, vendor 0x10de only, the ASPEED BMC left out, several cards chosen by an explicit rule; the enumeration,
+#      the choice and the excluded devices are in gpu-detect.json), opens the chosen node once as root (rows gpu-node,
+#      root-open) and verifies that the node answered and is the card that was chosen (row gpu-verify, gpu-verify.json),
+#      to show that the adapter initialises as root with the firmware loaded; no usable node is KIT, a failed open or a
+#      node that is not the chosen card is NO-GO, and either way the probe never starts;
 #   4. runs run_owner_boot.sh as root, with the dedicated test uids, its results under
 #      /var/db/nvidia-client-owner-test/<run>/work/logs/uvm-2373-boot/<stamp>/;
 #   5. applies the reading rule (summarize.sh) and copies the run out to the home directory (a separate
@@ -40,7 +43,7 @@
 # _uid_a, _uid_b (probe uids, 60003 and 60004; the race loops use the uids defined in uvm_owner_race.c, read
 # from the kit), _kit (/usr/local/share/nvidia-client-owner-test), _mods (/boot/modules.nvco-test), _work
 # (/var/db/nvidia-client-owner-test), _copyout (a directory in the home dataset), _cudarun (the root-owned CUDA
-# vecadd script of the kit), _return (testboot-return), and _load_modeset (YES), and _gpudev (the GPU node opened as root, /dev/nvidia0).  tests/testboot_kit_test.sh
+# vecadd script of the kit), _return (testboot-return), and _load_modeset (YES), and _devdir (where gpu-detect.sh looks for the nvidiaN nodes, /dev).  tests/testboot_kit_test.sh
 # points them at fakes.
 
 . /etc/rc.subr
@@ -63,7 +66,7 @@ stop_cmd=:
 : "${nvidia_client_owner_testboot_cudarun:=/usr/local/share/nvidia-client-owner-test/run-linux-cuda.sh}"
 : "${nvidia_client_owner_testboot_return:=/usr/local/sbin/testboot-return}"
 : "${nvidia_client_owner_testboot_load_modeset:=YES}"
-: "${nvidia_client_owner_testboot_gpudev:=/dev/nvidia0}"
+: "${nvidia_client_owner_testboot_devdir:=/dev}"
 : "${nvidia_client_owner_testboot_lockfile:=/var/run/noshutdown}"
 : "${nvidia_client_owner_testboot_version:=/usr/local/etc/nvidia_client_owner_testboot.version}"
 
@@ -223,28 +226,56 @@ nvidia_client_owner_testboot_start()
 	# the first open of the GPU is made by root, once, before the setuid probe.  It shows that the adapter initialises
 	# as root with the firmware loaded; it does not keep the adapter up (the last close may shut it down), what protects
 	# the probe's own first open is that the firmware module is already loaded.  Two rows: gpu-node is a precondition
-	# (the node must exist after the loads: KIT when it does not), root-open is the open itself (a driver that cannot
+	# (a usable NVIDIA node must be found: KIT when not), gpu-verify checks the opened node is the chosen card, root-open is the open itself (a driver that cannot
 	# initialise the adapter: NO-GO).  root-open is written and synced before the open: a panic leaves it last
 	if [ "$ok" = 1 ]; then
-		if [ -e "$nvidia_client_owner_testboot_gpudev" ]; then
-			row gpu-node pass "$nvidia_client_owner_testboot_gpudev exists"
-			running root-open "root opens $nvidia_client_owner_testboot_gpudev once: a panic from here leaves this row last"
-			if ( exec 3<> "$nvidia_client_owner_testboot_gpudev" ) > "$OUT/root-open.txt" 2>&1; then
-				row root-open pass "root opened and closed $nvidia_client_owner_testboot_gpudev (the adapter initialised as root with the firmware loaded)"
+		GPUNODE=
+		GPUDET="$KIT/repo/tests/ioctl/testboot/gpu-detect.sh"
+		sh "$GPUDET" -D "$nvidia_client_owner_testboot_devdir" > "$OUT/gpu-detect.json" 2> "$OUT/gpu-detect.err"
+		gdj() { sed -n "s/^  \"$1\": \"\\([^\"]*\\)\".*/\\1/p" "$2" | head -1; }
+		GPUSTATUS=$(gdj status "$OUT/gpu-detect.json")
+		GPUNODE=$(gdj selected_node "$OUT/gpu-detect.json")
+		GPUBUS=$(gdj selected_bus_id "$OUT/gpu-detect.json"); GPUVEN=$(gdj selected_vendor "$OUT/gpu-detect.json"); GPUDEV=$(gdj selected_device "$OUT/gpu-detect.json")
+		GPUN=$(grep -c '"usable": true' "$OUT/gpu-detect.json"); GPUDETAIL=$(gdj detail "$OUT/gpu-detect.json")
+		GPUEX=$(sed -n 's/^    {"pci": "\([^"]*\)", "name": "[^"]*", "vendor": "\([^"]*\)".*"role": "\([^"]*\)".*/\1 vendor \2 role \3/p' "$OUT/gpu-detect.json" | tr '\n' ',')
+		if [ "$GPUSTATUS" = selected ] && [ -n "$GPUNODE" ]; then
+			row gpu-node pass "$GPUNODE (bus $GPUBUS, vendor $GPUVEN, device $GPUDEV) chosen among $GPUN usable device(s) by the rule in gpu-detect.json; excluded: ${GPUEX:-none}"
+			running root-open "root opens $GPUNODE once: a panic from here leaves this row last"
+			if ( exec 3<> "$GPUNODE" ) > "$OUT/root-open.txt" 2>&1; then
+				row root-open pass "root opened and closed $GPUNODE (the adapter initialised as root with the firmware loaded)"
+				# verify: ask the driver about the node that was just opened (its unit's parent, that parent's own address,
+				# and what pciconf says about it), not the preflight again; the answer must be the card that was chosen
+				VUNIT=${GPUNODE##*nvidia}
+				VPAR=$(sysctl -n "dev.nvidia.$VUNIT.%parent" 2> /dev/null | head -1)
+				VBUS=$(sysctl -n "dev.vgapci.${VPAR#vgapci}.%location" 2> /dev/null | sed -n 's/.*dbsf=\(pci[0-9]*:[0-9]*:[0-9]*:[0-9]*\).*/\1/p' | head -1)
+				VLINE=$(pciconf -l "$VPAR" 2> /dev/null | head -1)
+				VVEN=$(printf '%s\n' "$VLINE" | sed -n 's/.*[[:space:]]vendor=\(0x[0-9a-fA-F]*\).*/\1/p' | head -1)
+				VDEV=$(printf '%s\n' "$VLINE" | sed -n 's/.*[[:space:]]device=\(0x[0-9a-fA-F]*\).*/\1/p' | head -1)
+				if [ -n "$VBUS" ] && [ "$VBUS" = "$GPUBUS" ] && [ "$VVEN" = "$GPUVEN" ] && [ "$VDEV" = "$GPUDEV" ] && [ "$VVEN" = 0x10de ]; then
+					GPUVERIFY=pass
+					row gpu-verify pass "$GPUNODE answered to the root open and is bus $VBUS, vendor $VVEN, device $VDEV, as chosen"
+				else
+					GPUVERIFY=fail
+					row gpu-verify fail "expected $GPUNODE at bus $GPUBUS vendor $GPUVEN device $GPUDEV, found bus ${VBUS:-none} vendor ${VVEN:-none} device ${VDEV:-none}: not the card that was chosen; the probe is not started"
+					ok=0
+				fi
+				printf '{"schema": "gpu-verify/1", "status": "%s", "node": "%s", "root_open": true, "expected": {"bus_id": "%s", "vendor": "%s", "device": "%s"}, "found": {"bus_id": "%s", "vendor": "%s", "device": "%s"}}\n' \
+				    "$GPUVERIFY" "$GPUNODE" "$GPUBUS" "$GPUVEN" "$GPUDEV" "$VBUS" "$VVEN" "$VDEV" > "$OUT/gpu-verify.json"
 			else
-				row root-open fail "root could not open $nvidia_client_owner_testboot_gpudev: $(head -c 200 "$OUT/root-open.txt" 2>/dev/null | tr '\n' ' '); see dmesg-root-open.txt; the probe is not started"
+				row root-open fail "root could not open $GPUNODE: $(head -c 200 "$OUT/root-open.txt" 2>/dev/null | tr '\n' ' '); see dmesg-root-open.txt; the probe is not started"
+				printf '{"schema": "gpu-verify/1", "status": "fail", "node": "%s", "root_open": false}\n' "$GPUNODE" > "$OUT/gpu-verify.json"
 				ok=0
 			fi
 			dmesg > "$OUT/dmesg-root-open.txt" 2>&1
 		else
-			row gpu-node fail "$nvidia_client_owner_testboot_gpudev does not exist after the loads: nvidia.ko did not create it; see kldload-nvidia.txt and dmesg-loaded.txt; the probe is not started"
+			row gpu-node fail "no usable NVIDIA GPU node: status ${GPUSTATUS:-unreadable} (${GPUDETAIL:-no detail}), other display devices: ${GPUEX:-none}$(sed -n "/\"errors\": \[/,/\]/p" "$OUT/gpu-detect.json" | grep "^    \"" | tr -d "\"" | tr -s " " | tr "\n" ";" | sed "s/^/; errors: /; s/; errors: $//"); see gpu-detect.json (and gpu-detect.err), kldload-nvidia.txt and dmesg-loaded.txt; the probe is not started"
 			ok=0
 		fi
 	fi
 
 	if [ "$ok" = 1 ]; then
 		running owner-boot "run_owner_boot.sh runs the probe and the five race loops: a panic from here leaves this row last"
-		GB10_WORK=$OUT/work NVIDIA_KO=$MODS/nvidia.ko CUDA_VECADD=$nvidia_client_owner_testboot_cudarun \
+		GB10_WORK=$OUT/work GPU_NODE=$GPUNODE NVIDIA_KO=$MODS/nvidia.ko CUDA_VECADD=$nvidia_client_owner_testboot_cudarun \
 		    PROBE_UID_A=$nvidia_client_owner_testboot_uid_a PROBE_UID_B=$nvidia_client_owner_testboot_uid_b \
 		    sh "$KIT/repo/tests/ioctl/run_owner_boot.sh" "$nvidia_client_owner_testboot_seconds" > "$OUT/owner-boot.out" 2>&1
 		orc=$?
