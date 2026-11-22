@@ -10,7 +10,7 @@
 # they are never honoured by root.  MK_KO names a planted module and skips the
 # build, UVM_TEST_KLDXREF names the kldxref executable, and the hidden
 # _check-dest-owner/_check-destdir-ancestors entries expose read-only checks.
-# MAKE and MK_SYSDIR are ordinary build configuration, not test seams.
+# MK_SYSDIR is ordinary build configuration, not a test seam.
 
 set -eu
 umask 022
@@ -134,6 +134,24 @@ validate_paths() {
 	fi
 }
 
+# Internal entries receive a mode assertion, not a privilege selector.
+validate_mode() {
+	case $1 in
+	root)
+		[ "$(id -u)" = 0 ] || {
+			printf 'make.sh: mode root requires effective uid 0\n' >&2
+			exit 2
+		}
+		;;
+	user)
+		[ "$(id -u)" != 0 ] || {
+			printf 'make.sh: mode user requires a nonzero effective uid\n' >&2
+			exit 2
+		}
+		;;
+	esac
+}
+
 # safe_parents ROOT PATH [user]: no existing parent is a symbolic link.  Root
 # installs additionally require every existing parent to belong to root.
 safe_parents() {
@@ -227,14 +245,18 @@ check_dest_component() {
 	fi
 }
 
-# check_dest_ancestors user|root DESTDIR [TEST_UID]: only root mode checks the
-# ancestors above DESTDIR.  TEST_UID is supplied only by the read-only hidden
-# test entry, whose own temporary directories stand in for root-owned ones.
+# Production ancestor checks depend on the effective uid, never on a mode word.
+# The separate walker accepts TEST_UID only for the read-only hidden test entry,
+# whose own temporary directories stand in for root-owned ones.
 check_dest_ancestors() {
-	[ "$1" = root ] || return 0
-	[ -n "$2" ] || return 0
-	_ca_test_uid=${3:-}
-	walk_components / "$2" check_dest_component
+	[ "$(id -u)" = 0 ] || return 0
+	walk_dest_ancestors "$1"
+}
+
+walk_dest_ancestors() {
+	[ -n "$1" ] || return 0
+	_ca_test_uid=${2:-}
+	walk_components / "$1" check_dest_component
 }
 
 stage_files() {
@@ -330,18 +352,27 @@ EOF
 # kldxref is a post-install refresh, not a reason to undo completed files.
 # UVM_TEST_KLDXREF replaces only the command when the test hooks are enabled.
 run_kldxref() {
+	_kx_action=$1
+	_kx_dir=$2
 	_kx=kldxref
 	if test_hooks_enabled && [ -n "${UVM_TEST_KLDXREF:-}" ]; then
 		_kx=$UVM_TEST_KLDXREF
 	fi
-	if "$_kx" "$1"; then
+	if "$_kx" "$_kx_dir"; then
 		return 0
 	fi
 	if [ -z "$DESTDIR" ]; then
-		note "kldxref $1 failed: the module is installed but the loader index is stale; run doas kldxref $1"
+		case $_kx_action in
+		install)
+			note "kldxref $_kx_dir failed: the module is installed but the loader index is stale; run doas kldxref $_kx_dir"
+			;;
+		deinstall)
+			note "kldxref $_kx_dir failed: the module was removed but the loader index is stale; run kldxref $_kx_dir as root"
+			;;
+		esac
 		return 1
 	fi
-	note "kldxref $1 failed"
+	note "kldxref $_kx_dir failed"
 	return 0
 }
 
@@ -356,7 +387,7 @@ install_stage() {
 	_manifest=$_d$STATEDIR/installed.manifest
 	[ "$_mode" != root ] || [ "$(id -u)" = 0 ] || die "the root install step was not entered through as_root"
 	check_dest_owner "$_mode"
-	check_dest_ancestors "$_mode" "$_d"
+	check_dest_ancestors "$_d"
 	safe_parents "$_d" "$STATEDIR/x" "$_mode" || die "refusing $_d$STATEDIR: a directory on the way is a symbolic link or not root's"
 	if [ -e "$_manifest" ] || [ -L "$_manifest" ]; then
 		[ -f "$_manifest" ] && [ ! -L "$_manifest" ] || die "refusing $_manifest: not a regular manifest"
@@ -447,15 +478,22 @@ $_dir"
 	_w=
 	trap - EXIT HUP INT TERM
 
-	run_kldxref "$_d/boot/modules"
+	run_kldxref install "$_d/boot/modules"
 }
 
 do_install() {
 	_ko=$repo/sys/nvidia-uvm.ko
-	if test_hooks_enabled && [ -n "${MK_KO:-}" ]; then
+	if [ "$(id -u)" = 0 ]; then
+		if [ ! -f "$_ko" ] || [ -L "$_ko" ]; then
+			die "install: run make (as the owner of the checkout) first, then make install"
+		fi
+		_newer=$(find "$repo/sys" "$repo/core" -type f -newer "$_ko" -print -quit) ||
+		    die "install: run make (as the owner of the checkout) first, then make install"
+		[ -z "$_newer" ] || die "install: run make (as the owner of the checkout) first, then make install"
+	elif test_hooks_enabled && [ -n "${MK_KO:-}" ]; then
 		_ko=$MK_KO
 	else
-		(cd "$repo/sys" && ${MAKE:-make} SYSDIR="$SYSDIR") || die "install: building nvidia-uvm.ko failed"
+		(cd "$repo/sys" && /usr/bin/make SYSDIR="$SYSDIR") || die "install: building nvidia-uvm.ko failed"
 	fi
 	[ -f "$_ko" ] && [ ! -L "$_ko" ] || die "install: $_ko is not a regular file"
 	_man=$repo/man/nvidia-uvm.4
@@ -483,7 +521,7 @@ deinstall_manifest() {
 	_mode=$3
 	_manifest=$_d$STATEDIR/installed.manifest
 	check_dest_owner "$_mode"
-	check_dest_ancestors "$_mode" "$_d"
+	check_dest_ancestors "$_d"
 	[ -f "$_manifest" ] || return 0
 	[ ! -L "$_manifest" ] || die "refusing $_manifest: symbolic link"
 	safe_parents "$_d" "$STATEDIR/installed.manifest" "$_mode" || die "refusing $_manifest: a directory on the way is a symbolic link or not root's"
@@ -540,10 +578,12 @@ deinstall_manifest() {
 	fi
 	# Refresh linker.hints while its directory still exists.  Install owns the
 	# hints file only when it created boot/modules; even then, leave refreshed
-	# hints behind if another file now needs that directory.
+	# hints behind if another file now needs that directory.  Save a live
+	# failure so all recorded-directory cleanup still runs before returning it.
+	_kx_rc=0
 	if [ -d "$_d/boot/modules" ] && [ ! -L "$_d/boot/modules" ] &&
 	    safe_parents "$_d" /boot/modules/linker.hints "$_mode"; then
-		run_kldxref "$_d/boot/modules"
+		run_kldxref deinstall "$_d/boot/modules" || _kx_rc=$?
 		if [ "$_modules_created" = 1 ] &&
 		    [ -z "$(find "$_d/boot/modules" -mindepth 1 -maxdepth 1 ! -name linker.hints -print -quit)" ]; then
 			rm -f -- "$_d/boot/modules/linker.hints"
@@ -557,6 +597,7 @@ deinstall_manifest() {
 		fi
 	done
 	[ "$_rc" = 0 ] && note "deinstall: done" || note "deinstall: done, with changed files kept (listed in $_manifest)"
+	[ "$_kx_rc" = 0 ] || return "$_kx_rc"
 	return "$_rc"
 }
 
@@ -599,7 +640,9 @@ _check-destdir-ancestors)
 	DESTDIR=$3
 	test_hooks_enabled || die "test hooks are disabled"
 	validate_paths
-	check_dest_ancestors "$2" "$DESTDIR" "$(id -u)"
+	if [ "$2" = root ]; then
+		walk_dest_ancestors "$DESTDIR" "$(id -u)"
+	fi
 	;;
 install-prereqs)
 	_missing=
@@ -629,6 +672,7 @@ _install-stage)
 	user|root) ;;
 	*) printf 'make.sh: invalid install mode: %s\n' "$4" >&2; exit 2 ;;
 	esac
+	validate_mode "$4"
 	DESTDIR=$2
 	PREFIX=$3
 	MANIFEST=$DESTDIR$STATEDIR/installed.manifest
@@ -641,6 +685,7 @@ _deinstall)
 	user|root) ;;
 	*) printf 'make.sh: invalid deinstall mode: %s\n' "$4" >&2; exit 2 ;;
 	esac
+	validate_mode "$4"
 	DESTDIR=$2
 	PREFIX=$3
 	MANIFEST=$DESTDIR$STATEDIR/installed.manifest

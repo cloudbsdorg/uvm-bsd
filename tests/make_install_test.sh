@@ -157,8 +157,8 @@ for hook_entry in _check-dest-owner _check-destdir-ancestors; do
 done
 
 # The command seam itself is exercised, not merely source-matched.  The real
-# install-stage function must call the default kldxref from PATH and must never
-# execute the environment-supplied command when the effective uid is zero.
+# gate and run_kldxref functions must call the default kldxref from PATH and
+# never execute the environment-supplied command when the effective uid is 0.
 cat > "$hook_root_bin/kldxref" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$1" > "$KLDXREF_DEFAULT_LOG"
@@ -168,10 +168,19 @@ cat > "$T/kldxref-forbidden" <<'EOF'
 printf '%s\n' executed > "$KLDXREF_FORBIDDEN_LOG"
 EOF
 chmod 555 "$hook_root_bin/kldxref" "$T/kldxref-forbidden"
-KLDXREF_DEFAULT_LOG="$T/kldxref-default.log" \
+sed -n '/^test_hooks_enabled() {$/,/^}$/p' "$REPO/scripts/make.sh" > "$T/hook-root-gate.sh"
+awk '/^run_kldxref\(\) \{$/ { copy = 1 } copy { print } copy && /^}$/ { exit }' \
+    "$REPO/scripts/make.sh" > "$T/hook-root-kldxref-function.sh"
+{
+	printf '%s\n' 'set -u' 'DESTDIR=$1'
+	cat "$T/hook-root-gate.sh" "$T/hook-root-kldxref-function.sh"
+	printf '%s\n' 'run_kldxref install "$2"'
+} > "$T/hook-root-kldxref-test.sh"
+PATH="$hook_root_bin:/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin" \
+    KLDXREF_DEFAULT_LOG="$T/kldxref-default.log" \
     KLDXREF_FORBIDDEN_LOG="$T/kldxref-forbidden.log" \
     UVM_TEST_KLDXREF="$T/kldxref-forbidden" \
-    sh "$hook_root_engine" _install-stage "$hook_root_dest" /usr/local user "$fake" "$fake" \
+    sh "$T/hook-root-kldxref-test.sh" "$hook_root_dest" "$hook_root_dest/boot/modules" \
     > "$T/hook-root-kldxref.out" 2>&1
 r=$?
 if [ "$r" -eq 0 ] &&
@@ -218,6 +227,38 @@ for entry in _install-stage _deinstall; do
 	fi
 done
 
+# The internal mode is an assertion about the effective uid, never a request
+# to weaken or acquire privilege.  Both disagreement directions are usage
+# errors, before either engine can inspect or modify its destination.
+for uid_case in normal-root root-user; do
+	for entry in _install-stage _deinstall; do
+		mismatch_dest=$T/mode-mismatch-$uid_case-$entry
+		mkdir -- "$mismatch_dest"
+		if [ "$uid_case" = normal-root ]; then
+			mismatch_engine=$REPO/scripts/make.sh
+			mismatch_mode=root
+		else
+			mismatch_engine=$hook_root_engine
+			mismatch_mode=user
+		fi
+		if [ "$entry" = _install-stage ]; then
+			KLDXREF_DEFAULT_LOG="$T/mode-mismatch-kldxref.log" sh "$mismatch_engine" \
+			    _install-stage "$mismatch_dest" /usr/local "$mismatch_mode" "$fake" "$fake" \
+			    > "$T/mode-mismatch-$uid_case-$entry.out" 2>&1
+		else
+			sh "$mismatch_engine" _deinstall "$mismatch_dest" /usr/local "$mismatch_mode" \
+			    > "$T/mode-mismatch-$uid_case-$entry.out" 2>&1
+		fi
+		r=$?
+		if [ "$r" -eq 2 ] && [ -z "$(find "$mismatch_dest" -mindepth 1 -print -quit)" ]; then
+			ok "$entry refuses mode $mismatch_mode at the $uid_case effective uid with exit 2"
+		else
+			bad "$entry accepted mode $mismatch_mode at the $uid_case effective uid (exit $r)"
+			show "$T/mode-mismatch-$uid_case-$entry.out"
+		fi
+	done
+done
+
 # PREFIX is a manifest field and a path fragment, so a backslash is not data:
 # every public and internal entry must reject it as a usage error.
 bad_prefix='/usr/local\bad'
@@ -262,31 +303,38 @@ else
 fi
 
 # Without MK_KO, an existing module is stale until the build has run.  A
-# scratch engine differs only in its repository root, so the stub build plants
-# its module in the fixture rather than the real source tree.
+# scratch engine differs only in its repository root, so its Makefile plants
+# the module in the fixture rather than the real source tree.  Both MAKE and
+# PATH name a failing stub: only the absolute /usr/bin/make may run the build.
 build_repo=$T/build-repo
 build_dest=$T/build-dest
-build_stub=$T/build-stub
+build_bin=$T/build-bin
 build_engine=$T/make-build.sh
-mkdir -p -- "$build_repo/sys" "$build_repo/man" "$build_dest"
+mkdir -p -- "$build_repo/sys" "$build_repo/core" "$build_repo/man" "$build_dest" "$build_bin"
 printf '%s\n' 'stale module' > "$build_repo/sys/nvidia-uvm.ko"
 printf '%s\n' 'manual fixture' > "$build_repo/man/nvidia-uvm.4"
-cat > "$build_stub" <<'EOF'
-#!/bin/sh
-printf '%s\n' 'build ran' >> "$BUILD_LOG"
-printf '%s\n' 'rebuilt module' > "$BUILD_MODULE"
+cat > "$build_repo/sys/Makefile" <<'EOF'
+all:
+	@printf '%s\n' 'build ran' >> "$${BUILD_LOG}"
+	@printf '%s\n' 'rebuilt module' > nvidia-uvm.ko
 EOF
-chmod 555 "$build_stub"
-sed "s|^repo=.*|repo=$build_repo|" "$REPO/scripts/make.sh" > "$build_engine"
-BUILD_LOG="$T/build.log" BUILD_MODULE="$build_repo/sys/nvidia-uvm.ko" \
-    MAKE="$build_stub" MK_YES=1 MK_DESTDIR="$build_dest" \
+cat > "$build_bin/make" <<'EOF'
+#!/bin/sh
+printf '%s\n' 'unapproved build ran' >> "$BUILD_LOG"
+exit 1
+EOF
+chmod 555 "$build_bin/make"
+sed -e "s|^PATH=.*|PATH=$build_bin:/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin|" \
+    -e "s|^repo=.*|repo=$build_repo|" "$REPO/scripts/make.sh" > "$build_engine"
+BUILD_LOG="$T/build.log" MAKE="$build_bin/make" MK_YES=1 MK_DESTDIR="$build_dest" \
     sh "$build_engine" install > "$T/build-install.out" 2>&1
 r=$?
 if [ "$r" -eq 0 ] && grep -qxF 'build ran' "$T/build.log" 2>/dev/null &&
+    ! grep -qxF 'unapproved build ran' "$T/build.log" 2>/dev/null &&
     [ "$(sed -n '1p' "$build_dest/boot/modules/nvidia-uvm.ko")" = 'rebuilt module' ]; then
-	ok "install runs the module build even when a stale module exists"
+	ok "a normal-user install builds with /usr/bin/make, ignoring MAKE and PATH"
 else
-	bad "install trusted a stale module without running the build (exit $r)"
+	bad "a normal-user install did not use only /usr/bin/make for the build (exit $r)"
 	show "$T/build-install.out"
 	show "$T/build.log"
 fi
@@ -295,8 +343,8 @@ fi
 # hook gate, the normal build runs and its output wins over the planted file.
 build_no_hook_dest=$T/build-no-hook-dest
 mkdir -- "$build_no_hook_dest"
-BUILD_LOG="$T/build-no-hook.log" BUILD_MODULE="$build_repo/sys/nvidia-uvm.ko" \
-    MAKE="$build_stub" UVM_TEST_HOOKS=0 MK_KO="$fake" MK_YES=1 MK_DESTDIR="$build_no_hook_dest" \
+BUILD_LOG="$T/build-no-hook.log" \
+    MAKE="$build_bin/make" UVM_TEST_HOOKS=0 MK_KO="$fake" MK_YES=1 MK_DESTDIR="$build_no_hook_dest" \
     sh "$build_engine" install > "$T/build-no-hook.out" 2>&1
 r=$?
 if [ "$r" -eq 0 ] && grep -qxF 'build ran' "$T/build-no-hook.log" 2>/dev/null &&
@@ -312,8 +360,8 @@ fi
 # build stub must not run.  This distinguishes the test path from production.
 build_hook_dest=$T/build-hook-dest
 mkdir -- "$build_hook_dest"
-BUILD_LOG="$T/build-hook.log" BUILD_MODULE="$build_repo/sys/nvidia-uvm.ko" \
-    MAKE="$build_stub" UVM_TEST_HOOKS=1 MK_KO="$fake" MK_YES=1 MK_DESTDIR="$build_hook_dest" \
+BUILD_LOG="$T/build-hook.log" \
+    MAKE="$build_bin/make" UVM_TEST_HOOKS=1 MK_KO="$fake" MK_YES=1 MK_DESTDIR="$build_hook_dest" \
     sh "$build_engine" install > "$T/build-hook.out" 2>&1
 r=$?
 if [ "$r" -eq 0 ] && [ ! -e "$T/build-hook.log" ] &&
@@ -325,10 +373,12 @@ else
 	show "$T/build-hook.log"
 fi
 
-# At simulated effective uid zero, MK_KO must not bypass the build even with
-# UVM_TEST_HOOKS=1.  The build stub fails before any privileged install stage.
+# At simulated effective uid zero, no build command may run.  A module older
+# than any source below sys/ or core/ is refused with the owner-build remedy;
+# neither MK_KO nor MAKE can bypass that refusal.
 hook_root_build_dest=$T/hook-root-build-dest
 root_build_stub=$T/root-build-stub
+root_build_engine=$T/make-root-build.sh
 mkdir -- "$hook_root_build_dest"
 cat > "$root_build_stub" <<'EOF'
 #!/bin/sh
@@ -336,15 +386,20 @@ printf '%s\n' 'root build attempted' > "$ROOT_BUILD_LOG"
 exit 1
 EOF
 chmod 555 "$root_build_stub"
+sed -e "s|^PATH=.*|PATH=$hook_root_bin:/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin|" \
+    -e "s|^repo=.*|repo=$build_repo|" "$REPO/scripts/make.sh" > "$root_build_engine"
+touch -t 200001010000 "$build_repo/sys/nvidia-uvm.ko"
+printf '%s\n' 'newer source fixture' > "$build_repo/core/root-stale-source"
 ROOT_BUILD_LOG="$T/root-build.log" MAKE="$root_build_stub" MK_KO="$fake" \
     MK_YES=1 MK_DESTDIR="$hook_root_build_dest" UVM_TEST_HOOKS=1 \
-    sh "$hook_root_engine" install > "$T/root-build.out" 2>&1
+    sh "$root_build_engine" install > "$T/root-build.out" 2>&1
 r=$?
-if [ "$r" -ne 0 ] && grep -qxF 'root build attempted' "$T/root-build.log" 2>/dev/null &&
+if [ "$r" -ne 0 ] && [ ! -e "$T/root-build.log" ] &&
+    grep -qF 'run make (as the owner of the checkout) first, then make install' "$T/root-build.out" &&
     [ ! -e "$hook_root_build_dest/boot/modules/nvidia-uvm.ko" ]; then
-	ok "effective uid zero ignores MK_KO and attempts the normal build"
+	ok "effective uid zero refuses a stale module without running a build"
 else
-	bad "effective uid zero honoured MK_KO or skipped the normal build (exit $r)"
+	bad "effective uid zero ran a build or accepted a stale module (exit $r)"
 	show "$T/root-build.out"
 	show "$T/root-build.log"
 fi
@@ -440,25 +495,74 @@ else
 fi
 
 # Exercise run_kldxref itself with a failing false command and empty DESTDIR.
-# This covers the live-install branch without touching the host's /boot.  The
-# preceding fixture proves that the call happens after the manifest is final.
+# This covers both live branches without touching the host's /boot.  The
+# preceding fixture proves that install calls it after the manifest is final.
 awk '/^run_kldxref\(\) \{$/ { copy = 1 } copy { print } copy && /^}$/ { exit }' \
     "$REPO/scripts/make.sh" | sed 's|_kx=kldxref|_kx=false|' > "$T/live-kldxref-function.sh"
-{
-	printf '%s\n' 'set -u' 'DESTDIR=' 'test_hooks_enabled() { return 1; }' \
-	    'note() { printf "%s\\n" "$*"; }'
-	cat "$T/live-kldxref-function.sh"
-	printf '%s\n' 'run_kldxref /boot/modules'
-} > "$T/live-kldxref-test.sh"
-sh "$T/live-kldxref-test.sh" > "$T/live-kldxref.out" 2>&1
+for kld_action in install deinstall; do
+	{
+		printf '%s\n' 'set -u' 'DESTDIR=' 'test_hooks_enabled() { return 1; }' \
+		    'note() { printf "%s\\n" "$*"; }'
+		cat "$T/live-kldxref-function.sh"
+		printf 'run_kldxref %s /boot/modules\n' "$kld_action"
+	} > "$T/live-kldxref-$kld_action-test.sh"
+	sh "$T/live-kldxref-$kld_action-test.sh" > "$T/live-kldxref-$kld_action.out" 2>&1
+	r=$?
+	case $kld_action in
+	install)
+		kld_expected='kldxref /boot/modules failed: the module is installed but the loader index is stale; run doas kldxref /boot/modules'
+		;;
+	deinstall)
+		kld_expected='kldxref /boot/modules failed: the module was removed but the loader index is stale; run kldxref /boot/modules as root'
+		;;
+	esac
+	if [ "$r" -eq 1 ] && grep -qxF "$kld_expected" "$T/live-kldxref-$kld_action.out"; then
+		ok "a live $kld_action kldxref failure gives its remedy and exits 1"
+	else
+		bad "a live $kld_action kldxref failure lacked the required remedy (exit $r)"
+		show "$T/live-kldxref-$kld_action.out"
+	fi
+done
+
+# A live deinstall must finish removing its directories before returning the
+# kldxref failure.  Only the scratch engine's global DESTDIR is cleared (which
+# selects the fatal live diagnostic); its explicit root remains the test tree.
+live_deinstall_dest=$T/live-deinstall
+live_deinstall_bin=$T/live-deinstall-bin
+live_deinstall_engine=$T/make-live-deinstall.sh
+mkdir -- "$live_deinstall_dest" "$live_deinstall_bin"
+(
+	cd "$REPO" || exit 2
+	make install YES=1 DESTDIR="$live_deinstall_dest" MK_KO="$fake"
+) > "$T/live-deinstall-install.out" 2>&1
 r=$?
-if [ "$r" -eq 1 ] && grep -qxF \
-    'kldxref /boot/modules failed: the module is installed but the loader index is stale; run doas kldxref /boot/modules' \
-    "$T/live-kldxref.out"; then
-	ok "a live kldxref failure gives the remedy and exits 1"
+cat > "$live_deinstall_bin/kldxref" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$1" >> "$LIVE_KLDXREF_LOG"
+exit 1
+EOF
+chmod 555 "$live_deinstall_bin/kldxref"
+sed -e "s|^PATH=.*|PATH=$live_deinstall_bin:/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin|" \
+    -e 's|DESTDIR=\$2|DESTDIR=|g' \
+    -e 's|deinstall_manifest "\$DESTDIR"|deinstall_manifest "$2"|' \
+    "$REPO/scripts/make.sh" > "$live_deinstall_engine"
+if [ "$r" -eq 0 ] && [ -f "$live_deinstall_dest/var/db/uvm-bsd/installed.manifest" ]; then
+	LIVE_KLDXREF_LOG="$T/live-deinstall-kldxref.log" sh "$live_deinstall_engine" \
+	    _deinstall "$live_deinstall_dest" /usr/local user > "$T/live-deinstall-failure.out" 2>&1
+	r=$?
 else
-	bad "a live kldxref failure was not fatal with the required remedy (exit $r)"
-	show "$T/live-kldxref.out"
+	bad "could not establish the live deinstall cleanup fixture (install exit $r)"
+	show "$T/live-deinstall-install.out"
+fi
+if [ "$r" -eq 1 ] && grep -qF \
+    'the module was removed but the loader index is stale; run kldxref' "$T/live-deinstall-failure.out" &&
+    grep -qxF "$live_deinstall_dest/boot/modules" "$T/live-deinstall-kldxref.log" 2>/dev/null &&
+    [ -z "$(find "$live_deinstall_dest" -mindepth 1 -print -quit)" ]; then
+	ok "a live deinstall kldxref failure is reported after cleanup"
+else
+	bad "a live deinstall kldxref failure skipped cleanup or used the install text (exit $r)"
+	show "$T/live-deinstall-failure.out"
+	show "$T/live-deinstall-kldxref.log"
 fi
 
 # Install controls the modes it creates instead of inheriting a caller's

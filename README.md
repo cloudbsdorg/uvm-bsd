@@ -111,9 +111,14 @@ kernel cannot load ("symbol nvUvmInterfaceChannelDestroy undefined").
 ## Install
 
 ```sh
-make install            # run the incremental build, then install as root
+make install            # install the checkout owner's build as root
 make deinstall          # remove exactly what install wrote
 ```
+
+Run `make` as the owner of the checkout before running `make install` as root.
+An effective-uid-0 install never builds in the source tree and refuses a
+missing or stale module. A normal-user staging install still runs the
+incremental build with `/usr/bin/make`.
 
 Both commands ask first. For scripts and other non-interactive runs, add
 `YES=1`, for example `make install YES=1`.
