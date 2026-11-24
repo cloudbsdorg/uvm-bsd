@@ -198,3 +198,49 @@ nvidia-gb10-freebsd; FreeBSD sources `sys/kern/kern_descrip.c`, `sys/fs/devfs/de
 `sys/sys/file.h` and Capsicum's `sys/sys/caprights.h` (`CAP_IOCTL`). Nothing from the Linux kernel,
 `kernel-open/` or the describer's notes was read. The rule is `sys/uvm_client_owner.h`; the
 nvidia.ko side is `src/gb10-client-owner/` in nvidia-gb10-freebsd.
+
+## 2026-11-24: GPUs without video memory (GB10, branch `gb10-no-pma`)
+
+On the GB10 SoC GPU (chip GB20B, PCI 10de:2e12) registration stopped at the request for the PMA
+object: RM has no PMA where there is no frame buffer. What changed:
+
+- `sys/uvm_fb_state.h` (new): the rule, as pure functions. A GPU has no video memory when the frame
+  buffer description says so (`bZeroFb`) or shows no heap, no reserved heap and no allocatable
+  address; `NV_ERR_OBJECT_NOT_FOUND` from `nvUvmInterfaceGetPmaObject` is normal on such a GPU and
+  only there; the GPFIFO goes to system memory on such a GPU whatever the tunable says.
+- `sys/uvm_gpu.c`: registration goes on without a PMA object on such a GPU, registers no eviction
+  callbacks, and its failure path unregisters them only when they were registered. A GPU with video
+  memory takes the same path as before.
+- `sys/uvm_channel.c`, `sys/uvm.h`: the channel manager records where the GPFIFO goes and never asks
+  RM for video memory on a GPU that has none (`hw.nvidia_uvm.sysmem_gpfifo=0` is ignored there).
+- `tests/unit/fb_state_test.c` (new) checks every row of the rule; `tests/run_unit_tests.sh` pins the
+  two call sites.
+
+Permitted sources consulted, all under
+`/home/dch/src/nvidia-gb10-freebsd/work/sources/open-gpu-kernel-modules-580.178.04/src/nvidia/`
+(MIT) unless a full path is given:
+
+- `src/kernel/rmapi/nv_gpu_ops.c`: `queryFbInfo` (a zero-FB GPU gets the description cleared and no
+  query is made; `bZeroFb` is the "FB is broken" answer otherwise), `nvGpuOpsGetFbInfo`,
+  `nvGpuOpsGetPmaObject` (the three checks that answer `NV_ERR_OBJECT_NOT_FOUND`),
+  `deviceNeedsDummyAlloc`, `channelNeedsDummyAlloc`, `channelAllocate` (buffer location defaults and
+  the allocations it makes), `nvGpuOpsAllocPhysical`, `nvGpuOpsGpuMalloc`, `nvGpuOpsMemoryAllocSys`,
+  `nvGpuOpsMemoryAllocFb`, `queryCopyEngines`, `setCeCaps`, `nvGpuOpsQueryCesCaps`,
+  `nvGpuOpsQueryCaps`, `getSysmemLinkInfo`, `nvGpuOpsSetPageDirectory`, and the lines that fill
+  `sysmem` in the memory and channel descriptions.
+- `src/kernel/gpu/mem_mgr/heap.c` (the PMA is marked initialised only when frame buffer regions
+  exist), `src/kernel/gpu/mem_mgr/mem_mgr.c`, `src/kernel/gpu/mem_mgr/dma.c`
+  (`deviceCtrlCmdDmaSetPageDirectory_IMPL`, the zero-FB order), `src/kernel/gpu/mem_mgr/vaspace_api.c`,
+  `src/kernel/mem_mgr/video_mem.c`, `src/kernel/mem_mgr/virtual_mem.c`,
+  `src/kernel/gpu/fifo/kernel_channel.c`, `src/kernel/gpu/fifo/arch/maxwell/kernel_channel_gm107.c`,
+  `src/kernel/gpu/bus/kern_bus_ctrl.c`, `src/kernel/gpu_mgr/gpu_mgr.c`: short excerpts around the
+  uses of `PDB_PROP_GPU_ZERO_FB` and `memmgrIsPmaInitialized`, found by `grep` run on `src/` only.
+- This repository: `sys/uvm_gpu.c`, `sys/uvm_channel.c`, `sys/uvm_page_tree.c`, `sys/uvm_va_space.c`,
+  `sys/uvm_faults.c`, `sys/uvm_backend_nvidia.c`, `sys/uvm_main.c`, `sys/uvm.h`,
+  `sys/nvidia_uvm_rm.h`, `sys/nvidia_uvm_status.h`, `sys/uvm_unload_state.h`, the tests.
+
+No FreeBSD source and no file of `nvidia-gb10-freebsd/src/gb10-uvm` was needed. None of the
+forbidden paths was opened, listed, searched or fetched: no `kernel-open` directory, no Linux kernel
+or drm-kmod source, nothing under `/home/dch/src/nvidia-uvm-freebsd`, `/home/dch/src/ogkm-ref` or
+`/home/dch/ai/spark/ref`. Every search of the NVIDIA checkout ran on its `src/` subdirectory. The
+observed behaviour (the kernel log lines of the failed registration) came with the task.
