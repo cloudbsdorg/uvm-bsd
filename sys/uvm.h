@@ -191,6 +191,7 @@ struct uvm_channel_manager {
 	UvmGpuPointer		sema_gpu_va;
 	volatile uint32_t	*sema_cpu;
 	uint32_t		gpfifo_entries;
+	bool			gpfifo_sysmem;	/* GPFIFO ring and PUT word in system memory */
 };
 
 struct uvm_push {

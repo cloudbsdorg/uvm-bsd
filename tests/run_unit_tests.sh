@@ -70,7 +70,8 @@ for pat in 'sys/uvm_main.c:uvm_open_admit(uvm.unloading)' 'sys/uvm_main.c:uvm_un
     'sys/uvm_main.c:uvm.unloading = true' 'sys/uvm_main.c:sysctl_ctx_free(&uvm_sysctl_ctx)' \
     'sys/uvm_mmap.c:uvm_pager_ctor_mem_refs()' 'sys/uvm_mmap.c:uvm_pager_mapper_drops_ref(' \
     'sys/uvm_main.c:MODULE_DEPEND(nvidia_uvm, nvidia, 2, 2, 2)' \
-    'sys/uvm_gpu.c:uvm_fb_pma_absent_ok(status, &gpu->fb)'; do
+    'sys/uvm_gpu.c:uvm_fb_pma_absent_ok(status, &gpu->fb)' \
+    'sys/uvm_channel.c:uvm_fb_gpfifo_in_sysmem('; do
 	if grep -qF -- "${pat#*:}" "$REPO/${pat%%:*}"; then
 		echo "ok   ${pat%%:*} uses ${pat#*:}"
 	else
