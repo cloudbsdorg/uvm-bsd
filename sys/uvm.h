@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2026 REVYTECH, Inc.
+ * Copyright (c) 2026 SkunkWerks, GmbH
  * SPDX-License-Identifier: BSD-2-Clause
  *
  * uvm.h - internal types of nvidia-uvm.ko: module state, VA spaces and
@@ -49,6 +50,7 @@
 #include "uvm_pte.h"
 #include "uvm_mm_state.h"
 #include "uvm_unload_state.h"
+#include "uvm_fb_state.h"
 #include "uvm_pt_loop.h"
 
 MALLOC_DECLARE(M_NVIDIA_UVM);
@@ -371,8 +373,8 @@ struct uvm_gpu {
 	UvmGpuFaultInfo		fault_info;
 	uvmGpuDeviceHandle	rm_device;
 	uvmGpuAddressSpaceHandle rm_as;
-	void			*pma;
-	const UvmPmaStatistics	*pma_stats;
+	void			*pma;		/* NULL on a GPU without video memory: RM has no PMA there */
+	const UvmPmaStatistics	*pma_stats;	/* NULL with it */
 	bool			pma_callbacks_registered;
 	bool			fault_info_valid;
 	bool			owns_fault_intr;

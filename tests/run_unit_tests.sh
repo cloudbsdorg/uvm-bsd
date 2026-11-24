@@ -1,5 +1,6 @@
 #!/bin/sh
 # Copyright (c) 2026 REVYTECH, Inc.
+# Copyright (c) 2026 SkunkWerks, GmbH
 # SPDX-License-Identifier: BSD-2-Clause
 #
 # run_unit_tests.sh - build and run the userland unit tests of the pure
@@ -68,7 +69,8 @@ fi
 for pat in 'sys/uvm_main.c:uvm_open_admit(uvm.unloading)' 'sys/uvm_main.c:uvm_unload_busy(' \
     'sys/uvm_main.c:uvm.unloading = true' 'sys/uvm_main.c:sysctl_ctx_free(&uvm_sysctl_ctx)' \
     'sys/uvm_mmap.c:uvm_pager_ctor_mem_refs()' 'sys/uvm_mmap.c:uvm_pager_mapper_drops_ref(' \
-    'sys/uvm_main.c:MODULE_DEPEND(nvidia_uvm, nvidia, 2, 2, 2)'; do
+    'sys/uvm_main.c:MODULE_DEPEND(nvidia_uvm, nvidia, 2, 2, 2)' \
+    'sys/uvm_gpu.c:uvm_fb_pma_absent_ok(status, &gpu->fb)'; do
 	if grep -qF -- "${pat#*:}" "$REPO/${pat%%:*}"; then
 		echo "ok   ${pat%%:*} uses ${pat#*:}"
 	else

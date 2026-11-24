@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2026 REVYTECH, Inc.
+ * Copyright (c) 2026 SkunkWerks, GmbH
  * SPDX-License-Identifier: BSD-2-Clause
  *
  * uvm_gpu.c - the module-wide GPU object: creation on the first
@@ -15,7 +16,10 @@
  * page directory for the internal address space therefore stays in place.
  * The GPU memory manager (PMM) does not exist yet either: nothing in phase
  * 1 allocates video memory, so the PMA eviction callbacks registered here
- * answer that they have nothing to give.
+ * answer that they have nothing to give.  A GPU without video memory (the
+ * GB10 SoC) has no PMA at all: RM answers NV_ERR_OBJECT_NOT_FOUND for the
+ * PMA object there, gpu->pma stays NULL and no callback is registered
+ * (uvm_fb_state.h has the rule).
  */
 
 #include "uvm.h"
@@ -314,16 +318,24 @@ uvm_gpu_add(const NvProcessorUuid *uuid, const UvmGpuClientInfo *client, struct 
 		goto fail_as;
 	}
 	status = nvUvmInterfaceGetPmaObject(gpu->rm_device, &gpu->pma, &gpu->pma_stats);
-	if (status != NV_OK) {
+	if (uvm_fb_pma_absent_ok(status, &gpu->fb)) {
+		/* no video memory, so RM has no PMA: nothing to evict from, no callbacks */
+		gpu->pma = NULL;
+		gpu->pma_stats = NULL;
+		uvm_log("%s: no video memory and no PMA object; all GPU memory is system memory", gpu->name);
+	} else if (status != NV_OK) {
 		uvm_log("%s: GetPmaObject failed: %s", gpu->name, uvm_status_name(status));
 		goto fail_as;
+	} else {
+		status = nvUvmInterfacePmaRegisterEvictionCallbacks(gpu->pma, uvm_pma_evict_pages, uvm_pma_evict_range,
+		    gpu);
+		if (status != NV_OK) {
+			uvm_log("%s: PMA eviction callback registration failed: %s", gpu->name,
+			    uvm_status_name(status));
+			goto fail_as;
+		}
+		gpu->pma_callbacks_registered = true;
 	}
-	status = nvUvmInterfacePmaRegisterEvictionCallbacks(gpu->pma, uvm_pma_evict_pages, uvm_pma_evict_range, gpu);
-	if (status != NV_OK) {
-		uvm_log("%s: PMA eviction callback registration failed: %s", gpu->name, uvm_status_name(status));
-		goto fail_as;
-	}
-	gpu->pma_callbacks_registered = true;
 	/* 10-11. copy engines and the channel manager (which owns the semaphore page) */
 	status = nvUvmInterfaceQueryCopyEnginesCaps(gpu->rm_device, &gpu->ce_caps);
 	if (status != NV_OK) {
@@ -356,8 +368,10 @@ uvm_gpu_add(const NvProcessorUuid *uuid, const UvmGpuClientInfo *client, struct 
 fail_channels:
 	uvm_channel_manager_destroy(gpu);
 fail_pma:
-	nvUvmInterfacePmaUnregisterEvictionCallbacks(gpu->pma);
-	gpu->pma_callbacks_registered = false;
+	if (gpu->pma_callbacks_registered) {
+		nvUvmInterfacePmaUnregisterEvictionCallbacks(gpu->pma);
+		gpu->pma_callbacks_registered = false;
+	}
 fail_as:
 	nvUvmInterfaceAddressSpaceDestroy(gpu->rm_as);
 	gpu->rm_as = NULL;
