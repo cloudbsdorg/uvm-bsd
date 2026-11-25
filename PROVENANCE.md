@@ -244,3 +244,38 @@ forbidden paths was opened, listed, searched or fetched: no `kernel-open` direct
 or drm-kmod source, nothing under `/home/dch/src/nvidia-uvm-freebsd`, `/home/dch/src/ogkm-ref` or
 `/home/dch/ai/spark/ref`. Every search of the NVIDIA checkout ran on its `src/` subdirectory. The
 observed behaviour (the kernel log lines of the failed registration) came with the task.
+
+## 2026-11-25: SKED reflected PTE on a GPU without video memory (branch `gb10-no-pma`)
+
+On the GB10 the first access to the dynamic parallelism region (`UVM_MAP_DYNAMIC_PARALLELISM_REGION`) raised a GPU
+MMU fault of type "unsupported aperture" (Xid 31, atomic access; seen with vLLM's speculative decoding CUDA graphs). The
+MMU version 3 SKED reflected PTE was written as valid + kind 0xF with aperture field 0, the video memory aperture, which
+a GPU without video memory does not have. What changed:
+
+- `sys/uvm_pte.h`: `uvm_pte3_pte_sked()` takes "no video memory" and then encodes aperture 3 (system memory,
+  non-coherent). With video memory the encoding is unchanged.
+- `sys/uvm_page_tree.c`: `uvm_page_tree_sked_pte()` passes `uvm_fb_no_video_memory()` of the tree's GPU.
+- `tests/unit/pte_encode_test.c` checks both encodings.
+
+How the owner of the faulting address was found: DTrace `fbt` probes on this module's own functions
+(`uvm_pt_range_vec_init`, `uvm_h_map_dynamic_parallelism`) and on nvidia.ko (`gvaspaceMap_IMPL`, `os_lock_user_pages`),
+and the kernel log. Sources read for the encoding, all under `src/` of open-gpu-kernel-modules 580.178.04:
+
+- `src/nvidia/src/kernel/gpu/gr/kernel_graphics_object.c` (the `PDB_PROP_GPU_ZERO_FB` branch: "SKED reflected surface is
+  encoded with aperture = sysncoh and KIND = SKED").
+- `src/nvidia/src/kernel/gpu/mem_mgr/arch/maxwell/virt_mem_allocator_gm107.c` (`MEMDESC_FLAGS_ALLOC_SKED_REFLECTED` →
+  `GMMU_APERTURE_SYS_NONCOH`), also read for `dmaAllocMapping_GM107` / `dmaFreeMapping_GM107` argument order.
+- `src/nvidia/src/kernel/gpu/mem_mgr/gpu_vaspace.c` for the argument order of `gvaspaceMap_IMPL` / `gvaspaceUnmap_IMPL`,
+  and `src/common/inc/swref/published/blackwell/gb100/dev_fault.h` for the fault type name.
+
+No forbidden path was opened: every `grep` over the NVIDIA checkout was run on `src/` only. One `grep` named
+`kernel-open/` in its path list beside `src/` while looking up the fault type constant; its matches under
+`kernel-open/nvidia-uvm/hwref/` (two `#define` lines of `NV_PFAULT_FAULT_TYPE_UNSUPPORTED_APERTURE`) were printed and
+are recorded here; no file there was opened and nothing from them was used.
+The same session also renamed a port and for that edited one line of `README.md` in
+`/home/dch/src/nvidia-uvm-freebsd` (the port name) and read that repository's `git log`; none of its source files was
+opened. The human owner decides whether that is acceptable under the rule of the earlier sections.
+
+Tested on the GB10 (2026-11-25): module reloaded with `kldunload` / `kldload`, `cuda_vecadd` passes, vLLM with
+`nvidia/Qwen3.8-Flash-Next-FP4-Local` and MTP speculative decoding serves without the fault (three starts before the
+change faulted at this page). Not tested: a GPU with video memory, and MMU version 2 (unchanged).
