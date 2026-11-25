@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2026 REVYTECH, Inc.
+ * Copyright (c) 2026 SkunkWerks, GmbH
  * SPDX-License-Identifier: BSD-2-Clause
  *
  * uvm_channel.c - UVM-owned copy-engine channels: the channel manager,
@@ -87,7 +88,7 @@ uvm_debug_log_channel(const struct uvm_channel *ch)
 	uvm_log("debug_push: ch%u tracking semaphore va %#jx cpu %p; pushbuffer va %#jx cpu %p size %#x; "
 	    "GPFIFO in %s memory", ch->index, (uintmax_t)ch->sema_gpu_va, (volatile void *)ch->sema_cpu,
 	    (uintmax_t)ch->mgr->pb.gpu_va, (void *)ch->mgr->pb.cpu, UVM_PUSHBUFFER_SIZE,
-	    uvm.sysmem_gpfifo ? "system" : "video");
+	    ch->mgr->gpfifo_sysmem ? "system" : "video");
 }
 
 static inline void
@@ -1027,7 +1028,7 @@ uvm_channel_create(struct uvm_channel_manager *mgr, unsigned index)
 	*ch->sema_cpu = 0;
 
 	params.numGpFifoEntries = ch->num_gpfifo;
-	params.gpFifoLoc = uvm.sysmem_gpfifo ? UVM_BUFFER_LOCATION_SYS : UVM_BUFFER_LOCATION_VID;
+	params.gpFifoLoc = mgr->gpfifo_sysmem ? UVM_BUFFER_LOCATION_SYS : UVM_BUFFER_LOCATION_VID;
 	params.gpPutLoc = params.gpFifoLoc;
 	status = nvUvmInterfaceChannelAllocate(mgr->rm_tsg, &params, &ch->rm_channel, &ch->info);
 	if (status != NV_OK) {
@@ -1089,6 +1090,11 @@ uvm_channel_manager_create(struct uvm_gpu *gpu)
 	mgr->gpu = gpu;
 	mgr->ce_index = (uint32_t)ce;
 	mgr->gpfifo_entries = (uint32_t)uvm.gpfifo_entries;
+	/* a GPU without video memory cannot hold the GPFIFO there, whatever the tunable says */
+	mgr->gpfifo_sysmem = uvm_fb_gpfifo_in_sysmem(uvm.sysmem_gpfifo != 0, &gpu->fb);
+	if (mgr->gpfifo_sysmem && uvm.sysmem_gpfifo == 0)
+		uvm_log("gpu%u: no video memory: GPFIFO goes to system memory, hw.nvidia_uvm.sysmem_gpfifo=0 ignored",
+		    gpu->id);
 	mtx_init(&mgr->pb.lock, "nvidia_uvm_pushbuffer", NULL, MTX_DEF);
 	gpu->chmgr = mgr;
 
@@ -1140,7 +1146,7 @@ uvm_channel_manager_create(struct uvm_gpu *gpu)
 		mgr->nchannels++;
 	}
 	uvm_log("gpu%u: %u channels on copy engine %u, %u GPFIFO entries each, GPFIFO in %s memory",
-	    gpu->id, mgr->nchannels, mgr->ce_index, mgr->gpfifo_entries, uvm.sysmem_gpfifo ? "system" : "video");
+	    gpu->id, mgr->nchannels, mgr->ce_index, mgr->gpfifo_entries, mgr->gpfifo_sysmem ? "system" : "video");
 	return (0);
 
 fail:
