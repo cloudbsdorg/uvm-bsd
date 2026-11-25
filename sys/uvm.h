@@ -366,6 +366,7 @@ struct uvm_gpu {
 	UvmGpuInfo		info;
 	UvmGpuPlatformInfo	platform;
 	UvmGpuFbInfo		fb;
+	enum uvm_fb_state	fb_state;	/* absent, usable or broken: the frame buffer information */
 	UvmGpuEccInfo		ecc;
 	UvmGpuNvlinkInfo	nvlink;
 	UvmGpuCaps		caps;

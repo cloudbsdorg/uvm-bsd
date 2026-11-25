@@ -1,0 +1,7 @@
+# The interface headers and the global options the kernel build places in
+# this directory: copies of FreeBSD's own generated headers, not repository
+# source.  The root .gitignore says the same, but a scanner that only reads
+# a .gitignore inside the directory it walks (lizard does) would read
+# FreeBSD's macros as if they were ours, so the patterns are repeated here.
+*_if.h
+opt_*.h

@@ -1028,7 +1028,7 @@ uvm_channel_create(struct uvm_channel_manager *mgr, unsigned index)
 	*ch->sema_cpu = 0;
 
 	params.numGpFifoEntries = ch->num_gpfifo;
-	params.gpFifoLoc = mgr->gpfifo_sysmem ? UVM_BUFFER_LOCATION_SYS : UVM_BUFFER_LOCATION_VID;
+	params.gpFifoLoc = uvm_fb_gpfifo_location(mgr->gpfifo_sysmem);
 	params.gpPutLoc = params.gpFifoLoc;
 	status = nvUvmInterfaceChannelAllocate(mgr->rm_tsg, &params, &ch->rm_channel, &ch->info);
 	if (status != NV_OK) {
@@ -1070,6 +1070,32 @@ uvm_channel_manager_pick_ce(const struct uvm_gpu *gpu)
 	return (-1);
 }
 
+/*
+ * uvm_channel_gpfifo_log - what the driver says about where the GPFIFO ring
+ * and the PUT word go.  The message follows the place, so that it cannot
+ * say something else than what the placement did.
+ */
+static void
+uvm_channel_gpfifo_log(struct uvm_gpu *gpu, enum uvm_fb_gpfifo_place place, bool sysmem_requested)
+{
+	switch (place) {
+	case UVM_FB_GPFIFO_SYSMEM_NO_VIDEO:
+		uvm_log("gpu%u: no video memory: the GPFIFO ring and the PUT word go to system memory, "
+		    "hw.nvidia_uvm.sysmem_gpfifo=%d is ignored", gpu->id, sysmem_requested ? 1 : 0);
+		break;
+	case UVM_FB_GPFIFO_SYSMEM_UNUSABLE:
+		uvm_log("gpu%u: the frame buffer information is broken: the GPFIFO ring and the PUT word "
+		    "go to system memory", gpu->id);
+		break;
+	case UVM_FB_GPFIFO_SYSMEM_TUNABLE:
+		uvm_log("gpu%u: hw.nvidia_uvm.sysmem_gpfifo=%d: the GPFIFO ring and the PUT word go to "
+		    "system memory", gpu->id, sysmem_requested ? 1 : 0);
+		break;
+	case UVM_FB_GPFIFO_VIDEO:
+		break;
+	}
+}
+
 int
 uvm_channel_manager_create(struct uvm_gpu *gpu)
 {
@@ -1080,6 +1106,8 @@ uvm_channel_manager_create(struct uvm_gpu *gpu)
 	void *cpu;
 	int ce;
 	unsigned i;
+	enum uvm_fb_gpfifo_place place;
+	bool sysmem_requested;
 
 	ce = uvm_channel_manager_pick_ce(gpu);
 	if (ce < 0) {
@@ -1090,11 +1118,15 @@ uvm_channel_manager_create(struct uvm_gpu *gpu)
 	mgr->gpu = gpu;
 	mgr->ce_index = (uint32_t)ce;
 	mgr->gpfifo_entries = (uint32_t)uvm.gpfifo_entries;
-	/* a GPU without video memory cannot hold the GPFIFO there, whatever the tunable says */
-	mgr->gpfifo_sysmem = uvm_fb_gpfifo_in_sysmem(uvm.sysmem_gpfifo != 0, &gpu->fb);
-	if (mgr->gpfifo_sysmem && uvm.sysmem_gpfifo == 0)
-		uvm_log("gpu%u: no video memory: GPFIFO goes to system memory, hw.nvidia_uvm.sysmem_gpfifo=0 ignored",
-		    gpu->id);
+	/*
+	 * The tunable is read once, into a local: the placement and the message
+	 * must come from the same value, or a tunable that changes between the
+	 * two reads can make the driver say something other than what it did.
+	 */
+	sysmem_requested = (uvm.sysmem_gpfifo != 0);
+	place = uvm_fb_gpfifo_place(sysmem_requested, gpu->fb_state);
+	mgr->gpfifo_sysmem = uvm_fb_gpfifo_is_sysmem(place);
+	uvm_channel_gpfifo_log(gpu, place, sysmem_requested);
 	mtx_init(&mgr->pb.lock, "nvidia_uvm_pushbuffer", NULL, MTX_DEF);
 	gpu->chmgr = mgr;
 
