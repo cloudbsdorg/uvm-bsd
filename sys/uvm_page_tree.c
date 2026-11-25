@@ -55,7 +55,8 @@ uvm_page_tree_sparse_pte(const struct uvm_page_tree *tree)
 uint64_t
 uvm_page_tree_sked_pte(const struct uvm_page_tree *tree)
 {
-	return (tree->mmu_version == 3 ? uvm_pte3_pte_sked() : uvm_pte2_pte_sked());
+	return (tree->mmu_version == 3 ? uvm_pte3_pte_sked(uvm_fb_no_video_memory(&tree->gpu->fb)) :
+	    uvm_pte2_pte_sked());
 }
 
 uint64_t

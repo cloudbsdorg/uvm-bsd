@@ -69,8 +69,11 @@ main(void)
 	pte = uvm_pte3_pte(0x1000, UVM_APERTURE_PEER0 + 5, UVM_PROT_READ_WRITE_ATOMIC, 0, 0);
 	CHECK(((pte >> 1) & 3) == 1 && (pte >> 61) == 5, "v3 PTE peer 5");
 	/* kind override: SKED reflected 0xF without address */
-	pte = uvm_pte3_pte_sked();
+	pte = uvm_pte3_pte_sked(0);
 	CHECK(pte == (1ULL | (0xFULL << 8)), "v3 SKED PTE %#llx", (unsigned long long)pte);
+	/* without video memory: aperture 3 (system memory, non-coherent), everything else the same */
+	pte = uvm_pte3_pte_sked(1);
+	CHECK(pte == (1ULL | (3ULL << 1) | (0xFULL << 8)), "v3 SKED PTE, no video memory %#llx", (unsigned long long)pte);
 	/* invalid PTE patterns: PCF of an invalid entry */
 	CHECK(uvm_pte3_pte_invalid() == 0, "v3 invalid PTE");
 	CHECK(uvm_pte3_pte_sparse() == (1ULL << 3), "v3 sparse PTE PCF 1");

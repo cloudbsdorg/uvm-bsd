@@ -128,11 +128,21 @@ uvm_pte3_pte(uint64_t addr, uvm_aperture_t aperture, uvm_prot_t prot, int force_
 	return (uvm_pte3_pte_kind(addr, aperture, prot, force_uncached, UVM_PTE_KIND_GENERIC));
 }
 
-/* SKED reflected PTE: valid, kind 0xF, no address */
+/*
+ * SKED reflected PTE: valid, kind 0xF, no address.  The aperture field still
+ * counts: a GPU without video memory has no video memory aperture (0), and
+ * an access through such a PTE faults with "unsupported aperture".  There
+ * the reflected page is encoded as system memory, non-coherent, as RM does
+ * for its own SKED surface on such a GPU.
+ */
 static inline uint64_t
-uvm_pte3_pte_sked(void)
+uvm_pte3_pte_sked(int no_video_memory)
 {
-	return (1ULL | (UVM_PTE_KIND_SKED << 8));
+	uint64_t pte = 1ULL | (UVM_PTE_KIND_SKED << 8);
+
+	if (no_video_memory)
+		pte |= (uint64_t)UVM_HW_APERTURE_SYS_NONCOHERENT << 1;
+	return (pte);
 }
 
 /* invalid-PTE PCF codes: 0 invalid, 1 sparse, 2 mapping nowhere, 3 no valid 4K page */
