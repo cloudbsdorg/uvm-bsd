@@ -221,6 +221,7 @@ uvm_gpu_add(const NvProcessorUuid *uuid, const UvmGpuClientInfo *client, struct 
 {
 	struct uvm_gpu *gpu;
 	NV_STATUS status;
+	struct uvm_fb_pma_verdict pma_verdict;
 	int i, error;
 
 	for (i = UVM_ID_GPU_FIRST; i <= UVM_ID_GPU_LAST; i++)
@@ -271,8 +272,20 @@ uvm_gpu_add(const NvProcessorUuid *uuid, const UvmGpuClientInfo *client, struct 
 	}
 	/* 4. frame buffer geometry */
 	status = nvUvmInterfaceGetFbInfo(gpu->rm_device, &gpu->fb);
-	if (status != NV_OK) {
-		uvm_log("%s: GetFbInfo failed: %s", gpu->name, uvm_status_name(status));
+	gpu->fb_state = uvm_fb_info_state(status, &gpu->fb);
+	if (gpu->fb_state == UVM_FB_BROKEN) {
+		/*
+		 * The frame buffer information is broken or missing.  That is not
+		 * the same as a GPU without video memory: a missing PMA object
+		 * would be normal there, so the registration fails with a message
+		 * instead of pretending the GPU has no video memory.
+		 */
+		if (status != NV_OK)
+			uvm_log("%s: the frame buffer information is missing (GetFbInfo failed: %s)",
+			    gpu->name, uvm_status_name(status));
+		else
+			uvm_log("%s: the frame buffer is broken (RM reports bZeroFb with %u KB of heap)",
+			    gpu->name, gpu->fb.heapSize);
 		goto fail_device;
 	}
 	/* 5. fault buffers and interrupt ownership */
@@ -318,13 +331,21 @@ uvm_gpu_add(const NvProcessorUuid *uuid, const UvmGpuClientInfo *client, struct 
 		goto fail_as;
 	}
 	status = nvUvmInterfaceGetPmaObject(gpu->rm_device, &gpu->pma, &gpu->pma_stats);
-	if (uvm_fb_pma_absent_ok(status, &gpu->fb)) {
+	pma_verdict = uvm_fb_pma_judge(gpu->fb_state, status);
+	if (pma_verdict.decision == UVM_FB_PMA_FAIL) {
+		uvm_log("%s: GetPmaObject failed: %s (%s)", gpu->name, uvm_status_name(status),
+		    pma_verdict.reason);
+		goto fail_as;
+	}
+	if (pma_verdict.decision == UVM_FB_PMA_ABSENT) {
 		/* no video memory, so RM has no PMA: nothing to evict from, no callbacks */
 		gpu->pma = NULL;
 		gpu->pma_stats = NULL;
-		uvm_log("%s: no video memory and no PMA object; all GPU memory is system memory", gpu->name);
-	} else if (status != NV_OK) {
-		uvm_log("%s: GetPmaObject failed: %s", gpu->name, uvm_status_name(status));
+		uvm_log("%s: %s; all GPU memory is system memory", gpu->name, pma_verdict.reason);
+	} else if (gpu->pma == NULL) {
+		/* the RM answered success but gave no object: that is not a PMA to use */
+		uvm_log("%s: GetPmaObject answered %s but gave no PMA object", gpu->name,
+		    uvm_status_name(status));
 		goto fail_as;
 	} else {
 		status = nvUvmInterfacePmaRegisterEvictionCallbacks(gpu->pma, uvm_pma_evict_pages, uvm_pma_evict_range,
@@ -356,11 +377,12 @@ uvm_gpu_add(const NvProcessorUuid *uuid, const UvmGpuClientInfo *client, struct 
 	mtx_unlock_spin(&uvm.gpu_table_lock);
 	uvm_gpu_replayable_intr_enable(gpu);
 
-	uvm_log("gpu%u: %s registered: arch %#x impl %#x host %#x ce %#x, MMU v%u, %u MB of video memory, "
-	    "ECC %s, link %u, DMA window %#jx-%#jx", gpu->id, gpu->name, gpu->info.gpuArch,
+	uvm_log("gpu%u: %s registered: arch %#x impl %#x host %#x ce %#x, MMU v%u, %u MB of video memory "
+	    "(frame buffer %s), ECC %s, link %u, DMA window %#jx-%#jx", gpu->id, gpu->name, gpu->info.gpuArch,
 	    gpu->info.gpuImplementation, gpu->info.hostClass, gpu->info.ceClass, gpu->mmu_version,
-	    (gpu->fb.heapSize + gpu->fb.reservedHeapSize) / 1024, gpu->ecc.bEccEnabled ? "on" : "off",
-	    gpu->info.sysmemLink, (uintmax_t)gpu->platform.dma_addressable_start,
+	    (gpu->fb.heapSize + gpu->fb.reservedHeapSize) / 1024, uvm_fb_state_name(gpu->fb_state),
+	    gpu->ecc.bEccEnabled ? "on" : "off", gpu->info.sysmemLink,
+	    (uintmax_t)gpu->platform.dma_addressable_start,
 	    (uintmax_t)gpu->platform.dma_addressable_limit);
 	*out = gpu;
 	return (NV_OK);

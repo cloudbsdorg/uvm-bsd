@@ -58,3 +58,42 @@
 ## 2026-11-22T03:10:00Z (#2373 kit safety fixes, new commit on 7fbca39, own 2-round budget)
 - Orchestrator: a dead-man timer not pending loads nothing (KIT, return straight away); FAIL wins over KIT in summarize.sh; rc script, summarize.sh and testboot-return installed from the git archive; usr/local/etc/rc.conf.d scanned. Gate round 1 running; then destroy the old dry-run BE, build a fresh one, mount check, prove the dead-man timer pending.
 - Round 1 receipt 2d6d5617b04b5dba52601f60cfc35b2629f316ed28175fcf86e8cf7b096f2530 (5 voices FINDINGS, answers .round/tmp/answers.txt). Folded in: the rc script falls back to a 0700 /var/db/nvco-testboot (never /tmp) and, when no run directory can be made at all, writes no results and still runs testboot-return; a dead-man timer disabled or not pending loads nothing.
+
+## 2026-11-25 (#2504 PR 6 fixes on top of dch's gb10-no-pma commits, branch agent/dch6-fixes on 414c93d)
+- Read the gate1 review (quality and falsification): bZeroFb ("the frame buffer is broken") was treated as
+  proof that a GPU has no video memory, the tunable was sampled twice, and the runner only grepped for a
+  substring that a mutant could keep.
+- sys/uvm_fb_state.h: one boolean became three states (UVM_FB_USABLE, UVM_FB_ABSENT, UVM_FB_BROKEN).
+  ABSENT is RM clearing the whole description; BROKEN is an error status, bZeroFb, or an empty
+  description next to a PMA object the RM handed out (a PMA exists only where there is video memory).
+  Only ABSENT makes a missing PMA normal; BROKEN fails the registration with a message.
+- sys/uvm_gpu.c: the PMA path comes from uvm_fb_pma_judge(gpu->fb_state, status); the state is kept in
+  gpu->fb_state (sys/uvm.h) and printed in the registration log line.
+- sys/uvm_channel.c: hw.nvidia_uvm.sysmem_gpfifo is read once into sysmem_requested; the placement and
+  the message come from uvm_fb_gpfifo_place(), so they cannot disagree; the RM buffer location comes from
+  uvm_fb_gpfifo_location().
+- tests/unit/fb_state_test.c: every row of the three states, of the PMA verdict and of the GPFIFO
+  placement, plus the registration and the channel allocation driven through fakes. Red first: the mutant
+  that calls broken information absent and the mutant that puts the GPFIFO in video memory without video
+  memory both make the test fail (logs/dch6/).
+- tests/run_unit_tests.sh: the two old greps are replaced by pins that are shown to be able to fail (the
+  PMA verdict ignored, the GPFIFO verdict ignored, the tunable read twice).
+- man/nvidia-uvm.4 and README.md: what happens on a GPU with no video memory, and that a GPU with broken
+  frame buffer information is not registered at all.
+- Module builds with -Werror against /usr/src/sys (aarch64, FreeBSD 16.0-CURRENT). No kldload, no reboot.
+
+## 2026-11-25 (#2504 PR 6 fixes, pass B: the lizard gate)
+- The gate refused tests/unit/fb_state_test.c:99 main: 137 lines of code over the limit of 100. The cases
+  are tables now: one row per check, the same messages, and the row carries the line it is written on, so
+  a failure still names the case that failed. Proven, not asserted: instrumented counters say 56 checks
+  before and 56 after, the passing output is byte-identical (cmp), and both header mutants (broken read as
+  absent, GPFIFO put in video memory without video memory) print the same messages.
+- The same command also refused sys/uvm_channel.c: uvm_channel_manager_create had grown to 103 lines
+  (the switch of pass A). The switch moved into uvm_channel_gpfifo_log(); the function is 88 lines now.
+  The pinned strings are all still there: the tunable read once, the place from the helper, the is_sysmem
+  call, and the UVM_FB_GPFIFO_SYSMEM_NO_VIDEO case. The pin mutants still fail the pins.
+- The last line was sys/vnode_if.h: a copy of FreeBSD's generated header that the kernel build leaves in
+  sys/, not repository source. The root .gitignore already said so; lizard honours a .gitignore only
+  inside the directory it scans, so sys/.gitignore repeats the patterns.
+- sh tests/run_unit_tests.sh passes (exit 0). Module builds with -Werror against /usr/src/sys (aarch64,
+  FreeBSD 16.0-CURRENT). No kldload, no reboot.

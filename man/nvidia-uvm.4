@@ -193,6 +193,16 @@ error; default 30000.
 .It Va hw.nvidia_uvm.sysmem_gpfifo
 Place the GPFIFO ring and PUT word in system memory (1, the default) or
 video memory (0).
+On a GPU that has no video memory at all, such as the integrated GPU of the
+GB10 SoC, the registration succeeds, the GPU has no physical memory
+allocator (PMA) object because there is no video memory to allocate from,
+and all of its memory is system memory.
+The GPFIFO ring and the PUT word of such a GPU always go to system memory
+and this tunable is ignored there, because there is no video memory to place
+them in.
+A GPU whose frame buffer information is broken or missing is a different
+case: the registration of that GPU fails with a message, and the driver does
+not treat it as a GPU without video memory.
 .It Va hw.nvidia_uvm.debug_push
 Log the method stream, GPFIFO entry, GP_PUT and doorbell value of the first
 N pushes (at most 64), and the GPU addresses of each channel's GPFIFO,

@@ -207,6 +207,12 @@ only from the process that holds the `/dev/nvidiactl` file the client was alloca
 (30000), `sysmem_gpfifo` (1); diagnostics, default 0: `debug_push`, `init_probe`, `init_probe_work`, `ce_bind_subch4`. Read-only: `hw.nvidia_uvm.fatal_error`,
 `hw.nvidia_uvm.gpus`. See `nvidia-uvm(4)`.
 
+On a GPU with no video memory at all (the integrated GB10 GPU) the registration succeeds
+without a PMA object, all of its memory is system memory, and the GPFIFO ring and the PUT
+word always go to system memory: `sysmem_gpfifo` is ignored there, because there is no video
+memory to place them in. A GPU whose frame buffer information is broken or missing is not
+registered at all: the registration fails with a message.
+
 ## First test boot
 
 From a one-shot boot environment, as root:

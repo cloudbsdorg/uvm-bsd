@@ -199,6 +199,46 @@ nvidia-gb10-freebsd; FreeBSD sources `sys/kern/kern_descrip.c`, `sys/fs/devfs/de
 `kernel-open/` or the describer's notes was read. The rule is `sys/uvm_client_owner.h`; the
 nvidia.ko side is `src/gb10-client-owner/` in nvidia-gb10-freebsd.
 
+## 2026-11-25: PR 6 fixes on top of dch's zero-video-memory commits (Track #2504)
+
+The review of dch's three commits (gate1, 2026-11-25) found two things wrong and one thing
+untested.  What changed here:
+
+- `sys/uvm_fb_state.h`: the frame buffer information now has three states instead of one
+  boolean. `UVM_FB_ABSENT` means the GPU really has no video memory (RM cleared the whole
+  description), `UVM_FB_BROKEN` means the information is broken or missing (the request
+  failed, RM calls the frame buffer broken with `bZeroFb`, or the description is empty
+  although the RM handed out a PMA object), and `UVM_FB_USABLE` means the GPU has video
+  memory and RM describes it. `bZeroFb` is RM's "the frame buffer is broken" answer and no
+  longer means "no video memory": only `UVM_FB_ABSENT` makes a missing PMA object normal,
+  and a `UVM_FB_BROKEN` GPU fails its registration with a message.
+- `sys/uvm_gpu.c`: the registration takes the PMA path from the verdict of the helper
+  (`uvm_fb_pma_judge`), not from the raw status of the RM call, and the state of the frame
+  buffer information is kept in `gpu->fb_state`.
+- `sys/uvm_channel.c`: the tunable `hw.nvidia_uvm.sysmem_gpfifo` is read once, into a
+  local, and the placement and the message are taken from the same value
+  (`uvm_fb_gpfifo_place`), so that they cannot disagree. The RM buffer location of the
+  GPFIFO ring and of the PUT word comes from `uvm_fb_gpfifo_location`.
+- `tests/unit/fb_state_test.c`: every row of the three states, of the PMA verdict and of
+  the GPFIFO placement, plus the registration and channel-allocation transitions driven
+  through fakes.
+- `tests/run_unit_tests.sh`: the two old call-site greps are replaced by pins that are
+  shown to be able to fail: a mutant that calls broken information absent, a mutant that
+  puts the GPFIFO in video memory without video memory, a mutant that ignores the PMA
+  verdict, a mutant that ignores the GPFIFO verdict and a mutant that reads the tunable
+  twice are each built, and the test or the pin must catch them.
+- `man/nvidia-uvm.4`, `README.md`: what happens on a GPU with no video memory, and what
+  happens to a GPU whose frame buffer information is broken.
+
+Sources consulted for this change: this repository, and the facts about the RM recorded by
+dch in the section above (`queryFbInfo` clears the description of a zero-FB GPU and makes no
+query there, `bZeroFb` is the "FB is broken" answer otherwise, and the PMA is initialised
+only where frame buffer regions exist). No RM source, Linux source or GPL source was read
+for this change; the RM behaviour above is taken from the recorded provenance of the
+change it corrects. The state machine itself, the verdict, the placement and the tests are
+this change's own work.
+
+
 ## 2026-11-24: GPUs without video memory (GB10, branch `gb10-no-pma`)
 
 On the GB10 SoC GPU (chip GB20B, PCI 10de:2e12) registration stopped at the request for the PMA
