@@ -197,7 +197,7 @@ fi
 # The header names every gated seam so none is an undocumented back door.
 hook_header=$(sed -n '1,15p' "$REPO/scripts/make.sh")
 header_ok=1
-for seam in UVM_TEST_HOOKS=1 MK_KO UVM_TEST_KLDXREF _check-dest-owner/_check-destdir-ancestors; do
+for seam in UVM_TEST_HOOKS=1 MK_KO MK_KO_LINUX UVM_TEST_KLDXREF _check-dest-owner/_check-destdir-ancestors; do
 	printf '%s\n' "$hook_header" | grep -qF "$seam" || header_ok=0
 done
 if [ "$header_ok" = 1 ]; then
@@ -310,13 +310,20 @@ build_repo=$T/build-repo
 build_dest=$T/build-dest
 build_bin=$T/build-bin
 build_engine=$T/make-build.sh
-mkdir -p -- "$build_repo/sys" "$build_repo/core" "$build_repo/man" "$build_dest" "$build_bin"
+mkdir -p -- "$build_repo/sys" "$build_repo/core" "$build_repo/man" "$build_repo/linux" \
+    "$build_dest" "$build_bin"
 printf '%s\n' 'stale module' > "$build_repo/sys/nvidia-uvm.ko"
 printf '%s\n' 'manual fixture' > "$build_repo/man/nvidia-uvm.4"
+printf '%s\n' 'bridge manual fixture' > "$build_repo/man/nvidia-uvm-linux.4"
 cat > "$build_repo/sys/Makefile" <<'EOF'
 all:
 	@printf '%s\n' 'build ran' >> "$${BUILD_LOG}"
 	@printf '%s\n' 'rebuilt module' > nvidia-uvm.ko
+EOF
+cat > "$build_repo/linux/Makefile" <<'EOF'
+all:
+	@printf '%s\n' 'build ran' >> "$${BUILD_LOG}"
+	@printf '%s\n' 'rebuilt bridge module' > nvidia_uvm_linux.ko
 EOF
 cat > "$build_bin/make" <<'EOF'
 #!/bin/sh
@@ -652,7 +659,7 @@ else
 	printf '%s\n' "$signal_left"
 fi
 
-# A normal-user DESTDIR install writes exactly the two payloads with their
+# A normal-user DESTDIR install writes exactly the four payloads with their
 # modes, ownership and manifest hashes.  kldxref may reject the planted file;
 # that is explicitly non-fatal for a DESTDIR.
 dest=$T/basic
@@ -666,21 +673,33 @@ r=$?
 manifest=$dest/var/db/uvm-bsd/installed.manifest
 ko=$dest/boot/modules/nvidia-uvm.ko
 man=$dest/usr/local/share/man/man4/nvidia-uvm.4
+bridge_ko=$dest/boot/modules/nvidia_uvm_linux.ko
+bridge_man=$dest/usr/local/share/man/man4/nvidia-uvm-linux.4
 ko_sha=
 man_sha=
+bridge_ko_sha=
+bridge_man_sha=
 owner=$(id -un):$(id -gn)
 [ ! -f "$ko" ] || ko_sha=$(sha256 -q "$ko")
 [ ! -f "$man" ] || man_sha=$(sha256 -q "$man")
+[ ! -f "$bridge_ko" ] || bridge_ko_sha=$(sha256 -q "$bridge_ko")
+[ ! -f "$bridge_man" ] || bridge_man_sha=$(sha256 -q "$bridge_man")
 if [ "$r" -eq 0 ] && [ -f "$ko" ] && [ ! -L "$ko" ] && [ -f "$man" ] && [ ! -L "$man" ] &&
+    [ -f "$bridge_ko" ] && [ ! -L "$bridge_ko" ] &&
+    [ -f "$bridge_man" ] && [ ! -L "$bridge_man" ] &&
     [ "$(stat -f '%Lp %Su:%Sg' "$ko")" = "555 $owner" ] &&
     [ "$(stat -f '%Lp %Su:%Sg' "$man")" = "444 $owner" ] &&
+    [ "$(stat -f '%Lp %Su:%Sg' "$bridge_ko")" = "555 $owner" ] &&
+    [ "$(stat -f '%Lp %Su:%Sg' "$bridge_man")" = "444 $owner" ] &&
     [ -f "$manifest" ] && [ ! -L "$manifest" ] &&
     [ "$(awk '$1 == "/boot/modules/nvidia-uvm.ko" && $2 == "555" && $3 == "'"$owner"'" { print $4 }' "$manifest")" = "$ko_sha" ] &&
     [ "$(awk '$1 == "/usr/local/share/man/man4/nvidia-uvm.4" && $2 == "444" && $3 == "'"$owner"'" { print $4 }' "$manifest")" = "$man_sha" ] &&
+    [ "$(awk '$1 == "/boot/modules/nvidia_uvm_linux.ko" && $2 == "555" && $3 == "'"$owner"'" { print $4 }' "$manifest")" = "$bridge_ko_sha" ] &&
+    [ "$(awk '$1 == "/usr/local/share/man/man4/nvidia-uvm-linux.4" && $2 == "444" && $3 == "'"$owner"'" { print $4 }' "$manifest")" = "$bridge_man_sha" ] &&
     ! awk '$2 == "pending" { found = 1 } END { exit !found }' "$manifest"; then
-	ok "DESTDIR install writes both files and matching manifest hashes"
+	ok "DESTDIR install writes both modules, both man pages and matching manifest hashes"
 else
-	bad "DESTDIR install did not produce the two files and a matching manifest (exit $r)"
+	bad "DESTDIR install did not produce the four files and a matching manifest (exit $r)"
 	show "$T/install.out"
 	[ ! -f "$manifest" ] || show "$manifest"
 fi

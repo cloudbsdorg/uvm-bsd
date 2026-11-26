@@ -2,14 +2,15 @@
  * Copyright (c) 2026 SkunkWerks, GmbH
  * SPDX-License-Identifier: BSD-2-Clause
  *
- * fb_state_test.c - the rules for a GPU without video memory
+ * fb_state_test.c - the rules for a GPU with unified memory
  * (sys/uvm_fb_state.h): the state of the frame buffer information, what a
  * missing PMA object means on each state, and where the GPFIFO ring and
  * the PUT word go.
  *
- * The descriptions used are the ones RM gives: all zero for a zero-FB GPU
- * (GB10), a heap and an allocatable range for a discrete GPU, and the same
- * heap with bZeroFb set for a GPU whose frame buffer RM calls broken.
+ * The descriptions used are the ones RM gives: all zero for a GPU with
+ * unified memory (RM's zero framebuffer, the GB10), a heap and an
+ * allocatable range for a discrete GPU, and the same heap with bZeroFb set
+ * for a GPU whose frame buffer RM calls broken.
  *
  * The cases are tables.  Every row is one of the checks that main() used to
  * make one by one, with the same message, so a failure still says what
@@ -86,7 +87,7 @@ fake_register(struct fake_rm *rm, const UvmGpuFbInfo *fb)
 		rm->message = verdict.reason;
 		return;
 	}
-	if (verdict.decision == UVM_FB_PMA_ABSENT)
+	if (verdict.decision == UVM_FB_PMA_UNIFIED)
 		return;			/* no PMA object, so no callbacks to register */
 	rm->callbacks = true;
 }
@@ -157,7 +158,7 @@ fb_desc_info(enum fb_desc desc, UvmGpuFbInfo *fb)
 	case DESC_EMPTY_BROKEN:
 		break;
 	}
-	/* RM never sets bZeroFb on a GPU without a frame buffer, but the rule
+	/* RM never sets bZeroFb on a GPU with unified memory, but the rule
 	 * must not depend on that: a broken frame buffer is broken */
 	if (desc == DESC_EMPTY_BROKEN)
 		fb->bZeroFb = 1;
@@ -173,46 +174,46 @@ struct state_case {
 };
 
 static const struct state_case state_cases[] = {
-	ROW(NV_OK, DESC_ZERO, UVM_FB_ABSENT,
-	    "an all-zero description means a GPU without video memory"),
-	ROW(NV_OK, DESC_DISCRETE, UVM_FB_USABLE,
-	    "a heap and an allocatable address mean a GPU with video memory"),
+	ROW(NV_OK, DESC_ZERO, UVM_FB_UNIFIED,
+	    "an all-zero description means a GPU with unified memory"),
+	ROW(NV_OK, DESC_DISCRETE, UVM_FB_DEDICATED,
+	    "a heap and an allocatable address mean a GPU with dedicated memory"),
 	ROW(NV_OK, DESC_BROKEN, UVM_FB_BROKEN,
-	    "bZeroFb is RM's broken answer, not the absence of video memory"),
+	    "bZeroFb is RM's broken answer, not unified memory"),
 	ROW(NV_ERR_GENERIC, DESC_ZERO, UVM_FB_BROKEN,
 	    "an error status means the information is missing"),
 	ROW(NV_ERR_GENERIC, DESC_DISCRETE, UVM_FB_BROKEN,
 	    "an error status means the information is missing (discrete)"),
 	ROW(NV_ERR_NOT_SUPPORTED, DESC_ZERO, UVM_FB_BROKEN,
 	    "any other error status means the information is missing"),
-	ROW(NV_OK, DESC_HEAP, UVM_FB_USABLE, "a heap size means video memory"),
-	ROW(NV_OK, DESC_RESERVED, UVM_FB_USABLE,
-	    "a reserved heap size means video memory"),
-	ROW(NV_OK, DESC_ALLOC, UVM_FB_USABLE,
-	    "an allocatable address means video memory"),
-	ROW(NV_OK, DESC_PAGE, UVM_FB_ABSENT,
-	    "page size and BAR1 fields alone are not video memory"),
+	ROW(NV_OK, DESC_HEAP, UVM_FB_DEDICATED, "a heap size means dedicated memory"),
+	ROW(NV_OK, DESC_RESERVED, UVM_FB_DEDICATED,
+	    "a reserved heap size means dedicated memory"),
+	ROW(NV_OK, DESC_ALLOC, UVM_FB_DEDICATED,
+	    "an allocatable address means dedicated memory"),
+	ROW(NV_OK, DESC_PAGE, UVM_FB_UNIFIED,
+	    "page size and BAR1 fields alone are not dedicated memory"),
 	ROW(NV_OK, DESC_EMPTY_BROKEN, UVM_FB_BROKEN,
 	    "bZeroFb on an empty description is still broken")
 };
 
-/* only a GPU that has no video memory has no video memory */
-struct novid_case {
+/* only a GPU with unified memory has unified memory */
+struct unified_case {
 	int		line;
 	enum fb_desc	desc;
 	bool		expect;
 	const char	*msg;
 };
 
-static const struct novid_case novid_cases[] = {
-	ROW(DESC_ZERO, true, "an all-zero description has no video memory"),
-	ROW(DESC_DISCRETE, false, "a discrete GPU has video memory"),
+static const struct unified_case unified_cases[] = {
+	ROW(DESC_ZERO, true, "an all-zero description means unified memory"),
+	ROW(DESC_DISCRETE, false, "a discrete GPU has dedicated memory"),
 	ROW(DESC_BROKEN, false,
-	    "a broken frame buffer is not a GPU without video memory")
+	    "a broken frame buffer is not a GPU with unified memory")
 };
 
 /*
- * the PMA object: absent is normal only on a GPU without video memory.
+ * the PMA object: no object is normal only on a GPU with unified memory.
  * A row that also has a reason message checks that the verdict carries a
  * reason as well.
  */
@@ -226,21 +227,21 @@ struct pma_case {
 };
 
 static const struct pma_case pma_cases[] = {
-	ROW(UVM_FB_ABSENT, NV_ERR_OBJECT_NOT_FOUND, UVM_FB_PMA_ABSENT,
-	    "no PMA on a zero-FB GPU is normal", "the normal case has a reason"),
-	ROW(UVM_FB_ABSENT, NV_OK, UVM_FB_PMA_FAIL,
-	    "a PMA object on a GPU without video memory is a contradiction", NULL),
-	ROW(UVM_FB_ABSENT, NV_ERR_NOT_SUPPORTED, UVM_FB_PMA_FAIL,
+	ROW(UVM_FB_UNIFIED, NV_ERR_OBJECT_NOT_FOUND, UVM_FB_PMA_UNIFIED,
+	    "no PMA on a GPU with unified memory is normal", "the normal case has a reason"),
+	ROW(UVM_FB_UNIFIED, NV_OK, UVM_FB_PMA_FAIL,
+	    "a PMA object on a GPU with unified memory is a contradiction", NULL),
+	ROW(UVM_FB_UNIFIED, NV_ERR_NOT_SUPPORTED, UVM_FB_PMA_FAIL,
 	    "another status stays an error", NULL),
-	ROW(UVM_FB_USABLE, NV_OK, UVM_FB_PMA_USE,
+	ROW(UVM_FB_DEDICATED, NV_OK, UVM_FB_PMA_USE,
 	    "a discrete GPU with a PMA uses it", NULL),
-	ROW(UVM_FB_USABLE, NV_ERR_OBJECT_NOT_FOUND, UVM_FB_PMA_FAIL,
+	ROW(UVM_FB_DEDICATED, NV_ERR_OBJECT_NOT_FOUND, UVM_FB_PMA_FAIL,
 	    "no PMA on a discrete GPU is an error", "the failure has a reason"),
-	ROW(UVM_FB_USABLE, NV_ERR_INVALID_ARGUMENT, UVM_FB_PMA_FAIL,
+	ROW(UVM_FB_DEDICATED, NV_ERR_INVALID_ARGUMENT, UVM_FB_PMA_FAIL,
 	    "another status stays an error (discrete)", NULL),
-	ROW(UVM_FB_USABLE, NV_ERR_NO_MEMORY, UVM_FB_PMA_FAIL,
+	ROW(UVM_FB_DEDICATED, NV_ERR_NO_MEMORY, UVM_FB_PMA_FAIL,
 	    "another status stays an error (discrete, 2)", NULL),
-	ROW(UVM_FB_USABLE, NV_ERR_GENERIC, UVM_FB_PMA_FAIL,
+	ROW(UVM_FB_DEDICATED, NV_ERR_GENERIC, UVM_FB_PMA_FAIL,
 	    "another status stays an error (discrete, 3)", NULL),
 	ROW(UVM_FB_BROKEN, NV_OK, UVM_FB_PMA_FAIL,
 	    "a broken frame buffer is an error", NULL),
@@ -251,7 +252,7 @@ static const struct pma_case pma_cases[] = {
 };
 
 /*
- * the GPFIFO location: the tunable decides only where video memory exists.
+ * the GPFIFO location: the tunable decides only where dedicated memory exists.
  * A row that also has a message for the place checks where the ring is as
  * well.
  */
@@ -266,17 +267,17 @@ struct place_case {
 };
 
 static const struct place_case place_cases[] = {
-	ROW(true, UVM_FB_USABLE, UVM_FB_GPFIFO_SYSMEM_TUNABLE, true,
+	ROW(true, UVM_FB_DEDICATED, UVM_FB_GPFIFO_SYSMEM_TUNABLE, true,
 	    "tunable 1 on a discrete GPU: system memory",
 	    "tunable 1 on a discrete GPU: system memory"),
-	ROW(false, UVM_FB_USABLE, UVM_FB_GPFIFO_VIDEO, false,
-	    "tunable 0 on a discrete GPU: video memory",
-	    "tunable 0 on a discrete GPU: video memory"),
-	ROW(true, UVM_FB_ABSENT, UVM_FB_GPFIFO_SYSMEM_NO_VIDEO, true,
-	    "tunable 1 on a zero-FB GPU: system memory, because there is no video memory",
+	ROW(false, UVM_FB_DEDICATED, UVM_FB_GPFIFO_DEDICATED, false,
+	    "tunable 0 on a discrete GPU: dedicated memory",
+	    "tunable 0 on a discrete GPU: dedicated memory"),
+	ROW(true, UVM_FB_UNIFIED, UVM_FB_GPFIFO_SYSMEM_UNIFIED, true,
+	    "tunable 1 on a GPU with unified memory: system memory, because there is no dedicated memory",
 	    NULL),
-	ROW(false, UVM_FB_ABSENT, UVM_FB_GPFIFO_SYSMEM_NO_VIDEO, true,
-	    "tunable 0 on a zero-FB GPU: still system memory, because there is no video memory",
+	ROW(false, UVM_FB_UNIFIED, UVM_FB_GPFIFO_SYSMEM_UNIFIED, true,
+	    "tunable 0 on a GPU with unified memory: still system memory, because there is no dedicated memory",
 	    NULL),
 	ROW(false, UVM_FB_BROKEN, UVM_FB_GPFIFO_SYSMEM_UNUSABLE, true,
 	    "a broken frame buffer leaves only system memory", NULL)
@@ -292,7 +293,7 @@ struct loc_case {
 
 static const struct loc_case loc_cases[] = {
 	ROW(true, UVM_BUFFER_LOCATION_SYS, "system memory is the system buffer location"),
-	ROW(false, UVM_BUFFER_LOCATION_VID, "video memory is the video buffer location")
+	ROW(false, UVM_BUFFER_LOCATION_VID, "dedicated memory is the video buffer location")
 };
 
 /*
@@ -315,9 +316,9 @@ struct reg_case {
 
 static const struct reg_case reg_cases[] = {
 	ROW(NV_OK, NV_ERR_OBJECT_NOT_FOUND, DESC_ZERO, false, false, false,
-	    "a zero-FB GPU with no PMA object registers",
-	    "a zero-FB GPU registers no eviction callbacks",
-	    "a zero-FB GPU with no PMA object has no failure message"),
+	    "a GPU with unified memory and no PMA object registers",
+	    "a GPU with unified memory registers no eviction callbacks",
+	    "a GPU with unified memory and no PMA object has no failure message"),
 	ROW(NV_OK, NV_ERR_OBJECT_NOT_FOUND, DESC_DISCRETE, true, false, true,
 	    "a discrete GPU with no PMA object does not register",
 	    "a failed registration registers no eviction callbacks",
@@ -329,7 +330,7 @@ static const struct reg_case reg_cases[] = {
 	    "a GPU whose frame buffer information is missing does not register",
 	    NULL, NULL),
 	ROW(NV_OK, NV_OK, DESC_ZERO, true, false, false,
-	    "a PMA object on a GPU whose description says it has no video memory does not register",
+	    "a PMA object on a GPU whose description says it has unified memory does not register",
 	    NULL, NULL),
 	ROW(NV_OK, NV_OK, DESC_DISCRETE, false, true, false,
 	    "a discrete GPU with a PMA object registers",
@@ -349,14 +350,14 @@ struct chan_case {
 
 static const struct chan_case chan_cases[] = {
 	ROW(DESC_ZERO, false, UVM_BUFFER_LOCATION_SYS, UVM_BUFFER_LOCATION_SYS,
-	    "a zero-FB GPU puts the GPFIFO in system memory",
-	    "a zero-FB GPU puts the PUT word in system memory"),
+	    "a GPU with unified memory puts the GPFIFO in system memory",
+	    "a GPU with unified memory puts the PUT word in system memory"),
 	ROW(DESC_ZERO, true, UVM_BUFFER_LOCATION_SYS, UVM_BUFFER_LOCATION_SYS,
-	    "a zero-FB GPU puts the GPFIFO in system memory (2)",
-	    "a zero-FB GPU puts the PUT word in system memory (2)"),
+	    "a GPU with unified memory puts the GPFIFO in system memory (2)",
+	    "a GPU with unified memory puts the PUT word in system memory (2)"),
 	ROW(DESC_DISCRETE, false, UVM_BUFFER_LOCATION_VID, UVM_BUFFER_LOCATION_VID,
-	    "a discrete GPU keeps the GPFIFO in video memory",
-	    "a discrete GPU keeps the PUT word in video memory"),
+	    "a discrete GPU keeps the GPFIFO in dedicated memory",
+	    "a discrete GPU keeps the PUT word in dedicated memory"),
 	ROW(DESC_DISCRETE, true, UVM_BUFFER_LOCATION_SYS, UVM_BUFFER_LOCATION_SYS,
 	    "the tunable moves the GPFIFO to system memory",
 	    "the tunable moves the PUT word to system memory")
@@ -378,16 +379,16 @@ run_state_cases(void)
 }
 
 static void
-run_novid_cases(void)
+run_unified_cases(void)
 {
 	UvmGpuFbInfo fb;
 	size_t i;
 
-	for (i = 0; i < ROWS(novid_cases); i++) {
-		const struct novid_case *c = &novid_cases[i];
+	for (i = 0; i < ROWS(unified_cases); i++) {
+		const struct unified_case *c = &unified_cases[i];
 
 		fb_desc_info(c->desc, &fb);
-		ROW_CHECK(uvm_fb_no_video_memory(&fb) == c->expect,
+		ROW_CHECK(uvm_fb_is_unified(&fb) == c->expect,
 		    c->line, "%s", c->msg);
 	}
 }
@@ -483,7 +484,7 @@ int
 main(void)
 {
 	run_state_cases();
-	run_novid_cases();
+	run_unified_cases();
 	run_pma_cases();
 	run_place_cases();
 	run_loc_cases();

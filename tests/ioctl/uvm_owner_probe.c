@@ -71,10 +71,10 @@ struct side {
 };
 
 static int
-uvm_ioctl(int fd, unsigned long raw, void *params)
+uvm_ioctl(int fd, uint32_t request, void *params)
 {
 	errno = 0;
-	return (ioctl(fd, UVM_IOCTL_NATIVE(raw), params));
+	return (ioctl(fd, UVM_IOCTL_NATIVE(request), params));
 }
 
 static int
@@ -101,8 +101,8 @@ setup(struct side *s)
 	}
 	s->client = a.hObjectNew;
 	memset(&ip, 0, sizeof(ip));
-	if (uvm_ioctl(s->uvm, UVM_INITIALIZE, &ip) != 0 || ip.rmStatus != NV_OK) {
-		printf("UVM_INITIALIZE failed: errno %d status 0x%x\n", errno, ip.rmStatus);
+	if (uvm_ioctl(s->uvm, UVM_REQ_INITIALIZE, &ip) != 0 || ip.rmStatus != NV_OK) {
+		printf("UVM_REQ_INITIALIZE failed: errno %d status 0x%x\n", errno, ip.rmStatus);
 		return (-1);
 	}
 	return (0);
@@ -126,7 +126,7 @@ request(int uvm, int which, int ctl_fd, NvU32 client)
 		memset(&p, 0, sizeof(p));
 		p.rmCtrlFd = ctl_fd;
 		p.hClient = client;
-		r = uvm_ioctl(uvm, UVM_REGISTER_GPU, &p);
+		r = uvm_ioctl(uvm, UVM_REQ_REGISTER_GPU, &p);
 		st = p.rmStatus;
 		break;
 	}
@@ -137,7 +137,7 @@ request(int uvm, int which, int ctl_fd, NvU32 client)
 		p.rmCtrlFd = ctl_fd;
 		p.hClient = client;
 		p.hVaSpace = client + 1;
-		r = uvm_ioctl(uvm, UVM_REGISTER_GPU_VASPACE, &p);
+		r = uvm_ioctl(uvm, UVM_REQ_REGISTER_GPU_VASPACE, &p);
 		st = p.rmStatus;
 		break;
 	}
@@ -150,7 +150,7 @@ request(int uvm, int which, int ctl_fd, NvU32 client)
 		p.hChannel = client + 1;
 		p.base = 0x10000;
 		p.length = 0x10000;
-		r = uvm_ioctl(uvm, UVM_REGISTER_CHANNEL, &p);
+		r = uvm_ioctl(uvm, UVM_REQ_REGISTER_CHANNEL, &p);
 		st = p.rmStatus;
 		break;
 	}
@@ -162,7 +162,7 @@ request(int uvm, int which, int ctl_fd, NvU32 client)
 		p.hClient = client;
 		p.hMemory = client + 1;
 		p.length = 0x10000;
-		r = uvm_ioctl(uvm, UVM_ALLOC_DEVICE_P2P, &p);
+		r = uvm_ioctl(uvm, UVM_REQ_ALLOC_DEVICE_P2P, &p);
 		st = p.rmStatus;
 		break;
 	}
@@ -173,7 +173,7 @@ request(int uvm, int which, int ctl_fd, NvU32 client)
 		p.rmCtrlFd = ctl_fd;
 		p.hClient = 0;
 		p.hSmcPartRef = 5;
-		r = uvm_ioctl(uvm, UVM_REGISTER_GPU, &p);
+		r = uvm_ioctl(uvm, UVM_REQ_REGISTER_GPU, &p);
 		st = p.rmStatus;
 		break;
 	}
@@ -187,7 +187,7 @@ request(int uvm, int which, int ctl_fd, NvU32 client)
 		p.hClient = client;
 		p.hMemory = client + 1;
 		p.gpuAttributesCount = 1;
-		r = uvm_ioctl(uvm, UVM_MAP_EXTERNAL_ALLOCATION, &p);
+		r = uvm_ioctl(uvm, UVM_REQ_MAP_EXTERNAL_ALLOCATION, &p);
 		st = p.rmStatus;
 		break;
 	}

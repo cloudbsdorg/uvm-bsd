@@ -9,7 +9,7 @@
  * saw, and leaves nothing behind; tests/ioctl/run_owner_boot.sh then checks the
  * console, wait channels (nvcobusy) and open files.
  *
- *   1 same-process free race: T1 loops UVM_REGISTER_CHANNEL with its own fd and
+ *   1 same-process free race: T1 loops UVM_REQ_REGISTER_CHANNEL with its own fd and
  *     handle while T2 loops NV_ESC_RM_FREE plus re-allocation of that client
  *   2 close race: T1 loops registrations on the nvidiactl file T2 has just opened
  *     and allocated a client on; T2 closes it right away (the last descriptor goes
@@ -23,7 +23,7 @@
  *     RM here); a watchdog fails any run that does not finish
  *   5 a stranger's free of the handles next to the victim's: process S loops
  *     NV_ESC_RM_FREE of the handles just after the victim's newest client, on its
- *     own file (iterations_b counts the frees that met a client, recorded or not), while victim V loops client allocation and UVM_REGISTER_CHANNEL
+ *     own file (iterations_b counts the frees that met a client, recorded or not), while victim V loops client allocation and UVM_REQ_REGISTER_CHANNEL
  *     with its own fd and handle.  V's request may be refused while one such free
  *     is in flight, so each client is retried; a client that is refused every
  *     time (its record was lost to the stranger) fails the loop
@@ -95,7 +95,7 @@ static atomic_int stop, progress, bad, last_bad;
 static atomic_uint cur_handle;
 static atomic_long iters_a, iters_b, refused, other, ioctl_failed, open_failed;
 
-static int uvm_ioctl(int fd, unsigned long raw, void *p) { return (ioctl(fd, UVM_IOCTL_NATIVE(raw), p)); }
+static int uvm_ioctl(int fd, uint32_t request, void *p) { return (ioctl(fd, UVM_IOCTL_NATIVE(request), p)); }
 
 static NvU32
 rm_alloc_client(int ctl)
@@ -136,7 +136,7 @@ register_channel(int uvm, int ctl, NvU32 client)
 	p.hChannel = client + 1;
 	p.base = 0x10000;
 	p.length = 0x10000;
-	if (uvm_ioctl(uvm, UVM_REGISTER_CHANNEL, &p) != 0) {
+	if (uvm_ioctl(uvm, UVM_REQ_REGISTER_CHANNEL, &p) != 0) {
 		atomic_fetch_add(&ioctl_failed, 1);
 		return (-1);
 	}
@@ -157,7 +157,7 @@ static int open_pair(struct ctx *c, int init)
 	if (c->ctl < 0 || c->uvm < 0)
 		return (-1);
 	memset(&ip, 0, sizeof(ip));
-	if (init && (uvm_ioctl(c->uvm, UVM_INITIALIZE, &ip) != 0 || ip.rmStatus != NV_OK))
+	if (init && (uvm_ioctl(c->uvm, UVM_REQ_INITIALIZE, &ip) != 0 || ip.rmStatus != NV_OK))
 		return (-1);
 	return (0);
 }

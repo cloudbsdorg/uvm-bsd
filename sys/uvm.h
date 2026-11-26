@@ -5,6 +5,10 @@
  *
  * uvm.h - internal types of nvidia-uvm.ko: module state, VA spaces and
  * ranges, GPU objects, channels and pushes, page trees and fault state.
+ * nvidia-uvm.ko is the native FreeBSD driver of the UVM interface: it
+ * answers the request numbers of nvidia_uvm_ioctl.h and depends on no
+ * Linux module.  The Linuxulator bridge for third-party Linux CUDA
+ * binaries is the separate, optional module nvidia_uvm_linux.ko.
  * The functional contract for every structure here is uvm-spec r1; the
  * section that governs each one is named beside it.
  *
@@ -375,7 +379,7 @@ struct uvm_gpu {
 	UvmGpuFaultInfo		fault_info;
 	uvmGpuDeviceHandle	rm_device;
 	uvmGpuAddressSpaceHandle rm_as;
-	void			*pma;		/* NULL on a GPU without video memory: RM has no PMA there */
+	void			*pma;		/* NULL on a GPU with unified memory: RM has no PMA there */
 	const UvmPmaStatistics	*pma_stats;	/* NULL with it */
 	bool			pma_callbacks_registered;
 	bool			fault_info_valid;
@@ -772,6 +776,7 @@ uvm_fd_mm_va_space(const struct uvm_fd *fd)
 
 int	uvm_ioctl_dispatch(struct uvm_fd *fd, bool tools_node, uint32_t request, void *user_ptr,
     struct thread *td);
+bool	uvm_requests_dense(void);
 int	uvm_mmap_single(struct cdev *cdev, vm_ooffset_t *offset, vm_size_t size, vm_object_t *object, int nprot);
 int	uvm_tools_ioctl(struct uvm_fd *fd, uint32_t request, void *user_ptr);
 

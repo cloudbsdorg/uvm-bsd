@@ -3,24 +3,27 @@
 A clean-room, BSD-2-Clause kernel module providing `/dev/nvidia-uvm` and
 `/dev/nvidia-uvm-tools`, the unified virtual memory interface NVIDIA's
 CUDA user-mode driver (libcuda, driver generation 580.178.04) needs beside
-`nvidia.ko`. Targets FreeBSD 16.0-CURRENT on arm64 and amd64.
+`nvidia.ko`. It is the **native FreeBSD driver** of that interface: a
+native caller (our own libcuda, Track #2428) talks to it with the driver's
+own request numbers, and it depends on no Linux module at all. Targets
+FreeBSD 16.0-CURRENT on arm64 and amd64.
 
 It is written from a functional specification only (`uvm-spec`, revision
 r1, see `.clean-room`), never from NVIDIA's Linux driver; `PROVENANCE.md`
 records every source consulted. Track #2101.
+
+Two modules live here:
+
+| Module | What it is |
+|---|---|
+| `nvidia-uvm.ko` | the native FreeBSD driver. It answers the request numbers of `sys/nvidia_uvm_ioctl.h` and depends on `nvidia.ko` only. |
+| `nvidia_uvm_linux.ko` | the optional Linux ioctl bridge. It belongs to the Linuxulator, owns the Linux request numbers and translates them into the driver's. It is loaded by the operator, by hand, and is never needed by a native caller. |
 
 ## Status (2026-11-20, commit 256297e)
 
 - **Running:** this version is loaded and running on an Ampere Altra (FreeBSD 16.0-CURRENT
   arm64) with a GeForce RTX 5060 Ti, beside `nvidia.ko` 580.178.04 from
   [nvidia-gb10-freebsd](https://github.com/cloudbsdorg/nvidia-gb10-freebsd).
-- **Linux CUDA works through the Linuxulator:**
-  - `cuInit` returns in about 1 s;
-  - context creation, memory copies and managed memory work;
-  - a kernel launch (vectorAdd over 1,048,576 floats) gives 0 mismatches;
-  - llama.cpp b12531 runs on the CUDA backend: with Llama-3.2-3B-Instruct Q4_K_M, prompt
-    processing over 512 tokens reaches 8728 tokens per second, and generation over 128 tokens
-    166.2.
 - **Stress test:** 30 minutes, 5992 CUDA processes, 220 of them killed with `kill -9`, no
   failure. All 90 attempts to unload the module while the device was open were refused. No Xid
   error, no lock-order reversal, no panic.
@@ -38,6 +41,32 @@ records every source consulted. Track #2101.
 - **Not done yet:** peer access, device P2P, access counters and tools trackers (later phases);
   a test on amd64 hardware; a test on the DGX Spark (GB10).
 
+## Linux binaries (optional)
+
+Third-party Linux CUDA binaries (NVIDIA's libcuda, and the programs built on
+it) run under the Linuxulator. They reach the driver through the optional
+bridge module `nvidia_uvm_linux.ko`, which owns the Linux request numbers
+of `uvm-spec` r1 section 2.1 and translates them into the driver's own.
+The bridge is loaded by hand:
+
+```sh
+kldload nvidia-uvm.ko
+kldload nvidia_uvm_linux.ko     # optional: only for Linux CUDA binaries
+```
+
+What runs today under the Linuxulator, with the bridge loaded:
+
+- `cuInit` returns in about 1 s;
+- context creation, memory copies and managed memory work;
+- a kernel launch (vectorAdd over 1,048,576 floats) gives 0 mismatches;
+- llama.cpp b12531 runs on the CUDA backend: with Llama-3.2-3B-Instruct Q4_K_M, prompt
+  processing over 512 tokens reaches 8728 tokens per second, and generation over 128 tokens
+  166.2.
+
+Nothing in that list needs the bridge for a native FreeBSD program: the
+driver answers the same requests with its own numbers, and a native caller
+needs no Linux module at all (Track #2444).
+
 ## What this phase does
 
 Phases 0 and 1 of the specification's plan:
@@ -45,8 +74,8 @@ Phases 0 and 1 of the specification's plan:
 | Area | State |
 |---|---|
 | `nvidia.ko` glue (phase 0) | in the `nvidia-gb10-freebsd` repository, branch `agent/uvm-phase0`: `nvidia.ko` exports the 60 `nvUvmInterface*` entry points, runs UVM's interrupt top half before RM's own service, and hands UVM the fault-buffer stacks |
-| Device nodes, ioctl dispatch, fd state machine | done: raw Linux request numbers through the Linuxulator, a native encoding for FreeBSD callers, every structure copied in and out whole, `rmStatus` carries the result |
-| `UVM_INITIALIZE`, `UVM_MM_INITIALIZE`, teardown | done; the secondary fd holds a users reference on the bound map and its release runs the mm shutdown (01 section 3.4, 03 section 2.1); answers `NV_OK` |
+| Device nodes, ioctl dispatch, fd state machine | done: the driver's own request numbers (`sys/nvidia_uvm_ioctl.h`), every structure copied in and out whole, `rmStatus` carries the result; the Linux request numbers live in the optional bridge module |
+| `UVM_REQ_INITIALIZE`, `UVM_REQ_MM_INITIALIZE`, teardown | done; the secondary fd holds a users reference on the bound map and its release runs the mm shutdown (01 section 3.4, 03 section 2.1); answers `NV_OK` |
 | GPU registration through RM | done: device, address space, fault buffers, interrupt ownership, PMA object, copy-engine channels; Blackwell GB20x has the HAL, other generations are refused at registration |
 | GPU VA space registration (page directory hand-over) | done, page tables in system memory written by the copy engine |
 | Channel registration with resource mapping | done |
@@ -60,25 +89,34 @@ Phases 0 and 1 of the specification's plan:
 
 Locking, memory and logging (Track #2295):
 
-- The Linuxulator calls a registered ioctl handler with Giant held. `uvm_linux_ioctl` drops Giant around `kern_ioctl` (`DROP_GIANT`/`PICKUP_GIANT`); nothing in the module relies on Giant (our `sx` and `mtx` locks, task queues not bound to Giant).
+- The Linuxulator calls a registered ioctl handler with Giant held. That handler is the
+  optional bridge module's (`linux/uvm_linux_bridge.c`); it drops Giant around `kern_ioctl`
+  (`DROP_GIANT`/`PICKUP_GIANT`); nothing in the driver relies on Giant (our `sx` and `mtx` locks,
+  task queues not bound to Giant).
 - Page tables and probe pages come from a one-page DMA tag (`UVM_GPU_DMA_MAXSIZE`), because `bus_dmamem_alloc` allocates the tag's whole `maxsize`. `tests/dma_tag_size_test.sh` fails if a tag is larger than its allocations.
 - The long page-table loops call `maybe_yield()`; the map loop also stops with `NV_ERR_SIGNAL_PENDING` on a pending signal and unwinds its page-table references. Unmap yields but does not stop early.
 - "GPU lookup by UUID failed", the "not available yet" messages and the failing-request `rmStatus` line are limited to one per call site per ten seconds (`uvm_log_slow`).
-
-"First test boot" below is the plan the first boots followed. Their results, and the current state, are under "Status" above.
 
 ## Layout
 
 | Path | What |
 |---|---|
-| `sys/nvidia_uvm_ioctl.h` | the user ABI (request numbers, parameter structures, status codes), usable from userland |
+| `sys/nvidia_uvm_ioctl.h` | the user ABI (the driver's request numbers, parameter structures, status codes), usable from userland |
 | `sys/nvidia_uvm_status.h` | the `NV_STATUS` table and the status-to-errno translation |
 | `sys/nvidia_uvm_rm.h` | the kernel interface to `nvidia.ko` (entry points, shared structures, callback table) |
 | `sys/uvm_hal_methods.h` | pure encoders: method stream, GPFIFO entries, fault entries, the generation table |
 | `sys/uvm_pte.h` | pure page table entry encoders (MMU versions 2 and 3) and geometry |
+| `sys/uvm_fb_state.h` | pure rules for a GPU with unified memory or dedicated memory |
+| `sys/uvm_requests.h` | the shape of the request table: every request id exactly once |
 | `sys/uvm.h` | internal types and the lock order |
-| `sys/uvm_main.c` | module, device nodes, Linuxulator bridge, RM session and callbacks, tunables |
+| `sys/uvm_main.c` | module, device nodes, RM session and callbacks, tunables |
 | `sys/uvm_ioctl.c` | dispatcher, fd state machine, one handler per request |
+| `sys/uvm_bridge.c` | the driver side of the bridge interface: is this descriptor one of our nodes? |
+| `linux/uvm_linux_bridge.c` | the optional Linux ioctl bridge module (`nvidia_uvm_linux.ko`) |
+| `linux/nvidia_uvm_linux_ioctl.h` | the Linux request numbers and their translation into the driver's |
+| `linux/uvm_linux_request_table.h` | the one request table (generated): every request, its driver's id, its Linux number and the size of its parameter structure |
+| `tools/gen-ioctl-table.sh` | lists the Linux UVM requests of NVIDIA's `uvm_ioctl.h` (from `skunkwerks/nvidia-uvm-freebsd`, BSD-2-Clause) |
+| `tools/gen-uvm-request-table.sh` | writes the one request table from that list and this repository's ids, numbers and structures |
 | `sys/uvm_va_space.c` | VA spaces, ranges, GPU/GPU-VA-space/channel registration, external mappings, semaphore pools |
 | `sys/uvm_gpu.c` | the module-wide GPU object and its RM sequence |
 | `sys/uvm_channel.c` | pushbuffer, channels, pushes, trackers |
@@ -87,26 +125,41 @@ Locking, memory and logging (Track #2295):
 | `sys/uvm_mmap.c` | mmap (semaphore pools) |
 | `tests/unit/` | userland unit tests of the pure parts, each written red first |
 | `tests/ioctl/uvm_ioctl_test.c` | the ioctl harness of the test plan (section 1), native and Linux builds |
+| `tests/kmod_deps_test.sh` | the static load check of the two modules: the driver depends on no Linux module |
 | `tests/amd64_cross_check.sh` | compiles every module source for amd64 with the kernel's flags |
-| `man/nvidia-uvm.4` | the manual page |
+| `man/nvidia-uvm.4` | the manual page of the driver |
+| `man/nvidia-uvm-linux.4` | the manual page of the optional bridge module |
 
 ## Build
 
 ```sh
-make SYSDIR=/path/to/kernel/sys        # sys/nvidia-uvm.ko, -Werror
+make SYSDIR=/path/to/kernel/sys        # sys/nvidia-uvm.ko and linux/nvidia_uvm_linux.ko, -Werror
 make test SYSDIR=/path/to/kernel/sys   # unit tests, then the amd64 cross-compile check
-make lint                              # mandoc -T lint man/nvidia-uvm.4
+make lint                              # mandoc -T lint on the manual pages
 ```
 
-`SYSDIR` must be the source the running kernel was built from. The module
-depends on `nvidia` (with the UVM glue), `linux64elf` (arm64) or `linux`
-(amd64), and `linux_common`.
+`SYSDIR` must be the source the running kernel was built from. The driver
+depends on `nvidia` (with the UVM glue) and on nothing else. The optional
+bridge depends on the driver, on the 64-bit Linuxulator (`linux64elf` on
+arm64, `linux64` on amd64) and on `linux_common`.
 
-The module is linked with the base toolchain (`/usr/bin/ld`, LLD) whatever
+The modules are linked with the base toolchain (`/usr/bin/ld`, LLD) whatever
 `PATH` says, and the build refuses a `.ko` that LLD did not link.  binutils'
 GNU ld (in `/usr/local/bin`, first in the default `PATH`) links a module the
 kernel cannot load ("symbol nvUvmInterfaceChannelDestroy undefined").
 `sh tests/toolchain_test.sh` proves both with a hostile `PATH`.
+
+The request table of the Linux bridge (`linux/uvm_linux_request_table.h`) is
+generated from NVIDIA's MIT `uvm_ioctl.h` and committed, so a build needs no
+NVIDIA source.  To regenerate it, or to check the committed one against a
+newer header:
+
+```sh
+make regen-ioctl-table NVIDIA_UVM_IOCTL_H=/path/to/uvm_ioctl.h
+```
+
+`make build` runs the same check when `NVIDIA_UVM_IOCTL_H` is set, and uses
+the committed table when it is not.
 
 ## Install
 
@@ -123,14 +176,19 @@ incremental build with `/usr/bin/make`.
 Both commands ask first. For scripts and other non-interactive runs, add
 `YES=1`, for example `make install YES=1`.
 
-Install writes `/boot/modules/nvidia-uvm.ko` (mode 555) and
-`/usr/local/share/man/man4/nvidia-uvm.4` (mode 444; `PREFIX` changes the
-prefix). It records files and created directories in
+Install writes `/boot/modules/nvidia-uvm.ko` (mode 555),
+`/boot/modules/nvidia_uvm_linux.ko` (mode 555) and the two manual pages
+`/usr/local/share/man/man4/nvidia-uvm.4` and
+`/usr/local/share/man/man4/nvidia-uvm-linux.4` (mode 444; `PREFIX` changes
+the prefix). It records files and created directories in
 `/var/db/uvm-bsd/installed.manifest`. A normal user can instead stage into an
 existing directory with `make install YES=1 DESTDIR=/path/to/stage`, without
 root. `nvidia-uvm.ko` needs `nvidia.ko` from
 [nvidia-gb10-freebsd](https://github.com/cloudbsdorg/nvidia-gb10-freebsd)
 installed first.
+
+Neither module is loaded by the installer: the bridge in particular is the
+operator's choice, and it is loaded by hand with `kldload`.
 
 ## Security: RM client ownership
 
@@ -138,9 +196,10 @@ RM resolves a client handle with kernel privilege and never checks the caller, a
 predictable (the first client of a boot is `0xC1D00000`). So the module accepts a client handle
 only from the process that holds the `/dev/nvidiactl` file the client was allocated on.
 
-- **Which requests:** `UVM_REGISTER_GPU` (with a client handle or an SMC reference),
-  `UVM_REGISTER_GPU_VASPACE`, `UVM_REGISTER_CHANNEL`, `UVM_MAP_EXTERNAL_ALLOCATION` and
-  `UVM_ALLOC_DEVICE_P2P` carry an `rmCtrlFd` and a handle. Before any RM call the module resolves
+- **Which requests:** `UVM_REQ_REGISTER_GPU` (with a client handle or an SMC reference),
+  `UVM_REQ_REGISTER_GPU_VASPACE`, `UVM_REQ_REGISTER_CHANNEL`,
+  `UVM_REQ_MAP_EXTERNAL_ALLOCATION` and `UVM_REQ_ALLOC_DEVICE_P2P` carry an `rmCtrlFd` and a
+  handle. Before any RM call the module resolves
   `rmCtrlFd` (`CAP_IOCTL` is the only right required, and the descriptor must carry no `cap_ioctls_limit` list, not even an empty one) and asks `nvidia.ko` (`nvUvmInterfaceClientHold`, released
   with `nvUvmInterfaceClientRelease` when the request ends) whether that file owns the handle.
 - **What a caller sees:** `rmStatus = NV_ERR_INSUFFICIENT_PERMISSIONS` (0x1B) for a closed fd, an
@@ -167,7 +226,7 @@ only from the process that holds the `/dev/nvidiactl` file the client was alloca
   The `loader.conf` of the clone gets `kern.panic_reboot_wait_time=5` and `debug.debugger_on_panic=0`.
   The list holds five entries: nvidia, nvidia-modeset, nvidia-drm, nvidia-uvm and the GSP firmware module
   `nvidia_gsp_ga10x_fw-v5.ko`, installed as `nvidia_gsp_ga10x_fw.ko`. The rc one-shot
-  `nvidia_client_owner_testboot` loads `linux64` (nvidia-uvm still depends on it), then the GSP
+  `nvidia_client_owner_testboot` loads `linux64` (nvidia-modeset still depends on it), then the GSP
   firmware module as root, and only when `kldstat -q -n nvidia_gsp_ga10x_fw` says it is loaded
   (the `firmware-loaded` precondition row; if not, the run is KIT and nothing else loads), then
   `nvidia.ko`, `nvidia-modeset.ko` and `nvidia-uvm.ko` (never `nvidia-drm.ko`). The firmware comes
@@ -207,13 +266,18 @@ only from the process that holds the `/dev/nvidiactl` file the client was alloca
 (30000), `sysmem_gpfifo` (1); diagnostics, default 0: `debug_push`, `init_probe`, `init_probe_work`, `ce_bind_subch4`. Read-only: `hw.nvidia_uvm.fatal_error`,
 `hw.nvidia_uvm.gpus`. See `nvidia-uvm(4)`.
 
-On a GPU with no video memory at all (the integrated GB10 GPU) the registration succeeds
-without a PMA object, all of its memory is system memory, and the GPFIFO ring and the PUT
-word always go to system memory: `sysmem_gpfifo` is ignored there, because there is no video
-memory to place them in. A GPU whose frame buffer information is broken or missing is not
-registered at all: the registration fails with a message.
+On a GPU with unified memory (the integrated GB10 GPU: no dedicated memory,
+the memory it uses is shared system memory) the registration succeeds
+without a PMA object, all of its memory is system memory, and the GPFIFO
+ring and the PUT word always go to system memory: `sysmem_gpfifo` is
+ignored there, because there is no dedicated memory to place them in. A
+GPU whose frame buffer information is broken or missing is not registered
+at all: the registration fails with a message.
 
 ## First test boot
+
+"First test boot" below is the plan the first boots followed. Their
+results, and the current state, are under "Status" above.
 
 From a one-shot boot environment, as root:
 
@@ -224,7 +288,9 @@ From a one-shot boot environment, as root:
    `nvUvmInterfaceSessionCreate` (`nm -D`).
 3. `kldload sys/nvidia-uvm.ko`; `dmesg` shows "RM session created" and
    "loaded: /dev/nvidia-uvm and /dev/nvidia-uvm-tools"; `ls -l /dev/nvidia-uvm*`
-   shows mode 0666.
+   shows mode 0666. The driver needs no Linux module: `kldstat` shows none.
+   For a Linux CUDA binary, load the optional bridge as well:
+   `kldload linux/nvidia_uvm_linux.ko`.
 4. As a user: `cc -I sys -o uvm_ioctl_test tests/ioctl/uvm_ioctl_test.c &&
    ./uvm_ioctl_test -v` (test plan section 1; needs no GPU).
 5. `sysctl hw.nvidia_uvm.gpus` is empty until a process registers a GPU.

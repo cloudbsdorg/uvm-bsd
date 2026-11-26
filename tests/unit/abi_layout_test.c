@@ -198,34 +198,53 @@ OF(UvmToolsEventControlData, get_behind, 4); OF(UvmToolsEventControlData, put_ah
 OF(UvmToolsEventControlData, put_behind, 12); OF(UvmToolsEventControlData, dropped, 16);
 SZ(UvmEventEntry, 64); SZ(UvmEventEntry_V2, 72);
 
-/* 2.1 request numbers */
-_Static_assert(UVM_INITIALIZE == 0x30000001, "UVM_INITIALIZE");
-_Static_assert(UVM_DEINITIALIZE == 0x30000002, "UVM_DEINITIALIZE");
-_Static_assert(UVM_CREATE_RANGE_GROUP == 23 && UVM_DESTROY_RANGE_GROUP == 24 &&
-    UVM_REGISTER_GPU_VASPACE == 25 && UVM_UNREGISTER_GPU_VASPACE == 26 &&
-    UVM_REGISTER_CHANNEL == 27 && UVM_UNREGISTER_CHANNEL == 28 &&
-    UVM_ENABLE_PEER_ACCESS == 29 && UVM_DISABLE_PEER_ACCESS == 30 &&
-    UVM_SET_RANGE_GROUP == 31 && UVM_MAP_EXTERNAL_ALLOCATION == 33 &&
-    UVM_FREE == 34 && UVM_REGISTER_GPU == 37 && UVM_UNREGISTER_GPU == 38 &&
-    UVM_PAGEABLE_MEM_ACCESS == 39 && UVM_PREVENT_MIGRATION_RANGE_GROUPS == 40 &&
-    UVM_ALLOW_MIGRATION_RANGE_GROUPS == 41 && UVM_SET_PREFERRED_LOCATION == 42 &&
-    UVM_UNSET_PREFERRED_LOCATION == 43 && UVM_ENABLE_READ_DUPLICATION == 44 &&
-    UVM_DISABLE_READ_DUPLICATION == 45 && UVM_SET_ACCESSED_BY == 46 &&
-    UVM_UNSET_ACCESSED_BY == 47 && UVM_MIGRATE == 51 && UVM_MIGRATE_RANGE_GROUP == 53 &&
-    UVM_ENABLE_SYSTEM_WIDE_ATOMICS == 54 && UVM_DISABLE_SYSTEM_WIDE_ATOMICS == 55 &&
-    UVM_TOOLS_INIT_EVENT_TRACKER == 56 && UVM_TOOLS_SET_NOTIFICATION_THRESHOLD == 57 &&
-    UVM_TOOLS_EVENT_QUEUE_ENABLE_EVENTS == 58 && UVM_TOOLS_EVENT_QUEUE_DISABLE_EVENTS == 59 &&
-    UVM_TOOLS_ENABLE_COUNTERS == 60 && UVM_TOOLS_DISABLE_COUNTERS == 61 &&
-    UVM_TOOLS_READ_PROCESS_MEMORY == 62 && UVM_TOOLS_WRITE_PROCESS_MEMORY == 63 &&
-    UVM_TOOLS_GET_PROCESSOR_UUID_TABLE == 64 && UVM_MAP_DYNAMIC_PARALLELISM_REGION == 65 &&
-    UVM_UNMAP_EXTERNAL == 66 && UVM_TOOLS_FLUSH_EVENTS == 67 &&
-    UVM_ALLOC_SEMAPHORE_POOL == 68 && UVM_CLEAN_UP_ZOMBIE_RESOURCES == 69 &&
-    UVM_PAGEABLE_MEM_ACCESS_ON_GPU == 70 && UVM_POPULATE_PAGEABLE == 71 &&
-    UVM_VALIDATE_VA_RANGE == 72 && UVM_CREATE_EXTERNAL_RANGE == 73 &&
-    UVM_MAP_EXTERNAL_SPARSE == 74 && UVM_MM_INITIALIZE == 75 &&
-    UVM_TOOLS_INIT_EVENT_TRACKER_V2 == 76 && UVM_TOOLS_GET_PROCESSOR_UUID_TABLE_V2 == 77 &&
-    UVM_ALLOC_DEVICE_P2P == 78 && UVM_CLEAR_ALL_ACCESS_COUNTERS == 79 &&
-    UVM_DISCARD == 80 && UVM_IS_8_SUPPORTED == 2047, "request numbers");
+/*
+ * The request numbers of the driver.
+ *
+ * The driver has its own request numbers, and they are the primary
+ * interface: a native caller (our libcuda, Track #2428) uses them
+ * directly.  The Linux request numbers of uvm-spec r1, 01-user-abi.md
+ * section 2.1 are the ones a third-party Linux binary issues; they belong
+ * to the optional Linux ioctl bridge (nvidia_uvm_linux.ko) and are
+ * checked by tests/unit/linux_bridge_test.c.
+ *
+ * The numbers are dense and stable: a request keeps its number for as
+ * long as it exists.
+ */
+_Static_assert(UVM_REQ_INITIALIZE == 1 && UVM_REQ_DEINITIALIZE == 2 &&
+    UVM_REQ_MM_INITIALIZE == 3 && UVM_REQ_PAGEABLE_MEM_ACCESS == 4 &&
+    UVM_REQ_PAGEABLE_MEM_ACCESS_ON_GPU == 5 && UVM_REQ_REGISTER_GPU == 6 &&
+    UVM_REQ_UNREGISTER_GPU == 7 && UVM_REQ_REGISTER_GPU_VASPACE == 8 &&
+    UVM_REQ_UNREGISTER_GPU_VASPACE == 9 && UVM_REQ_REGISTER_CHANNEL == 10 &&
+    UVM_REQ_UNREGISTER_CHANNEL == 11 && UVM_REQ_ENABLE_PEER_ACCESS == 12 &&
+    UVM_REQ_DISABLE_PEER_ACCESS == 13 && UVM_REQ_CREATE_RANGE_GROUP == 14 &&
+    UVM_REQ_DESTROY_RANGE_GROUP == 15 && UVM_REQ_SET_RANGE_GROUP == 16 &&
+    UVM_REQ_PREVENT_MIGRATION_RANGE_GROUPS == 17 &&
+    UVM_REQ_ALLOW_MIGRATION_RANGE_GROUPS == 18 && UVM_REQ_CREATE_EXTERNAL_RANGE == 19 &&
+    UVM_REQ_MAP_EXTERNAL_ALLOCATION == 20 && UVM_REQ_MAP_EXTERNAL_SPARSE == 21 &&
+    UVM_REQ_UNMAP_EXTERNAL == 22 && UVM_REQ_FREE == 23 && UVM_REQ_VALIDATE_VA_RANGE == 24 &&
+    UVM_REQ_MAP_DYNAMIC_PARALLELISM_REGION == 25 && UVM_REQ_ALLOC_SEMAPHORE_POOL == 26 &&
+    UVM_REQ_SET_PREFERRED_LOCATION == 27 && UVM_REQ_UNSET_PREFERRED_LOCATION == 28 &&
+    UVM_REQ_SET_ACCESSED_BY == 29 && UVM_REQ_UNSET_ACCESSED_BY == 30 &&
+    UVM_REQ_ENABLE_READ_DUPLICATION == 31 && UVM_REQ_DISABLE_READ_DUPLICATION == 32 &&
+    UVM_REQ_MIGRATE == 33 && UVM_REQ_MIGRATE_RANGE_GROUP == 34 && UVM_REQ_DISCARD == 35 &&
+    UVM_REQ_ENABLE_SYSTEM_WIDE_ATOMICS == 36 && UVM_REQ_DISABLE_SYSTEM_WIDE_ATOMICS == 37 &&
+    UVM_REQ_CLEAN_UP_ZOMBIE_RESOURCES == 38 && UVM_REQ_POPULATE_PAGEABLE == 39 &&
+    UVM_REQ_TOOLS_READ_PROCESS_MEMORY == 40 && UVM_REQ_TOOLS_WRITE_PROCESS_MEMORY == 41 &&
+    UVM_REQ_TOOLS_GET_PROCESSOR_UUID_TABLE == 42 &&
+    UVM_REQ_TOOLS_GET_PROCESSOR_UUID_TABLE_V2 == 43 && UVM_REQ_TOOLS_FLUSH_EVENTS == 44 &&
+    UVM_REQ_CLEAR_ALL_ACCESS_COUNTERS == 45 && UVM_REQ_ALLOC_DEVICE_P2P == 46 &&
+    UVM_REQ_TOOLS_INIT_EVENT_TRACKER == 47 && UVM_REQ_TOOLS_INIT_EVENT_TRACKER_V2 == 48 &&
+    UVM_REQ_TOOLS_SET_NOTIFICATION_THRESHOLD == 49 &&
+    UVM_REQ_TOOLS_EVENT_QUEUE_ENABLE_EVENTS == 50 &&
+    UVM_REQ_TOOLS_EVENT_QUEUE_DISABLE_EVENTS == 51 && UVM_REQ_TOOLS_ENABLE_COUNTERS == 52 &&
+    UVM_REQ_TOOLS_DISABLE_COUNTERS == 53 && UVM_REQ_COUNT == 54, "the request numbers of the driver");
+
+/* the reserved number and the native encoding */
+_Static_assert(UVM_REQ_NONE == 0xff, "UVM_REQ_NONE");
+_Static_assert(UVM_IOCTL_NATIVE_GROUP == 0x55, "the group byte of the native encoding");
+_Static_assert(UVM_IOCTL_NATIVE(UVM_REQ_INITIALIZE) == (IOC_VOID | 0x5500 | 1),
+    "the native encoding of a request");
 
 /* 2.3 status codes the specification names */
 _Static_assert(NV_OK == 0 && NV_ERR_GENERIC == 0xFFFF && NV_ERR_BUFFER_TOO_SMALL == 2 &&
@@ -319,16 +338,23 @@ main(void)
 	}
 	if (check_errno_table() != 0)
 		return (1);
-	/* the native FreeBSD request encoding round-trips every number */
+	/*
+	 * The native FreeBSD request encoding round-trips every request
+	 * number of the driver.  The encoding carries the number in the low
+	 * eight bits, so a number outside them cannot travel.
+	 */
 	{
-		static const NvU32 nums[] = { 1, 23, 80, 2047, 0x30000001, 0x30000002 };
-		unsigned k;
+		unsigned id;
 
-		for (k = 0; k < sizeof(nums) / sizeof(nums[0]); k++) {
-			if (uvm_ioctl_native_decode(UVM_IOCTL_NATIVE(nums[k])) != nums[k]) {
-				printf("FAIL: native encoding of %#x\n", nums[k]);
+		for (id = 1; id < UVM_REQ_COUNT; id++) {
+			if (uvm_ioctl_native_decode(UVM_IOCTL_NATIVE(id)) != id) {
+				printf("FAIL: native encoding of %u\n", id);
 				return (1);
 			}
+		}
+		if (uvm_ioctl_native_decode(UVM_IOCTL_NATIVE(UVM_REQ_NONE)) != UVM_REQ_NONE) {
+			printf("FAIL: native encoding of the reserved number\n");
+			return (1);
 		}
 	}
 	printf("abi_layout_test: PASS (all layout assertions compiled)\n");

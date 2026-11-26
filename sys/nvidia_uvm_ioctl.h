@@ -142,90 +142,128 @@ typedef struct UvmGpuMappingAttributes {
 #define	UVM_MIGRATE_FLAGS_TEST_ALL	((NvU32)3 << 1)	/* test-only bits */
 #define	UVM_DISCARD_FLAGS_UNMAP		((NvU64)1)
 
-/* 2.1 request numbers: raw small integers, compared in full 32 bits */
-#define	UVM_INITIALIZE				0x30000001u
-#define	UVM_DEINITIALIZE			0x30000002u
-#define	UVM_CREATE_RANGE_GROUP			23
-#define	UVM_DESTROY_RANGE_GROUP			24
-#define	UVM_REGISTER_GPU_VASPACE		25
-#define	UVM_UNREGISTER_GPU_VASPACE		26
-#define	UVM_REGISTER_CHANNEL			27
-#define	UVM_UNREGISTER_CHANNEL			28
-#define	UVM_ENABLE_PEER_ACCESS			29
-#define	UVM_DISABLE_PEER_ACCESS			30
-#define	UVM_SET_RANGE_GROUP			31
-#define	UVM_MAP_EXTERNAL_ALLOCATION		33
-#define	UVM_FREE				34
-#define	UVM_REGISTER_GPU			37
-#define	UVM_UNREGISTER_GPU			38
-#define	UVM_PAGEABLE_MEM_ACCESS			39
-#define	UVM_PREVENT_MIGRATION_RANGE_GROUPS	40
-#define	UVM_ALLOW_MIGRATION_RANGE_GROUPS	41
-#define	UVM_SET_PREFERRED_LOCATION		42
-#define	UVM_UNSET_PREFERRED_LOCATION		43
-#define	UVM_ENABLE_READ_DUPLICATION		44
-#define	UVM_DISABLE_READ_DUPLICATION		45
-#define	UVM_SET_ACCESSED_BY			46
-#define	UVM_UNSET_ACCESSED_BY			47
-#define	UVM_MIGRATE				51
-#define	UVM_MIGRATE_RANGE_GROUP			53
-#define	UVM_ENABLE_SYSTEM_WIDE_ATOMICS		54
-#define	UVM_DISABLE_SYSTEM_WIDE_ATOMICS		55
-#define	UVM_TOOLS_INIT_EVENT_TRACKER		56
-#define	UVM_TOOLS_SET_NOTIFICATION_THRESHOLD	57
-#define	UVM_TOOLS_EVENT_QUEUE_ENABLE_EVENTS	58
-#define	UVM_TOOLS_EVENT_QUEUE_DISABLE_EVENTS	59
-#define	UVM_TOOLS_ENABLE_COUNTERS		60
-#define	UVM_TOOLS_DISABLE_COUNTERS		61
-#define	UVM_TOOLS_READ_PROCESS_MEMORY		62
-#define	UVM_TOOLS_WRITE_PROCESS_MEMORY		63
-#define	UVM_TOOLS_GET_PROCESSOR_UUID_TABLE	64
-#define	UVM_MAP_DYNAMIC_PARALLELISM_REGION	65
-#define	UVM_UNMAP_EXTERNAL			66
-#define	UVM_TOOLS_FLUSH_EVENTS			67
-#define	UVM_ALLOC_SEMAPHORE_POOL		68
-#define	UVM_CLEAN_UP_ZOMBIE_RESOURCES		69
-#define	UVM_PAGEABLE_MEM_ACCESS_ON_GPU		70
-#define	UVM_POPULATE_PAGEABLE			71
-#define	UVM_VALIDATE_VA_RANGE			72
-#define	UVM_CREATE_EXTERNAL_RANGE		73
-#define	UVM_MAP_EXTERNAL_SPARSE			74
-#define	UVM_MM_INITIALIZE			75
-#define	UVM_TOOLS_INIT_EVENT_TRACKER_V2		76
-#define	UVM_TOOLS_GET_PROCESSOR_UUID_TABLE_V2	77
-#define	UVM_ALLOC_DEVICE_P2P			78
-#define	UVM_CLEAR_ALL_ACCESS_COUNTERS		79
-#define	UVM_DISCARD				80
-#define	UVM_IS_8_SUPPORTED			2047
+/*
+ * The request numbers of the driver.
+ *
+ * These are the driver's own: they are not the numbers a Linux binary
+ * issues.  A native FreeBSD caller (our libcuda, Track #2428) uses them
+ * directly; a third-party Linux CUDA binary reaches them through the
+ * optional Linux ioctl bridge (nvidia_uvm_linux.ko), which owns the Linux
+ * numbers and translates them into these.
+ *
+ * The numbers are dense and stable: a request keeps its number for as long
+ * as it exists, so that a caller built against one revision of this header
+ * keeps working.  A new request takes the next free number; a removed one
+ * leaves a hole rather than moving the ones after it.
+ */
+enum uvm_request_id {
+	UVM_REQ_INITIALIZE = 1,
+	UVM_REQ_DEINITIALIZE,
+	UVM_REQ_MM_INITIALIZE,
+	UVM_REQ_PAGEABLE_MEM_ACCESS,
+	UVM_REQ_PAGEABLE_MEM_ACCESS_ON_GPU,
+	UVM_REQ_REGISTER_GPU,
+	UVM_REQ_UNREGISTER_GPU,
+	UVM_REQ_REGISTER_GPU_VASPACE,
+	UVM_REQ_UNREGISTER_GPU_VASPACE,
+	UVM_REQ_REGISTER_CHANNEL,
+	UVM_REQ_UNREGISTER_CHANNEL,
+	UVM_REQ_ENABLE_PEER_ACCESS,
+	UVM_REQ_DISABLE_PEER_ACCESS,
+	UVM_REQ_CREATE_RANGE_GROUP,
+	UVM_REQ_DESTROY_RANGE_GROUP,
+	UVM_REQ_SET_RANGE_GROUP,
+	UVM_REQ_PREVENT_MIGRATION_RANGE_GROUPS,
+	UVM_REQ_ALLOW_MIGRATION_RANGE_GROUPS,
+	UVM_REQ_CREATE_EXTERNAL_RANGE,
+	UVM_REQ_MAP_EXTERNAL_ALLOCATION,
+	UVM_REQ_MAP_EXTERNAL_SPARSE,
+	UVM_REQ_UNMAP_EXTERNAL,
+	UVM_REQ_FREE,
+	UVM_REQ_VALIDATE_VA_RANGE,
+	UVM_REQ_MAP_DYNAMIC_PARALLELISM_REGION,
+	UVM_REQ_ALLOC_SEMAPHORE_POOL,
+	UVM_REQ_SET_PREFERRED_LOCATION,
+	UVM_REQ_UNSET_PREFERRED_LOCATION,
+	UVM_REQ_SET_ACCESSED_BY,
+	UVM_REQ_UNSET_ACCESSED_BY,
+	UVM_REQ_ENABLE_READ_DUPLICATION,
+	UVM_REQ_DISABLE_READ_DUPLICATION,
+	UVM_REQ_MIGRATE,
+	UVM_REQ_MIGRATE_RANGE_GROUP,
+	UVM_REQ_DISCARD,
+	UVM_REQ_ENABLE_SYSTEM_WIDE_ATOMICS,
+	UVM_REQ_DISABLE_SYSTEM_WIDE_ATOMICS,
+	UVM_REQ_CLEAN_UP_ZOMBIE_RESOURCES,
+	UVM_REQ_POPULATE_PAGEABLE,
+	UVM_REQ_TOOLS_READ_PROCESS_MEMORY,
+	UVM_REQ_TOOLS_WRITE_PROCESS_MEMORY,
+	UVM_REQ_TOOLS_GET_PROCESSOR_UUID_TABLE,
+	UVM_REQ_TOOLS_GET_PROCESSOR_UUID_TABLE_V2,
+	UVM_REQ_TOOLS_FLUSH_EVENTS,
+	UVM_REQ_CLEAR_ALL_ACCESS_COUNTERS,
+	UVM_REQ_ALLOC_DEVICE_P2P,
+	UVM_REQ_TOOLS_INIT_EVENT_TRACKER,
+	UVM_REQ_TOOLS_INIT_EVENT_TRACKER_V2,
+	UVM_REQ_TOOLS_SET_NOTIFICATION_THRESHOLD,
+	UVM_REQ_TOOLS_EVENT_QUEUE_ENABLE_EVENTS,
+	UVM_REQ_TOOLS_EVENT_QUEUE_DISABLE_EVENTS,
+	UVM_REQ_TOOLS_ENABLE_COUNTERS,
+	UVM_REQ_TOOLS_DISABLE_COUNTERS,
+	UVM_REQ_COUNT
+};
+
+/*
+ * UVM_REQ_NONE - the reserved request number that means "no request".
+ *
+ * The driver answers it as it answers any other number it does not know:
+ * ENOSYS on the main node, EINVAL on the tools node (01 section 2.2).  The
+ * optional Linux ioctl bridge uses it for a Linux request number that has
+ * no driver request behind it, so that the answer is the driver's own.
+ */
+#define	UVM_REQ_NONE	0xffu
 
 /*
  * The native FreeBSD request encoding.
  *
- * libcuda issues the raw numbers above through the Linuxulator, whose
- * ioctl path hands them to this module unchanged.  FreeBSD's own ioctl(2)
- * refuses a request word with no direction bit (ENOTTY), so a native
- * FreeBSD caller (the test harness) wraps the raw number: IOC_VOID with
- * the number in the low 16 bits, except the initialisation family whose
- * 0x3000xxxx form carries group byte 0x30 and the low byte of the number.
- * uvm_ioctl_native_decode() is the inverse; the module applies it to a
- * request that arrives through the native path.  With IOC_VOID and a zero
- * size, the kernel passes the user's argument word itself, so the
- * parameter pointer reaches the driver as it does under Linux.
+ * A request word carries the direction and the size in the high bits, the
+ * group in the next byte and the request number in the low eight bits
+ * (sys/ioccom.h).  This driver uses the VOID direction with a zero size
+ * and its own group byte ('U'): the shape of _IO('U', n).  With a zero
+ * size the kernel hands the driver the user's argument word itself, so the
+ * parameter pointer reaches the driver unchanged and the driver copies the
+ * structure in and out itself (01 section 2.2).
+ *
+ * The layout of the word (sys/ioccom.h):
+ *
+ *   bits 31-29  the direction: IOC_VOID is 0x20000000, and the direction
+ *               bits of anything else are not ours;
+ *   bits 28-16  the size in bytes: it must be zero, because the driver
+ *               copies the structures itself;
+ *   bits 15-8   the group: ours is 'U';
+ *   bits 7-0    the request number.
+ *
+ * The number is in the low eight bits, so the encoding carries at most
+ * 256 requests; the driver has fewer than a hundred.
  */
-#define	UVM_IOCTL_NATIVE_GROUP_INIT	0x30
+#define	UVM_IOCTL_NATIVE_GROUP	0x55	/* 'U' */
 #ifdef __FreeBSD__
-#define	UVM_IOCTL_NATIVE(n)						\
-	((unsigned long)(IOC_VOID | (((n) & 0xffff0000u) == 0x30000000u ?	\
-	    ((UVM_IOCTL_NATIVE_GROUP_INIT << 8) | ((n) & 0xffu)) :	\
-	    ((n) & 0xffffu))))
+#define	UVM_IOCTL_NATIVE(id)						\
+	((unsigned long)(IOC_VOID | ((unsigned long)UVM_IOCTL_NATIVE_GROUP << 8) | \
+	    ((unsigned long)(id) & 0xffu)))
 #else
-#define	UVM_IOCTL_NATIVE(n)	((unsigned long)(n))
+#define	UVM_IOCTL_NATIVE(id)	((unsigned long)(id))
 #endif
 
 /*
- * uvm_ioctl_native_decode - the raw UVM request number behind a native
- * FreeBSD request word, or 0 (never a valid number) when the word is not
- * one UVM_IOCTL_NATIVE() produces.
+ * uvm_ioctl_native_decode - the request number behind a native FreeBSD
+ * request word, or 0 (never a valid number) when the word is not one
+ * UVM_IOCTL_NATIVE() produces.
+ *
+ * Every field of the word is checked: the direction must be the void
+ * direction, the size must be zero, and the group must be ours.  A word
+ * that passes the checks carries the request number in its low eight bits.
+ *
  * Time:  O(1).  Space: O(1).
  */
 static inline NvU32
@@ -233,12 +271,16 @@ uvm_ioctl_native_decode(unsigned long cmd)
 {
 	NvU32 c = (NvU32)cmd;
 
-	/* only IOC_VOID, zero size; everything else is not ours */
-	if ((c & 0xffff0000u) != 0x20000000u)
+	/* the direction: the void direction and nothing else */
+	if ((c & 0xe0000000u) != ((NvU32)IOC_VOID & 0xe0000000u))
 		return (0);
-	if (((c >> 8) & 0xffu) == UVM_IOCTL_NATIVE_GROUP_INIT)
-		return (0x30000000u | (c & 0xffu));
-	return (c & 0xffffu);
+	/* the size: none, the driver copies the structures itself */
+	if ((c & 0x1fff0000u) != 0)
+		return (0);
+	/* the group: ours */
+	if (((c >> 8) & 0xffu) != (NvU32)UVM_IOCTL_NATIVE_GROUP)
+		return (0);
+	return (c & 0xffu);
 }
 
 /* 5.1 initialisation family */

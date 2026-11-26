@@ -15,11 +15,12 @@
  * internal address space, and page tables are written physically.  RM's
  * page directory for the internal address space therefore stays in place.
  * The GPU memory manager (PMM) does not exist yet either: nothing in phase
- * 1 allocates video memory, so the PMA eviction callbacks registered here
- * answer that they have nothing to give.  A GPU without video memory (the
- * GB10 SoC) has no PMA at all: RM answers NV_ERR_OBJECT_NOT_FOUND for the
- * PMA object there, gpu->pma stays NULL and no callback is registered
- * (uvm_fb_state.h has the rule).
+ * 1 allocates dedicated memory, so the PMA eviction callbacks registered
+ * here answer that they have nothing to give.  A GPU with unified memory
+ * (the GB10 SoC: no dedicated memory, shared system memory) has no PMA at
+ * all: RM answers NV_ERR_OBJECT_NOT_FOUND for the PMA object there,
+ * gpu->pma stays NULL and no callback is registered (uvm_fb_state.h has
+ * the rule).
  */
 
 #include "uvm.h"
@@ -135,7 +136,7 @@ uvm_gpu_instance_lookup(struct uvm_gpu *gpu, uint64_t inst_phys, uvm_aperture_t 
 	return (ch);
 }
 
-/* ---- PMA eviction callbacks (02 section 3.9): no video memory is held in phase 1 ---- */
+/* ---- PMA eviction callbacks (02 section 3.9): no dedicated memory is held in phase 1 ---- */
 
 static NV_STATUS
 uvm_pma_evict_pages(void *data, NvU64 page_size, NvU64 *pages, NvU32 count, NvU64 phys_begin, NvU64 phys_end,
@@ -276,9 +277,9 @@ uvm_gpu_add(const NvProcessorUuid *uuid, const UvmGpuClientInfo *client, struct 
 	if (gpu->fb_state == UVM_FB_BROKEN) {
 		/*
 		 * The frame buffer information is broken or missing.  That is not
-		 * the same as a GPU without video memory: a missing PMA object
+		 * the same as a GPU with unified memory: a missing PMA object
 		 * would be normal there, so the registration fails with a message
-		 * instead of pretending the GPU has no video memory.
+		 * instead of pretending the GPU has unified memory.
 		 */
 		if (status != NV_OK)
 			uvm_log("%s: the frame buffer information is missing (GetFbInfo failed: %s)",
@@ -337,8 +338,8 @@ uvm_gpu_add(const NvProcessorUuid *uuid, const UvmGpuClientInfo *client, struct 
 		    pma_verdict.reason);
 		goto fail_as;
 	}
-	if (pma_verdict.decision == UVM_FB_PMA_ABSENT) {
-		/* no video memory, so RM has no PMA: nothing to evict from, no callbacks */
+	if (pma_verdict.decision == UVM_FB_PMA_UNIFIED) {
+		/* unified memory: RM has no PMA: nothing to evict from, no callbacks */
 		gpu->pma = NULL;
 		gpu->pma_stats = NULL;
 		uvm_log("%s: %s; all GPU memory is system memory", gpu->name, pma_verdict.reason);
@@ -377,10 +378,21 @@ uvm_gpu_add(const NvProcessorUuid *uuid, const UvmGpuClientInfo *client, struct 
 	mtx_unlock_spin(&uvm.gpu_table_lock);
 	uvm_gpu_replayable_intr_enable(gpu);
 
-	uvm_log("gpu%u: %s registered: arch %#x impl %#x host %#x ce %#x, MMU v%u, %u MB of video memory "
-	    "(frame buffer %s), ECC %s, link %u, DMA window %#jx-%#jx", gpu->id, gpu->name, gpu->info.gpuArch,
+	/*
+	 * The kind of memory the GPU has, in its own words: a GPU with
+	 * unified memory has no dedicated memory and uses shared system
+	 * memory, a GPU with dedicated memory has memory of its own.
+	 */
+	if (gpu->fb_state == UVM_FB_UNIFIED)
+		uvm_log("%s: unified memory (no dedicated memory); GPU memory is shared system memory",
+		    gpu->name);
+	else
+		uvm_log("%s: %u MB of dedicated memory (frame buffer %s)", gpu->name,
+		    (gpu->fb.heapSize + gpu->fb.reservedHeapSize) / 1024,
+		    uvm_fb_state_name(gpu->fb_state));
+	uvm_log("gpu%u: %s registered: arch %#x impl %#x host %#x ce %#x, MMU v%u, "
+	    "ECC %s, link %u, DMA window %#jx-%#jx", gpu->id, gpu->name, gpu->info.gpuArch,
 	    gpu->info.gpuImplementation, gpu->info.hostClass, gpu->info.ceClass, gpu->mmu_version,
-	    (gpu->fb.heapSize + gpu->fb.reservedHeapSize) / 1024, uvm_fb_state_name(gpu->fb_state),
 	    gpu->ecc.bEccEnabled ? "on" : "off", gpu->info.sysmemLink,
 	    (uintmax_t)gpu->platform.dma_addressable_start,
 	    (uintmax_t)gpu->platform.dma_addressable_limit);

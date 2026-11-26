@@ -1,7 +1,7 @@
 .\" Copyright (c) 2026 REVYTECH, Inc.
 .\" SPDX-License-Identifier: BSD-2-Clause
 .\"
-.Dd November 20, 2026
+.Dd November 25, 2026
 .Dt NVIDIA-UVM 4
 .Os
 .Sh NAME
@@ -33,13 +33,19 @@ driver and needs an
 .Pa nvidia.ko
 that exports the UVM kernel interface.
 .Pp
-CUDA programs run under the Linuxulator; the module registers a
-.Xr linux 4
-ioctl handler so the request numbers libcuda issues reach it unchanged.
-A native
-.Fx
-program wraps the same numbers with the encoding in
-.In nvidia_uvm_ioctl.h .
+This module is the native driver of the interface: a request arrives with
+the driver's own request number and is answered here.
+The request numbers and the encoding of a request word are in
+.In nvidia_uvm_ioctl.h ;
+a native program wraps the request number in that encoding.
+.Pp
+Third-party Linux CUDA binaries run under the Linuxulator.
+They need the optional bridge module
+.Xr nvidia-uvm-linux 4 ,
+which owns the Linux request numbers and translates them into the
+driver's.
+The driver itself depends on no Linux module and imports no Linux symbol,
+so a native caller needs nothing but the driver.
 .Pp
 This is a clean-room implementation written from a functional
 specification (revision r1), not from NVIDIA's Linux driver.
@@ -66,9 +72,11 @@ of a failing request, so a client that retries in a loop cannot fill the
 kernel message buffer.
 Other GPU generations report themselves unsupported at registration.
 .Pp
-The Linuxulator runs a registered ioctl handler with Giant held.
-The driver releases Giant for the duration of each Linux ioctl and relies on
-it nowhere: its locks are
+The Linuxulator runs a registered ioctl handler with Giant held; that
+is the business of the optional bridge module
+.Xr nvidia-uvm-linux 4 ,
+not of the driver.
+The driver relies on Giant nowhere: its locks are
 .Xr sx 9
 and
 .Xr mutex 9
@@ -89,13 +97,13 @@ allocates the whole tag size per allocation.
 Five requests carry an
 .Va rmCtrlFd
 and RM handles:
-.Dv UVM_REGISTER_GPU
+.Dv UVM_REQ_REGISTER_GPU
 (with a client handle or an SMC partition reference),
-.Dv UVM_REGISTER_GPU_VASPACE ,
-.Dv UVM_REGISTER_CHANNEL ,
-.Dv UVM_MAP_EXTERNAL_ALLOCATION
+.Dv UVM_REQ_REGISTER_GPU_VASPACE ,
+.Dv UVM_REQ_REGISTER_CHANNEL ,
+.Dv UVM_REQ_MAP_EXTERNAL_ALLOCATION
 and
-.Dv UVM_ALLOC_DEVICE_P2P .
+.Dv UVM_REQ_ALLOC_DEVICE_P2P .
 The RM resolves a client handle with kernel privilege and checks nothing about
 the caller, and handles are predictable (the first client of a boot is
 0xC1D00000), so the module checks ownership itself, before any RM call.
@@ -140,7 +148,7 @@ that does not resolve, or a file that is not an nvidiactl file owning the
 handle.
 Holding the open file is the capability: a duplicate of the descriptor, or the
 descriptor passed over a socket, is the same file and passes.
-.Dv UVM_UNREGISTER_CHANNEL
+.Dv UVM_REQ_UNREGISTER_CHANNEL
 names a channel in the caller's own VA space only and calls no RM function, so
 it needs no check.
 The check needs
@@ -192,17 +200,18 @@ How long a wait on GPU work may take before the module records a fatal
 error; default 30000.
 .It Va hw.nvidia_uvm.sysmem_gpfifo
 Place the GPFIFO ring and PUT word in system memory (1, the default) or
-video memory (0).
-On a GPU that has no video memory at all, such as the integrated GPU of the
-GB10 SoC, the registration succeeds, the GPU has no physical memory
-allocator (PMA) object because there is no video memory to allocate from,
-and all of its memory is system memory.
+dedicated memory (0).
+On a GPU with unified memory, such as the integrated GPU of the GB10 SoC,
+the GPU has no dedicated memory and uses shared system memory: the
+registration succeeds, the GPU has no physical memory allocator (PMA)
+object because there is no dedicated memory to allocate from, and all of
+its memory is system memory.
 The GPFIFO ring and the PUT word of such a GPU always go to system memory
-and this tunable is ignored there, because there is no video memory to place
-them in.
+and this tunable is ignored there, because there is no dedicated memory
+to place them in.
 A GPU whose frame buffer information is broken or missing is a different
-case: the registration of that GPU fails with a message, and the driver does
-not treat it as a GPU without video memory.
+case: the registration of that GPU fails with a message, and the driver
+does not treat it as a GPU with unified memory.
 .It Va hw.nvidia_uvm.debug_push
 Log the method stream, GPFIFO entry, GP_PUT and doorbell value of the first
 N pushes (at most 64), and the GPU addresses of each channel's GPFIFO,
@@ -270,7 +279,8 @@ of either node fails with
 .It Pa /dev/nvidia-uvm-tools
 .El
 .Sh SEE ALSO
-.Xr linux 4
+.Xr linux 4 ,
+.Xr nvidia-uvm-linux 4
 .Sh HISTORY
 The
 .Nm

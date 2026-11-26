@@ -16,6 +16,10 @@ PREFIX ?= /usr/local
 DESTDIR ?=
 MK_KO =
 PREFLIGHT_TOOLS = cc make mandoc
+# The path to NVIDIA's MIT uvm_ioctl.h.  It is only needed to regenerate or
+# to check the request table (linux/uvm_linux_request_table.h); the table is
+# committed, so a build works without it.
+NVIDIA_UVM_IOCTL_H ?=
 
 help:
 	@printf '%s\n' \
@@ -26,11 +30,12 @@ help:
 		"  make preflight  report missing tools (JSON=1 for --json)" \
 		"  make install-prereqs  check cc, make and mandoc (aliases: deps, install-deps)" \
 		"  make configure  nothing to configure for this module" \
-		"  make build      build sys/nvidia-uvm.ko (SYSDIR=$(SYSDIR): the kernel source); make all is the same" \
+		"  make build      build sys/nvidia-uvm.ko and linux/nvidia_uvm_linux.ko (SYSDIR=$(SYSDIR): the kernel source); make all is the same" \
 		"  make test       the userland unit tests and the amd64 cross-compile check" \
-		"  make lint       mandoc -T lint on the manual page" \
-		"  make install    install the module and man page (YES=1 skips the question)" \
+		"  make lint       mandoc -T lint on the manual pages" \
+		"  make install    install both modules and the man pages (YES=1 skips the question)" \
 		"  make deinstall  remove exactly what install wrote (alias: uninstall)" \
+		"  make regen-ioctl-table  rewrite the request table from NVIDIA's uvm_ioctl.h (NVIDIA_UVM_IOCTL_H=...)" \
 		"  make clean" \
 		"" \
 		"Switches:" \
@@ -40,10 +45,11 @@ help:
 		"  PREFIX=DIR    man page prefix (default $(PREFIX))" \
 		"  DESTDIR=DIR   stage as the calling user instead of using root" \
 		"  JSON=1        preflight writes the --json contract" \
+		"  NVIDIA_UVM_IOCTL_H=FILE  NVIDIA's uvm_ioctl.h, for the request table" \
 		"" \
 		"Run make from the directory that holds this Makefile."
 
-.PHONY: help purpose preflight install-prereqs deps install-deps configure build all test lint install deinstall uninstall clean
+.PHONY: help purpose preflight install-prereqs deps install-deps configure build all test lint install deinstall uninstall regen-ioctl-table clean
 
 purpose:
 	@printf '%s\n' "$(REPO_PURPOSE)"
@@ -66,18 +72,27 @@ configure:
 	sh scripts/make.sh configure
 
 # no $(MAKE) in the recipe: make -n would run such a line, and the contract lint dry-runs build in an empty directory.
-# The sub-make is the shell variable MAKE when the caller exported it, else make (FreeBSD make: sys/ is a bsd.kmod.mk Makefile).
+# The sub-make is the shell variable MAKE when the caller exported it, else make (FreeBSD make: sys/ and linux/ are bsd.kmod.mk Makefiles).
+# The request table is generated from NVIDIA's uvm_ioctl.h; the committed table is checked against it when the
+# header is given, and used as it is when it is not (a build needs no NVIDIA source).
 build:
+	sh tools/gen-uvm-request-table.sh --check "$(NVIDIA_UVM_IOCTL_H)"
 	cd sys && $${MAKE:-make} SYSDIR="$(SYSDIR)"
+	cd linux && $${MAKE:-make} SYSDIR="$(SYSDIR)"
 
 all: build
 
-test:
+# the module tests read the built modules, so the build comes first
+test: build
 	sh tests/run_unit_tests.sh
 	sh tests/amd64_cross_check.sh $(SYSDIR)
 
 lint:
-	mandoc -T lint man/nvidia-uvm.4
+	cd man && mandoc -T lint nvidia-uvm.4 nvidia-uvm-linux.4
+
+# rewrite the one request table from NVIDIA's uvm_ioctl.h
+regen-ioctl-table:
+	sh tools/gen-uvm-request-table.sh --write "$(NVIDIA_UVM_IOCTL_H)"
 
 install:
 	MK_YES="$(YES)" MK_ASSUME_YES="$(ASSUME_YES)" MK_PREFIX="$(PREFIX)" MK_DESTDIR="$(DESTDIR)" MK_SYSDIR="$(SYSDIR)" MK_KO="$(MK_KO)" sh scripts/make.sh install
@@ -89,3 +104,4 @@ uninstall: deinstall
 
 clean:
 	cd sys && $${MAKE:-make} SYSDIR="$(SYSDIR)" clean
+	cd linux && $${MAKE:-make} SYSDIR="$(SYSDIR)" clean

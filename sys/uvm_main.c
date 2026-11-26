@@ -2,23 +2,21 @@
  * Copyright (c) 2026 REVYTECH, Inc.
  * SPDX-License-Identifier: BSD-2-Clause
  *
- * uvm_main.c - module load and unload, the two device nodes, the
- * Linuxulator ioctl bridge, the RM session and callback table, the global
- * fatal error, tunables and statistics.  uvm-spec r1: 01-user-abi.md
- * sections 1, 2, 3; 02-rm-interface.md sections 3.1 and 5;
- * 09-freebsd-facilities.md section 3.
+ * uvm_main.c - module load and unload, the two device nodes, the RM
+ * session and callback table, the global fatal error, tunables and
+ * statistics.  uvm-spec r1: 01-user-abi.md sections 1, 2, 3;
+ * 02-rm-interface.md sections 3.1 and 5; 09-freebsd-facilities.md
+ * section 3.
  *
  * Module init order (03 section 7): the RM session, then the global state,
  * then the callback table (from then on RM calls the top half, so the GPU
  * table must already answer), then the device nodes.  Exit reverses it.
  *
- * Request numbers arrive two ways.  A Linux process (libcuda) issues the
- * raw numbers of 01 section 2.1; the Linuxulator passes every request whose
- * low 16 bits fall in [1, 2047] to the handler registered here, which checks
- * that the file is one of ours and re-enters the kernel's own ioctl path
- * with the native encoding of nvidia_uvm_ioctl.h, so the per-file state
- * (devfs cdevpriv) is found the same way on both paths.  A native FreeBSD
- * caller uses that encoding directly.
+ * This module is the native FreeBSD driver: a request arrives with the
+ * driver's own request number (nvidia_uvm_ioctl.h) and is answered here.
+ * The Linuxulator is not part of it: a Linux binary that wants the Linux
+ * request numbers needs the optional bridge module nvidia_uvm_linux.ko,
+ * which depends on this one and on the Linuxulator (Track #2444).
  */
 
 #include "uvm.h"
@@ -27,21 +25,12 @@
 #include <sys/sysctl.h>
 #include <sys/sbuf.h>
 #include <sys/poll.h>
-#include <sys/file.h>
-#include <sys/filedesc.h>
-#include <sys/capsicum.h>
-#include <sys/vnode.h>
-#include <sys/syscallsubr.h>
 #include <sys/ioccom.h>
 #include <sys/filio.h>
 #include <sys/uio.h>
 #include <sys/stat.h>
 #include <sys/priv.h>
 #include <sys/eventhandler.h>
-
-#include <machine/../linux/linux.h>
-#include <machine/../linux/linux_proto.h>
-#include <compat/linux/linux_ioctl.h>
 
 MALLOC_DEFINE(M_NVIDIA_UVM, "nvidia_uvm", "NVIDIA UVM driver");
 
@@ -69,7 +58,7 @@ SYSCTL_INT(_hw_nvidia_uvm, OID_AUTO, fault_batch_count, CTLFLAG_RDTUN, &uvm.faul
 SYSCTL_INT(_hw_nvidia_uvm, OID_AUTO, wait_timeout_ms, CTLFLAG_RWTUN, &uvm.wait_timeout_ms, 0,
     "milliseconds a wait on GPU work may take before it is a fatal error");
 SYSCTL_INT(_hw_nvidia_uvm, OID_AUTO, sysmem_gpfifo, CTLFLAG_RDTUN, &uvm.sysmem_gpfifo, 0,
-    "place the GPFIFO ring and PUT word in system memory (1) or video memory (0)");
+    "place the GPFIFO ring and PUT word in system memory (1) or dedicated memory (0)");
 SYSCTL_INT(_hw_nvidia_uvm, OID_AUTO, debug_push, CTLFLAG_RDTUN, &uvm.debug_push, 0,
     "log the method stream, GPFIFO entry, GP_PUT and doorbell of the first N pushes (0: off, max 64)");
 SYSCTL_INT(_hw_nvidia_uvm, OID_AUTO, init_probe, CTLFLAG_RDTUN, &uvm.init_probe, 0,
@@ -222,60 +211,6 @@ static struct cdevsw uvm_cdevsw = {
 	.d_poll =	uvm_poll,
 };
 
-/* ---- the Linuxulator bridge (09 section 3) ---- */
-
-static int
-uvm_linux_ioctl(struct thread *td, struct linux_ioctl_args *args)
-{
-	struct file *fp;
-	struct cdev *cdev;
-	uintptr_t arg = args->arg;
-	uint32_t raw = (uint32_t)args->cmd;
-	unsigned long native;
-	bool ours;
-	int error;
-
-	/* is this fd one of our two nodes? Anything else is not ours: let the next handler try */
-	error = fget(td, args->fd, &cap_ioctl_rights, &fp);
-	if (error != 0)
-		return (error);
-	ours = false;
-	if (fp->f_type == DTYPE_VNODE && fp->f_vnode != NULL && fp->f_vnode->v_type == VCHR) {
-		cdev = fp->f_vnode->v_rdev;
-		ours = (cdev == uvm.cdev_main || cdev == uvm.cdev_tools);
-	}
-	fdrop(fp, td);
-	if (!ours)
-		return (ENOIOCTL);
-
-	/* the full 32-bit request value is compared (01 section 2.1) */
-	if (raw == UVM_INITIALIZE || raw == UVM_DEINITIALIZE || (raw >= 1 && raw <= 2047))
-		native = UVM_IOCTL_NATIVE(raw);
-	else
-		return (ENOSYS);
-	/*
-	 * IOC_VOID with a zero size: the kernel hands the driver the pointer
-	 * to the argument word, so the parameter pointer travels unchanged.
-	 */
-	/*
-	 * The Linuxulator takes Giant around every registered handler.  Nothing
-	 * below needs it (the handlers use sx, mutex and sleep locks of ours;
-	 * the task queues are not Giant-bound), and an ioctl can run for a
-	 * long time, so run it off Giant: USB enumeration and the other Giant
-	 * users must not wait behind a GPU mapping (#2295).
-	 */
-	DROP_GIANT();
-	error = kern_ioctl(td, args->fd, native, (caddr_t)&arg);
-	PICKUP_GIANT();
-	return (error);
-}
-
-static struct linux_ioctl_handler uvm_linux_handler = {
-	.func = uvm_linux_ioctl,
-	.low = 1,
-	.high = 2047,
-};
-
 /* ---- RM callbacks (02 section 5) ---- */
 
 static NV_STATUS
@@ -344,6 +279,17 @@ uvm_load(void)
 	if (error != 0)
 		return (error);
 
+	/*
+	 * The request table is written by hand: a request without an entry
+	 * would answer ENOSYS for as long as the module lives, and nobody
+	 * would see it.  The module refuses to load when the table does not
+	 * cover every request id exactly once.
+	 */
+	if (!uvm_requests_dense()) {
+		uvm_log("the request table does not cover every request id; refusing to load");
+		return (EINVAL);
+	}
+
 	sx_init(&uvm.pm_lock, "nvidia_uvm_pm");
 	sx_init(&uvm.lock, "nvidia_uvm_global");
 	sx_init(&uvm.managed_lock, "nvidia_uvm_managed");
@@ -392,10 +338,6 @@ uvm_load(void)
 	if (error != 0)
 		goto fail_main;
 
-	error = linux_ioctl_register_handler(&uvm_linux_handler);
-	if (error != 0)
-		goto fail_tools;
-
 	sysctl_ctx_init(&uvm_sysctl_ctx);
 	if (SYSCTL_ADD_PROC(&uvm_sysctl_ctx, SYSCTL_STATIC_CHILDREN(_hw_nvidia_uvm), OID_AUTO, "gpus",
 	    CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, 0, uvm_sysctl_gpus, "A",
@@ -405,8 +347,6 @@ uvm_load(void)
 	uvm_log("loaded: /dev/nvidia-uvm and /dev/nvidia-uvm-tools (spec r1, phase 1)");
 	return (0);
 
-fail_tools:
-	destroy_dev(uvm.cdev_tools);
 fail_main:
 	destroy_dev(uvm.cdev_main);
 fail_core:
@@ -472,7 +412,6 @@ uvm_unload(void)
 	 */
 	pause("uvmdrn", hz);
 
-	linux_ioctl_unregister_handler(&uvm_linux_handler);
 	/* the nodes go first so no new open can race the teardown */
 	destroy_dev(uvm.cdev_tools);
 	destroy_dev(uvm.cdev_main);
@@ -513,9 +452,9 @@ static moduledata_t uvm_mod = { "nvidia_uvm", uvm_modevent, NULL };
 DECLARE_MODULE(nvidia_uvm, uvm_mod, SI_SUB_DRIVERS, SI_ORDER_ANY);
 MODULE_VERSION(nvidia_uvm, 1);
 MODULE_DEPEND(nvidia_uvm, nvidia, 2, 2, 2);	/* nvidia.ko 2 carries the client hold exports (Track #2373): an older nvidia.ko, or an older nvidia-uvm.ko against this nvidia.ko, must not load */
-#if defined(__aarch64__)
-MODULE_DEPEND(nvidia_uvm, linux64elf, 1, 1, 1);
-#else
-MODULE_DEPEND(nvidia_uvm, linux, 1, 1, 1);
-#endif
-MODULE_DEPEND(nvidia_uvm, linux_common, 1, 1, 1);
+/*
+ * The Linux ioctl bridge is a separate, optional module
+ * (nvidia_uvm_linux.ko, Track #2444): it depends on this driver and on
+ * the Linuxulator, and this driver depends on neither.  A native FreeBSD
+ * caller needs no Linux module at all.
+ */

@@ -6,7 +6,8 @@
 # glue that a userland test cannot run (the behaviour of the loops, the
 # signal unwind, the log limiter and the DMA size rule is tested by
 # tests/unit/pt_loop_test.c from the same headers the module uses):
-#   - uvm_linux_ioctl runs kern_ioctl between DROP_GIANT and PICKUP_GIANT;
+#   - the Linux ioctl bridge (linux/uvm_linux_bridge.c, the optional module
+#     of Track #2444) runs kern_ioctl between DROP_GIANT and PICKUP_GIANT;
 #   - the page-table loops call uvm_pt_yield, uvm_pt_yield yields and looks
 #     for a signal, the map loop passes its `intr` through;
 #   - the split of a partial unmap is the one caller that is not
@@ -19,6 +20,8 @@ export PATH LC_ALL=C
 REPO=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 SYS=${1:-$REPO/sys}
 . "$REPO/tests/pins_lib.sh"
+# the Giant pin is about the bridge module, whose sources are not in sys/
+PIN_EXTRA_DIRS=$REPO/linux
 WORK=${GB10_WORK:-$HOME/work/gb10}
 mkdir -p "$WORK/tmp"
 PIN_TMP=$(mktemp -d "$WORK/tmp/uvm-pins.XXXXXXXX")
@@ -29,7 +32,12 @@ S=$SYS
 fail() { echo "FAIL $*"; rc=1; return 1; }
 
 pin_giant() {
-	_b=$(pin_fn "$1/uvm_main.c" uvm_linux_ioctl)
+	# the bridge module's source: in the scratch directory of a mutation
+	# self-test it is copied next to the files of sys/, otherwise it is in
+	# the module's own directory
+	_f=$1/uvm_linux_bridge.c
+	[ -f "$_f" ] || _f=$REPO/linux/uvm_linux_bridge.c
+	_b=$(pin_fn "$_f" uvm_linux_ioctl)
 	pin_dead "$_b" || return 1
 	printf '%s\n' "$_b" | awk '
 	    /^[ \t]*DROP_GIANT\(\);[ \t]*$/ { d = NR }
@@ -91,10 +99,10 @@ for p in giant yields intr split logs; do
 done
 
 # planted defects: each must be caught
-pin_mutate "giant: DROP_GIANT commented out" pin_giant uvm_main.c 's,^\([[:space:]]*\)DROP_GIANT();,\1/* DROP_GIANT(); */,'
-pin_mutate "giant: PICKUP_GIANT commented out" pin_giant uvm_main.c 's,^\([[:space:]]*\)PICKUP_GIANT();,\1// PICKUP_GIANT();,'
-pin_mutate "giant: DROP_GIANT disabled" pin_giant uvm_main.c 's,^\([[:space:]]*\)DROP_GIANT();,\1if (0) DROP_GIANT();,'
-pin_mutate "giant: DROP_GIANT after the ioctl" pin_giant uvm_main.c 's,^\([[:space:]]*\)DROP_GIANT();,\1(void)0;,;s,^\([[:space:]]*\)PICKUP_GIANT();,\1DROP_GIANT();,'
+pin_mutate "giant: DROP_GIANT commented out" pin_giant uvm_linux_bridge.c 's,^\([[:space:]]*\)DROP_GIANT();,\1/* DROP_GIANT(); */,'
+pin_mutate "giant: PICKUP_GIANT commented out" pin_giant uvm_linux_bridge.c 's,^\([[:space:]]*\)PICKUP_GIANT();,\1// PICKUP_GIANT();,'
+pin_mutate "giant: DROP_GIANT disabled" pin_giant uvm_linux_bridge.c 's,^\([[:space:]]*\)DROP_GIANT();,\1if (0) DROP_GIANT();,'
+pin_mutate "giant: DROP_GIANT after the ioctl" pin_giant uvm_linux_bridge.c 's,^\([[:space:]]*\)DROP_GIANT();,\1(void)0;,;s,^\([[:space:]]*\)PICKUP_GIANT();,\1DROP_GIANT();,'
 pin_mutate "yield: write_ptes yield commented out" pin_yields uvm_page_tree.c '/^uvm_page_tree_write_ptes/,/^}/s|(void)uvm_pt_yield(false);|/* & */|'
 pin_mutate "yield: clear_sub yield removed" pin_yields uvm_page_tree.c '/^uvm_pt_range_vec_clear_sub/,/^}/s|(void)uvm_pt_yield(false);||'
 pin_mutate "yield: write_same yield disabled" pin_yields uvm_page_tree.c '/^uvm_pt_range_vec_write_same/,/^}/s|(void)uvm_pt_yield(false);|(void)0;|'

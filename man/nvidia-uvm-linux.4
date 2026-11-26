@@ -1,0 +1,93 @@
+.\" Copyright (c) 2026 REVYTECH, Inc.
+.\" SPDX-License-Identifier: BSD-2-Clause
+.\"
+.Dd November 25, 2026
+.Dt NVIDIA-UVM-LINUX 4
+.Os
+.Sh NAME
+.Nm nvidia_uvm_linux
+.Nd optional Linux ioctl bridge for the NVIDIA unified virtual memory driver
+.Sh SYNOPSIS
+.Cd "kldload nvidia_uvm_linux"
+.Sh DESCRIPTION
+The
+.Nm
+module is the optional bridge between the Linuxulator and
+.Xr nvidia-uvm 4 .
+It offers the Linux request numbers of the UVM interface to third-party
+Linux CUDA binaries that run under the Linuxulator.
+It is not needed by a native caller: the driver
+.Xr nvidia-uvm 4
+is the native driver of this system and speaks its own request numbers.
+.Pp
+The module is loaded by the operator, by hand, after the driver:
+.Pp
+.Dl kldload nvidia-uvm.ko
+.Dl kldload nvidia_uvm_linux.ko
+.Pp
+Loading it registers a
+.Xr linux 4
+ioctl handler with the Linuxulator.
+The handler answers
+.Er ENOIOCTL
+for a descriptor that is not one of the driver's two nodes, so that the
+Linuxulator can try another handler.
+It answers a Linux request number that the driver has no request for as
+the driver answers any unknown request:
+.Er ENOSYS
+on the main node
+.Pa /dev/nvidia-uvm
+and
+.Er EINVAL
+on the tools node
+.Pa /dev/nvidia-uvm-tools .
+.Pp
+The handler translates the Linux request number into the request number of
+the driver and re-enters the kernel's own ioctl path with it, so that the
+per-file state of the driver is found the same way on both paths.
+.Pp
+The Linuxulator runs a registered ioctl handler with Giant held.
+The bridge releases Giant for the duration of each Linux ioctl and relies
+on it nowhere.
+Giant users such as USB enumeration therefore do not wait behind a long
+GPU mapping.
+.Pp
+The bridge needs the 64-bit Linuxulator: the
+.Pa linux64
+module on amd64 and the
+.Pa linux64elf
+module on arm64, and both need
+.Pa linux_common .
+A 32-bit Linux binary on amd64 is not served.
+.Pp
+Unloading the bridge unregisters the handler.
+The Linuxulator holds its own lock across a handler call and unregistering
+the handler takes it exclusively, so the unload waits for a Linux ioctl in
+flight to finish.
+.Pp
+The driver cannot be unloaded while the bridge is loaded: the kernel
+refuses to unload a module that another loaded module depends on.
+.Pp
+This is a clean-room implementation written from a functional
+specification, not from NVIDIA's Linux driver.
+.Sh FILES
+.Bl -tag -width "/dev/nvidia-uvm-tools" -compact
+.It Pa /dev/nvidia-uvm
+.It Pa /dev/nvidia-uvm-tools
+.El
+.Sh SEE ALSO
+.Xr linux 4 ,
+.Xr nvidia-uvm 4 ,
+.Xr kldload 8 ,
+.Xr kldunload 8
+.Sh HISTORY
+The
+.Nm
+bridge first appeared in CloudBSD in 2026.
+.Sh AUTHORS
+.An REVYTECH Inc
+.Sh BUGS
+The bridge serves the 64-bit Linuxulator only.
+A 32-bit Linux binary on amd64 needs the
+.Pa linux
+module of the 32-bit Linuxulator, which this bridge does not depend on.

@@ -30,6 +30,7 @@
 
 #include "uvm.h"
 #include "uvm_client_owner.h"
+#include "uvm_requests.h"
 
 #include <sys/uio.h>
 #include <sys/capsicum.h>
@@ -126,7 +127,7 @@ uvm_h_mm_initialize(struct uvm_fd *fd, struct uvm_va_space *unused, void *params
 	 * 01 section 3.4: bind a secondary fd to the process's memory map so
 	 * that its release runs the mm shutdown while the map still exists.
 	 * The calling fd moves uninitialised -> initialising -> MM by the
-	 * same compare-and-swap as UVM_INITIALIZE (3.2).
+	 * same compare-and-swap as UVM_REQ_INITIALIZE (3.2).
 	 */
 	if (atomic_cmpset_ptr(&fd->state, 0, UVM_FD_INITIALIZING)) {
 		caller = UVM_MM_CALLER_UNINIT;
@@ -684,78 +685,99 @@ uvm_h_tools_tracker(struct uvm_fd *fd, struct uvm_va_space *vas, void *params, s
 	{ num, #num, sizeof(type), UVM_RM_STATUS_OFFSET(type), vas_req, tools, fn }
 
 static const struct uvm_request uvm_requests[] = {
-	REQ(UVM_INITIALIZE, UVM_INITIALIZE_PARAMS, false, false, uvm_h_initialize),
-	REQ(UVM_MM_INITIALIZE, UVM_MM_INITIALIZE_PARAMS, false, false, uvm_h_mm_initialize),
-	REQ(UVM_PAGEABLE_MEM_ACCESS, UVM_PAGEABLE_MEM_ACCESS_PARAMS, true, false, uvm_h_pageable_mem_access),
-	REQ(UVM_PAGEABLE_MEM_ACCESS_ON_GPU, UVM_PAGEABLE_MEM_ACCESS_ON_GPU_PARAMS, true, false,
+	REQ(UVM_REQ_INITIALIZE, UVM_INITIALIZE_PARAMS, false, false, uvm_h_initialize),
+	REQ(UVM_REQ_MM_INITIALIZE, UVM_MM_INITIALIZE_PARAMS, false, false, uvm_h_mm_initialize),
+	REQ(UVM_REQ_PAGEABLE_MEM_ACCESS, UVM_PAGEABLE_MEM_ACCESS_PARAMS, true, false, uvm_h_pageable_mem_access),
+	REQ(UVM_REQ_PAGEABLE_MEM_ACCESS_ON_GPU, UVM_PAGEABLE_MEM_ACCESS_ON_GPU_PARAMS, true, false,
 	    uvm_h_pageable_mem_access_on_gpu),
-	REQ(UVM_REGISTER_GPU, UVM_REGISTER_GPU_PARAMS, true, false, uvm_h_register_gpu),
-	REQ(UVM_UNREGISTER_GPU, UVM_UNREGISTER_GPU_PARAMS, true, false, uvm_h_unregister_gpu),
-	REQ(UVM_REGISTER_GPU_VASPACE, UVM_REGISTER_GPU_VASPACE_PARAMS, true, false, uvm_h_register_gpu_vaspace),
-	REQ(UVM_UNREGISTER_GPU_VASPACE, UVM_UNREGISTER_GPU_VASPACE_PARAMS, true, false,
+	REQ(UVM_REQ_REGISTER_GPU, UVM_REGISTER_GPU_PARAMS, true, false, uvm_h_register_gpu),
+	REQ(UVM_REQ_UNREGISTER_GPU, UVM_UNREGISTER_GPU_PARAMS, true, false, uvm_h_unregister_gpu),
+	REQ(UVM_REQ_REGISTER_GPU_VASPACE, UVM_REGISTER_GPU_VASPACE_PARAMS, true, false, uvm_h_register_gpu_vaspace),
+	REQ(UVM_REQ_UNREGISTER_GPU_VASPACE, UVM_UNREGISTER_GPU_VASPACE_PARAMS, true, false,
 	    uvm_h_unregister_gpu_vaspace),
-	REQ(UVM_REGISTER_CHANNEL, UVM_REGISTER_CHANNEL_PARAMS, true, false, uvm_h_register_channel),
-	REQ(UVM_UNREGISTER_CHANNEL, UVM_UNREGISTER_CHANNEL_PARAMS, true, false, uvm_h_unregister_channel),
-	REQ(UVM_ENABLE_PEER_ACCESS, UVM_ENABLE_PEER_ACCESS_PARAMS, true, false, uvm_h_peer_access),
-	REQ(UVM_DISABLE_PEER_ACCESS, UVM_DISABLE_PEER_ACCESS_PARAMS, true, false, uvm_h_peer_access),
-	REQ(UVM_CREATE_RANGE_GROUP, UVM_CREATE_RANGE_GROUP_PARAMS, true, false, uvm_h_create_range_group),
-	REQ(UVM_DESTROY_RANGE_GROUP, UVM_DESTROY_RANGE_GROUP_PARAMS, true, false, uvm_h_destroy_range_group),
-	REQ(UVM_SET_RANGE_GROUP, UVM_SET_RANGE_GROUP_PARAMS, true, false, uvm_h_set_range_group),
-	REQ(UVM_PREVENT_MIGRATION_RANGE_GROUPS, UVM_PREVENT_MIGRATION_RANGE_GROUPS_PARAMS, true, false,
+	REQ(UVM_REQ_REGISTER_CHANNEL, UVM_REGISTER_CHANNEL_PARAMS, true, false, uvm_h_register_channel),
+	REQ(UVM_REQ_UNREGISTER_CHANNEL, UVM_UNREGISTER_CHANNEL_PARAMS, true, false, uvm_h_unregister_channel),
+	REQ(UVM_REQ_ENABLE_PEER_ACCESS, UVM_ENABLE_PEER_ACCESS_PARAMS, true, false, uvm_h_peer_access),
+	REQ(UVM_REQ_DISABLE_PEER_ACCESS, UVM_DISABLE_PEER_ACCESS_PARAMS, true, false, uvm_h_peer_access),
+	REQ(UVM_REQ_CREATE_RANGE_GROUP, UVM_CREATE_RANGE_GROUP_PARAMS, true, false, uvm_h_create_range_group),
+	REQ(UVM_REQ_DESTROY_RANGE_GROUP, UVM_DESTROY_RANGE_GROUP_PARAMS, true, false, uvm_h_destroy_range_group),
+	REQ(UVM_REQ_SET_RANGE_GROUP, UVM_SET_RANGE_GROUP_PARAMS, true, false, uvm_h_set_range_group),
+	REQ(UVM_REQ_PREVENT_MIGRATION_RANGE_GROUPS, UVM_PREVENT_MIGRATION_RANGE_GROUPS_PARAMS, true, false,
 	    uvm_h_migration_range_groups),
-	REQ(UVM_ALLOW_MIGRATION_RANGE_GROUPS, UVM_ALLOW_MIGRATION_RANGE_GROUPS_PARAMS, true, false,
+	REQ(UVM_REQ_ALLOW_MIGRATION_RANGE_GROUPS, UVM_ALLOW_MIGRATION_RANGE_GROUPS_PARAMS, true, false,
 	    uvm_h_migration_range_groups),
-	REQ(UVM_CREATE_EXTERNAL_RANGE, UVM_CREATE_EXTERNAL_RANGE_PARAMS, true, false, uvm_h_create_external_range),
-	REQ(UVM_MAP_EXTERNAL_ALLOCATION, UVM_MAP_EXTERNAL_ALLOCATION_PARAMS, true, false,
+	REQ(UVM_REQ_CREATE_EXTERNAL_RANGE, UVM_CREATE_EXTERNAL_RANGE_PARAMS, true, false, uvm_h_create_external_range),
+	REQ(UVM_REQ_MAP_EXTERNAL_ALLOCATION, UVM_MAP_EXTERNAL_ALLOCATION_PARAMS, true, false,
 	    uvm_h_map_external_allocation),
-	REQ(UVM_MAP_EXTERNAL_SPARSE, UVM_MAP_EXTERNAL_SPARSE_PARAMS, true, false, uvm_h_map_external_sparse),
-	REQ(UVM_UNMAP_EXTERNAL, UVM_UNMAP_EXTERNAL_PARAMS, true, false, uvm_h_unmap_external),
-	REQ(UVM_FREE, UVM_FREE_PARAMS, true, false, uvm_h_free),
-	REQ(UVM_VALIDATE_VA_RANGE, UVM_VALIDATE_VA_RANGE_PARAMS, true, false, uvm_h_validate_va_range),
-	REQ(UVM_MAP_DYNAMIC_PARALLELISM_REGION, UVM_MAP_DYNAMIC_PARALLELISM_REGION_PARAMS, true, false,
+	REQ(UVM_REQ_MAP_EXTERNAL_SPARSE, UVM_MAP_EXTERNAL_SPARSE_PARAMS, true, false, uvm_h_map_external_sparse),
+	REQ(UVM_REQ_UNMAP_EXTERNAL, UVM_UNMAP_EXTERNAL_PARAMS, true, false, uvm_h_unmap_external),
+	REQ(UVM_REQ_FREE, UVM_FREE_PARAMS, true, false, uvm_h_free),
+	REQ(UVM_REQ_VALIDATE_VA_RANGE, UVM_VALIDATE_VA_RANGE_PARAMS, true, false, uvm_h_validate_va_range),
+	REQ(UVM_REQ_MAP_DYNAMIC_PARALLELISM_REGION, UVM_MAP_DYNAMIC_PARALLELISM_REGION_PARAMS, true, false,
 	    uvm_h_map_dynamic_parallelism),
-	REQ(UVM_ALLOC_SEMAPHORE_POOL, UVM_ALLOC_SEMAPHORE_POOL_PARAMS, true, false, uvm_h_alloc_semaphore_pool),
-	REQ(UVM_SET_PREFERRED_LOCATION, UVM_SET_PREFERRED_LOCATION_PARAMS, true, false,
+	REQ(UVM_REQ_ALLOC_SEMAPHORE_POOL, UVM_ALLOC_SEMAPHORE_POOL_PARAMS, true, false, uvm_h_alloc_semaphore_pool),
+	REQ(UVM_REQ_SET_PREFERRED_LOCATION, UVM_SET_PREFERRED_LOCATION_PARAMS, true, false,
 	    uvm_h_set_preferred_location),
-	REQ(UVM_UNSET_PREFERRED_LOCATION, UVM_UNSET_PREFERRED_LOCATION_PARAMS, true, false, uvm_h_managed_interval),
-	REQ(UVM_SET_ACCESSED_BY, UVM_SET_ACCESSED_BY_PARAMS, true, false, uvm_h_accessed_by),
-	REQ(UVM_UNSET_ACCESSED_BY, UVM_UNSET_ACCESSED_BY_PARAMS, true, false, uvm_h_accessed_by),
-	REQ(UVM_ENABLE_READ_DUPLICATION, UVM_ENABLE_READ_DUPLICATION_PARAMS, true, false, uvm_h_managed_interval),
-	REQ(UVM_DISABLE_READ_DUPLICATION, UVM_DISABLE_READ_DUPLICATION_PARAMS, true, false, uvm_h_managed_interval),
-	REQ(UVM_MIGRATE, UVM_MIGRATE_PARAMS, true, false, uvm_h_migrate),
-	REQ(UVM_MIGRATE_RANGE_GROUP, UVM_MIGRATE_RANGE_GROUP_PARAMS, true, false, uvm_h_migrate_range_group),
-	REQ(UVM_DISCARD, UVM_DISCARD_PARAMS, true, false, uvm_h_discard),
-	REQ(UVM_ENABLE_SYSTEM_WIDE_ATOMICS, UVM_ENABLE_SYSTEM_WIDE_ATOMICS_PARAMS, true, false, uvm_h_enable_atomics),
-	REQ(UVM_DISABLE_SYSTEM_WIDE_ATOMICS, UVM_DISABLE_SYSTEM_WIDE_ATOMICS_PARAMS, true, false,
+	REQ(UVM_REQ_UNSET_PREFERRED_LOCATION, UVM_UNSET_PREFERRED_LOCATION_PARAMS, true, false, uvm_h_managed_interval),
+	REQ(UVM_REQ_SET_ACCESSED_BY, UVM_SET_ACCESSED_BY_PARAMS, true, false, uvm_h_accessed_by),
+	REQ(UVM_REQ_UNSET_ACCESSED_BY, UVM_UNSET_ACCESSED_BY_PARAMS, true, false, uvm_h_accessed_by),
+	REQ(UVM_REQ_ENABLE_READ_DUPLICATION, UVM_ENABLE_READ_DUPLICATION_PARAMS, true, false, uvm_h_managed_interval),
+	REQ(UVM_REQ_DISABLE_READ_DUPLICATION, UVM_DISABLE_READ_DUPLICATION_PARAMS, true, false, uvm_h_managed_interval),
+	REQ(UVM_REQ_MIGRATE, UVM_MIGRATE_PARAMS, true, false, uvm_h_migrate),
+	REQ(UVM_REQ_MIGRATE_RANGE_GROUP, UVM_MIGRATE_RANGE_GROUP_PARAMS, true, false, uvm_h_migrate_range_group),
+	REQ(UVM_REQ_DISCARD, UVM_DISCARD_PARAMS, true, false, uvm_h_discard),
+	REQ(UVM_REQ_ENABLE_SYSTEM_WIDE_ATOMICS, UVM_ENABLE_SYSTEM_WIDE_ATOMICS_PARAMS, true, false, uvm_h_enable_atomics),
+	REQ(UVM_REQ_DISABLE_SYSTEM_WIDE_ATOMICS, UVM_DISABLE_SYSTEM_WIDE_ATOMICS_PARAMS, true, false,
 	    uvm_h_disable_atomics),
-	REQ(UVM_CLEAN_UP_ZOMBIE_RESOURCES, UVM_CLEAN_UP_ZOMBIE_RESOURCES_PARAMS, true, false, uvm_h_ok),
-	REQ(UVM_POPULATE_PAGEABLE, UVM_POPULATE_PAGEABLE_PARAMS, true, false, uvm_h_populate_pageable),
-	REQ(UVM_TOOLS_READ_PROCESS_MEMORY, UVM_TOOLS_READ_PROCESS_MEMORY_PARAMS, true, false,
+	REQ(UVM_REQ_CLEAN_UP_ZOMBIE_RESOURCES, UVM_CLEAN_UP_ZOMBIE_RESOURCES_PARAMS, true, false, uvm_h_ok),
+	REQ(UVM_REQ_POPULATE_PAGEABLE, UVM_POPULATE_PAGEABLE_PARAMS, true, false, uvm_h_populate_pageable),
+	REQ(UVM_REQ_TOOLS_READ_PROCESS_MEMORY, UVM_TOOLS_READ_PROCESS_MEMORY_PARAMS, true, false,
 	    uvm_h_tools_process_memory),
-	REQ(UVM_TOOLS_WRITE_PROCESS_MEMORY, UVM_TOOLS_WRITE_PROCESS_MEMORY_PARAMS, true, false,
+	REQ(UVM_REQ_TOOLS_WRITE_PROCESS_MEMORY, UVM_TOOLS_WRITE_PROCESS_MEMORY_PARAMS, true, false,
 	    uvm_h_tools_process_memory),
-	REQ(UVM_TOOLS_GET_PROCESSOR_UUID_TABLE, UVM_TOOLS_GET_PROCESSOR_UUID_TABLE_PARAMS, true, false,
+	REQ(UVM_REQ_TOOLS_GET_PROCESSOR_UUID_TABLE, UVM_TOOLS_GET_PROCESSOR_UUID_TABLE_PARAMS, true, false,
 	    uvm_h_uuid_table),
-	REQ(UVM_TOOLS_GET_PROCESSOR_UUID_TABLE_V2, UVM_TOOLS_GET_PROCESSOR_UUID_TABLE_V2_PARAMS, true, false,
+	REQ(UVM_REQ_TOOLS_GET_PROCESSOR_UUID_TABLE_V2, UVM_TOOLS_GET_PROCESSOR_UUID_TABLE_V2_PARAMS, true, false,
 	    uvm_h_uuid_table_v2),
-	REQ(UVM_TOOLS_FLUSH_EVENTS, UVM_TOOLS_FLUSH_EVENTS_PARAMS, true, false, uvm_h_ok),
-	REQ(UVM_CLEAR_ALL_ACCESS_COUNTERS, UVM_CLEAR_ALL_ACCESS_COUNTERS_PARAMS, true, false, uvm_h_ok),
-	REQ(UVM_ALLOC_DEVICE_P2P, UVM_ALLOC_DEVICE_P2P_PARAMS, true, false, uvm_h_alloc_device_p2p),
+	REQ(UVM_REQ_TOOLS_FLUSH_EVENTS, UVM_TOOLS_FLUSH_EVENTS_PARAMS, true, false, uvm_h_ok),
+	REQ(UVM_REQ_CLEAR_ALL_ACCESS_COUNTERS, UVM_CLEAR_ALL_ACCESS_COUNTERS_PARAMS, true, false, uvm_h_ok),
+	REQ(UVM_REQ_ALLOC_DEVICE_P2P, UVM_ALLOC_DEVICE_P2P_PARAMS, true, false, uvm_h_alloc_device_p2p),
 	/* the tools node (7.1): accepted there and only there */
-	REQ(UVM_TOOLS_INIT_EVENT_TRACKER, UVM_TOOLS_INIT_EVENT_TRACKER_PARAMS, false, true, uvm_h_tools_tracker),
-	REQ(UVM_TOOLS_INIT_EVENT_TRACKER_V2, UVM_TOOLS_INIT_EVENT_TRACKER_V2_PARAMS, false, true,
+	REQ(UVM_REQ_TOOLS_INIT_EVENT_TRACKER, UVM_TOOLS_INIT_EVENT_TRACKER_PARAMS, false, true, uvm_h_tools_tracker),
+	REQ(UVM_REQ_TOOLS_INIT_EVENT_TRACKER_V2, UVM_TOOLS_INIT_EVENT_TRACKER_V2_PARAMS, false, true,
 	    uvm_h_tools_tracker),
-	REQ(UVM_TOOLS_SET_NOTIFICATION_THRESHOLD, UVM_TOOLS_SET_NOTIFICATION_THRESHOLD_PARAMS, false, true,
+	REQ(UVM_REQ_TOOLS_SET_NOTIFICATION_THRESHOLD, UVM_TOOLS_SET_NOTIFICATION_THRESHOLD_PARAMS, false, true,
 	    uvm_h_tools_tracker),
-	REQ(UVM_TOOLS_EVENT_QUEUE_ENABLE_EVENTS, UVM_TOOLS_EVENT_QUEUE_ENABLE_EVENTS_PARAMS, false, true,
+	REQ(UVM_REQ_TOOLS_EVENT_QUEUE_ENABLE_EVENTS, UVM_TOOLS_EVENT_QUEUE_ENABLE_EVENTS_PARAMS, false, true,
 	    uvm_h_tools_tracker),
-	REQ(UVM_TOOLS_EVENT_QUEUE_DISABLE_EVENTS, UVM_TOOLS_EVENT_QUEUE_DISABLE_EVENTS_PARAMS, false, true,
+	REQ(UVM_REQ_TOOLS_EVENT_QUEUE_DISABLE_EVENTS, UVM_TOOLS_EVENT_QUEUE_DISABLE_EVENTS_PARAMS, false, true,
 	    uvm_h_tools_tracker),
-	REQ(UVM_TOOLS_ENABLE_COUNTERS, UVM_TOOLS_ENABLE_COUNTERS_PARAMS, false, true, uvm_h_tools_tracker),
-	REQ(UVM_TOOLS_DISABLE_COUNTERS, UVM_TOOLS_DISABLE_COUNTERS_PARAMS, false, true, uvm_h_tools_tracker),
+	REQ(UVM_REQ_TOOLS_ENABLE_COUNTERS, UVM_TOOLS_ENABLE_COUNTERS_PARAMS, false, true, uvm_h_tools_tracker),
+	REQ(UVM_REQ_TOOLS_DISABLE_COUNTERS, UVM_TOOLS_DISABLE_COUNTERS_PARAMS, false, true, uvm_h_tools_tracker),
 };
 
 /* CPD-ON */
+
+/*
+ * uvm_requests_dense - does the table cover every request id exactly once?
+ *
+ * The rule is in uvm_requests.h, as a pure function, so that the userland
+ * unit test can check it against planted lists.  The table is written by
+ * hand and a mistake in it is invisible otherwise: a missing id answers
+ * ENOSYS for a request that exists.  The module asks once, at load.
+ */
+bool
+uvm_requests_dense(void)
+{
+	uint32_t numbers[UVM_REQ_COUNT];
+	size_t i;
+
+	if (nitems(uvm_requests) >= nitems(numbers))
+		return (false);
+	for (i = 0; i < nitems(uvm_requests); i++)
+		numbers[i] = uvm_requests[i].number;
+	return (uvm_request_numbers_dense(numbers, nitems(uvm_requests), UVM_REQ_COUNT));
+}
 
 static const struct uvm_request *
 uvm_request_lookup(uint32_t number)
@@ -798,7 +820,7 @@ uvm_ioctl_dispatch(struct uvm_fd *fd, bool tools_node, uint32_t request, void *u
 	NV_STATUS status;
 	int error = 0;
 
-	if (request == UVM_DEINITIALIZE)
+	if (request == UVM_REQ_DEINITIALIZE)
 		return (0);	/* accepted on any fd, reads nothing, does nothing */
 	req = uvm_request_lookup(request);
 	if (req == NULL || req->tools_node != tools_node) {

@@ -199,16 +199,111 @@ nvidia-gb10-freebsd; FreeBSD sources `sys/kern/kern_descrip.c`, `sys/fs/devfs/de
 `kernel-open/` or the describer's notes was read. The rule is `sys/uvm_client_owner.h`; the
 nvidia.ko side is `src/gb10-client-owner/` in nvidia-gb10-freebsd.
 
+## 2026-11-25: the native driver and the optional Linux ioctl bridge (Track #2444)
+
+`nvidia-uvm.ko` is the native FreeBSD driver of the UVM interface.  The Linuxulator bridge is
+now a separate, optional module.  What changed:
+
+- `sys/nvidia_uvm_ioctl.h`: the driver has its own request numbers (`UVM_REQ_*`, dense and
+  stable) and its own request word encoding (`_IO('U', n)` shaped: the void direction, a zero
+  size, the group byte `U` and the request number in the low eight bits).  `uvm_ioctl_native_decode()`
+  now checks every field of the word: the direction, the size, the group and the number.
+- `sys/uvm_main.c`: the Linuxulator handler (`uvm_linux_ioctl`), the Linux headers and the
+  `MODULE_DEPEND` on the Linuxulator are gone.  The module declares `{kernel, nvidia}` only.
+- `sys/uvm_bridge.c`, `sys/uvm_bridge.h` (new): the driver side of the bridge interface.  The
+  driver exports one function, `uvm_bridge_fd_is_ours()`, and the bridge asks it whether a
+  descriptor is one of the driver's two nodes.
+- `linux/uvm_linux_bridge.c`, `linux/nvidia_uvm_linux_ioctl.h`, `linux/Makefile` (new): the
+  optional bridge module `nvidia_uvm_linux.ko`.  It owns the Linux request numbers of uvm-spec
+  r1, 01-user-abi.md section 2.1, translates them into the driver's, and registers the
+  Linuxulator ioctl handler.  It depends on the driver, on the 64-bit Linuxulator and on
+  `linux_common`.
+- `sys/uvm_requests.h` (new): the rule that the request table covers every request id exactly
+  once, as a pure function, and `sys/uvm_ioctl.c` asks it at load: a table with a hole would
+  answer ENOSYS for a request that exists.
+- `tests/kmod_deps_test.sh` (new): the static load check.  The dependency sets are compared
+  exactly (a membership check would pass a driver that depends on the Linuxulator again), the
+  driver must import no Linux symbol, every undefined symbol must resolve, and the driver must
+  export the bridge's entry point.  Each check is shown to be able to fail.
+- `tests/unit/linux_bridge_test.c` (new): the driver's request numbers, the Linux request
+  numbers, the two directions of the translation and the request table rule.
+- `tests/run_unit_tests.sh`: pins that the driver depends on no Linuxulator module and that
+  the bridge registers the handler, each shown to be able to fail.
+- `scripts/make.sh`, `Makefile`: `make install` installs both modules and both manual pages;
+  the bridge is installed but never loaded by the installer.
+- `man/nvidia-uvm.4`, `man/nvidia-uvm-linux.4` (new), `README.md`: the driver is described as
+  the native FreeBSD driver and the bridge as the optional module for third-party Linux CUDA
+  binaries.
+
+Sources consulted for this change: this repository only.  No Linux source, no GPL source, no
+`kernel-open/` directory and no NVIDIA source was read or searched.  The Linux request numbers
+are the ones the specification of this repository gives (uvm-spec r1, 01-user-abi.md section
+2.1) and the ones this repository already carried; the split, the encoding, the bridge and the
+tests are this change's own work.
+
+
+## 2026-11-26: the one request table (Track #2444, pass C)
+
+The review gate refused the change of 2026-11-25: the Linux request numbers were translated in
+two big `switch` statements that duplicated each other, and the unit test held a third copy of
+the same lists.  The mapping is now ONE table, written once and walked by the test.
+
+- `linux/uvm_linux_request_table.h` (new, GENERATED): the one table.  One row per request: the
+  name of the request, the driver's own request id (the `UVM_REQ_*` enumeration of
+  `sys/nvidia_uvm_ioctl.h`), the Linux request number (`LINUX_UVM_*`) and the size of the
+  parameter structure the driver copies for the request.  It is written by
+  `tools/gen-uvm-request-table.sh` and committed, so a build needs no NVIDIA source.
+- `tools/gen-ioctl-table.sh` (new): taken unchanged, with its copyright line and its SPDX line,
+  from `https://github.com/skunkwerks/nvidia-uvm-freebsd` (branch `main`, commit
+  `fbf8ed3718d963844ae8ab50f221117ef86f36f2`), licence BSD-2-Clause, Copyright (c) 2026
+  SkunkWerks, GmbH.  It is used for what it does: it reads NVIDIA's MIT `uvm_ioctl.h` and prints
+  one entry per request.  Nothing else of that repository was read, copied or derived from.
+- `tools/gen-uvm-request-table.sh` (new): the join.  It runs the generator above on NVIDIA's
+  header, keeps the names of the requests (in the order of NVIDIA's own ioctl numbers), and
+  resolves each of them against this repository: the driver's request id, the Linux request
+  number and the parameter structure.  A request is in the table when this repository has both a
+  request id and a Linux number for it; the Linux requests NVIDIA defines and this driver does
+  not serve are left out.  It also checks that the Linux request numbers of
+  `linux/nvidia_uvm_linux_ioctl.h` are the ones NVIDIA's header carries.
+- `linux/nvidia_uvm_linux_ioctl.h`: the table and the two small lookups over it
+  (`uvm_linux_request_id()`, `uvm_linux_request_number()`).  The translation is unchanged: the
+  pairs of the old `switch` (53 of them) and the pairs of the table are the same.
+- `tests/unit/linux_bridge_test.c`: the test walks the table instead of holding a copy of it.
+  Every row must round-trip in both directions, the driver's request ids must be dense, and a
+  number the driver has no request for must be refused.
+- `Makefile`: `make regen-ioctl-table NVIDIA_UVM_IOCTL_H=...` rewrites the table; `make build`
+  checks the committed table against NVIDIA's header when it is given one, and uses the
+  committed table as it is when it is not.
+
+Sources consulted for this change: this repository; NVIDIA's MIT `uvm_ioctl.h` from
+`open-gpu-kernel-modules-580.178.04` (`kernel-open/nvidia-uvm/uvm_ioctl.h`), read only by
+`tools/gen-ioctl-table.sh` and by the number check of `tools/gen-uvm-request-table.sh`, and only
+for the names of the requests and their ioctl numbers; and `tools/gen-ioctl-table.sh` from
+`skunkwerks/nvidia-uvm-freebsd` as named above.  No NVIDIA text enters this tree: the generated
+table holds the names of the requests and the names of this repository's constants, never a line
+of NVIDIA's header.  No Linux kernel source, no GPL source and no other file of the SkunkWerks
+repository was read.
+
+Two facts worth recording.  First, the Linux request numbers of uvm-spec r1, 01-user-abi.md
+section 2.1 are the ones NVIDIA's Linux header carries: the check in
+`tools/gen-uvm-request-table.sh` compares every one of them and finds them equal.  Second, the two
+initialisation requests (`UVM_INITIALIZE`, `UVM_DEINITIALIZE`) are not in NVIDIA's Linux header
+at all - that interface has no such ioctl - so their numbers (0x30000001 and 0x30000002) come
+from the specification alone, and `tests/unit/linux_bridge_test.c` pins them.
+
+
 ## 2026-11-25: PR 6 fixes on top of dch's zero-video-memory commits (Track #2504)
 
 The review of dch's three commits (gate1, 2026-11-25) found two things wrong and one thing
 untested.  What changed here:
 
 - `sys/uvm_fb_state.h`: the frame buffer information now has three states instead of one
-  boolean. `UVM_FB_ABSENT` means the GPU really has no video memory (RM cleared the whole
+  boolean. `UVM_FB_ABSENT` (since renamed `UVM_FB_UNIFIED`, Track #2444) means the GPU really
+  has no video memory (RM cleared the whole
   description), `UVM_FB_BROKEN` means the information is broken or missing (the request
   failed, RM calls the frame buffer broken with `bZeroFb`, or the description is empty
-  although the RM handed out a PMA object), and `UVM_FB_USABLE` means the GPU has video
+  although the RM handed out a PMA object), and `UVM_FB_USABLE` (since renamed
+  `UVM_FB_DEDICATED`) means the GPU has video
   memory and RM describes it. `bZeroFb` is RM's "the frame buffer is broken" answer and no
   longer means "no video memory": only `UVM_FB_ABSENT` makes a missing PMA object normal,
   and a `UVM_FB_BROKEN` GPU fails its registration with a message.

@@ -33,6 +33,12 @@ pin_dead() {
 	! printf '%s\n' "$1" | grep -Eq -- 'if \((0|1|false|true)\b|\(0 &&|\|\| 1\b|^#[[:space:]]*if[[:space:]]+[01]\b'
 }
 
+# the extra source directories a pin test copies into its scratch directory
+# (the optional Linux ioctl bridge module lives outside sys/): a space
+# separated list of directories whose *.c and *.h are copied next to the
+# files of the system directory.
+PIN_EXTRA_DIRS=
+
 # mutation self-test: pin_mutate NAME PIN_FN FILE SED_EXPR  (PIN_FN takes the sys directory)
 #   copies $SYS to a scratch directory, applies the sed expression to FILE
 #   there, and requires the pin function to fail.
@@ -40,6 +46,9 @@ pin_mutate() {
 	_name=$1; _fn=$2; _file=$3; _expr=$4
 	_d=$PIN_TMP/m.$$.$PIN_N; PIN_N=$((PIN_N + 1))
 	mkdir -p "$_d" && cp "$SYS"/*.c "$SYS"/*.h "$_d"/
+	for _x in $PIN_EXTRA_DIRS; do
+		cp "$_x"/*.c "$_x"/*.h "$_d"/ 2>/dev/null || true
+	done
 	if ! sed -e "$_expr" "$_d/$_file" > "$_d/$_file.new" || cmp -s "$_d/$_file" "$_d/$_file.new"; then
 		echo "FAIL self-test $_name: the mutation changed nothing"; rc=1; return
 	fi

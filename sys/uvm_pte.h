@@ -12,7 +12,7 @@
  * the one whose 16-byte entries hold a big (64K-page table or 2M PTE) half
  * and a small (4K-page table) half.  Addresses given to the encoders are
  * GPU-visible bus addresses for system memory and GPU physical addresses
- * for video memory.
+ * for dedicated memory.
  */
 
 #ifndef _UVM_PTE_H_

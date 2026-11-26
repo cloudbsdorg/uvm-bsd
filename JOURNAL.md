@@ -97,3 +97,55 @@
   inside the directory it scans, so sys/.gitignore repeats the patterns.
 - sh tests/run_unit_tests.sh passes (exit 0). Module builds with -Werror against /usr/src/sys (aarch64,
   FreeBSD 16.0-CURRENT). No kldload, no reboot.
+
+## 2026-11-25 (Track #2444 pass B: the native driver and the optional Linux ioctl bridge)
+- Pass A's work kept and finished: the driver is native (MODULE_DEPEND {kernel, nvidia}, no Linux
+  symbol), the Linuxulator bridge is the separate optional module linux/nvidia_uvm_linux.ko, and the
+  bridge interface is sys/uvm_bridge.[ch] (the driver exports uvm_bridge_fd_is_ours).
+- Pass A left the tree red: sys/uvm_channel.c still used the old frame buffer names, and the new
+  request numbering broke tests/unit/abi_layout_test.c and the ioctl harnesses. Fixed.
+- Found a real bug in pass A's native encoding: uvm_ioctl_native_decode() compared the top 16 bits of
+  the request word against IOC_VOID|group, but the group byte is below bit 16, so every native request
+  decoded to 0 and every ioctl answered ENOTTY. The decode now checks the direction, the size, the
+  group and the number; tests/unit/linux_bridge_test.c caught it.
+- The request numbers are the driver's own now (UVM_REQ_*, dense and stable), and the Linux numbers
+  live in the bridge header with a translation in both directions.
+- sys/uvm_requests.h (new): the rule that the table covers every id exactly once; the module asks it
+  at load and refuses to load when it does not.
+- tests/kmod_deps_test.sh (new): the static load check (exact dependency sets, no Linux symbol in the
+  driver, every undefined symbol resolves, the export exists), each check shown to be able to fail.
+- "Unified memory" replaces "no video memory" everywhere (Mark, 2026-11-25): UVM_FB_UNIFIED,
+  UVM_FB_DEDICATED, UVM_FB_PMA_UNIFIED, uvm_fb_is_unified(); the kernel message reads "unified memory
+  (no dedicated memory); GPU memory is shared system memory". RM's own names (bZeroFb,
+  PDB_PROP_GPU_ZERO_FB) are kept with a comment that RM calls this "zero framebuffer".
+- make install installs both modules and both manual pages; the bridge is never loaded by the installer.
+- sh tests/run_unit_tests.sh, sh tests/make_install_test.sh, the amd64 cross check and mandoc -T lint
+  on both pages pass. Both modules build with -Werror against /usr/src/sys (aarch64, FreeBSD
+  16.0-CURRENT) and are linked by the base lld. No kldload, no reboot.
+
+## 2026-11-26 (Track #2444 pass C: the one request table)
+- The gate refused pass B: lizard on linux/nvidia_uvm_linux_ioctl.h:112 (uvm_linux_request_id, 54
+  branches, 114 lines) and its pair, and on tests/unit/linux_bridge_test.c:162 (main, 66 branches,
+  121 lines); cpd on the two translation functions (115 lines each), on the enum of
+  sys/nvidia_uvm_ioctl.h against the id list of the test (54 lines), and on the test's own list
+  against itself (31 lines).
+- The mapping is now ONE table: linux/uvm_linux_request_table.h, one row per request (the name,
+  the driver's UVM_REQ_* id, the Linux number and the size of the parameter structure). The two
+  translations are small lookups over it (9 lines, 3 branches each), and
+  tests/unit/linux_bridge_test.c walks the same table instead of holding a copy of the lists.
+- The table is GENERATED at build time: tools/gen-ioctl-table.sh (taken unchanged from
+  skunkwerks/nvidia-uvm-freebsd, commit fbf8ed3, BSD-2-Clause) reads NVIDIA's MIT uvm_ioctl.h and
+  prints one entry per request; tools/gen-uvm-request-table.sh joins those names with this
+  repository's ids, Linux numbers and parameter structures, and checks that the Linux numbers are
+  the ones NVIDIA's header carries. The generated file is committed, so a build needs no NVIDIA
+  source; `make regen-ioctl-table NVIDIA_UVM_IOCTL_H=...` rewrites it and `make build` checks it.
+- No behaviour change: the 53 pairs of the old switch and the 53 rows of the table are the same,
+  compared name by name.
+- The Linux request numbers of uvm-spec r1 01-user-abi.md section 2.1 are the ones NVIDIA's header
+  carries (every one of them compares equal). The two initialisation requests are not in NVIDIA's
+  Linux interface at all, so their numbers come from the specification alone and the unit test pins
+  them.
+- lizard -C 20 -L 100 -a 8 -w sys linux tests/unit prints nothing; scan-cpd over the changed files
+  finds nothing (the only clone left in that scope, the module's GPU-id block against the core's
+  id block, is in the base commit as well and is not this change's). Both modules build with
+  -Werror against /usr/src/sys and are linked by the base lld. No kldload, no reboot.

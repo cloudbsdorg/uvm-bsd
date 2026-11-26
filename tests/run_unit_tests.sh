@@ -78,6 +78,59 @@ for pat in 'sys/uvm_main.c:uvm_open_admit(uvm.unloading)' 'sys/uvm_main.c:uvm_un
 	fi
 done
 
+# The native driver must not depend on the Linuxulator (Track #2444).  The
+# dependency would be in the module's MODULE_DEPEND lines, so the check is
+# on the source: a line that names a Linux module as a dependency of
+# nvidia-uvm.  The Linux ioctl bridge belongs to the other module, and the
+# driver must not register a Linuxulator handler itself.
+check_no_linux_dependency() {
+	_f=$1
+	_rc=0
+	if grep -qE 'MODULE_DEPEND\(nvidia_uvm, *(linux|linux64|linux64elf|linux_common)' "$_f"; then
+		echo "    the driver declares a Linuxulator dependency"
+		_rc=1
+	fi
+	if grep -qE 'linux_ioctl_(register|unregister)_handler|machine/\.\./linux' "$_f"; then
+		echo "    the driver still talks to the Linuxulator"
+		_rc=1
+	fi
+	return $_rc
+}
+
+# check_bridge_present <file> - the bridge module registers the handler.
+check_bridge_present() {
+	_f=$1
+	_rc=0
+	for _pat in 'linux_ioctl_register_handler(&uvm_linux_handler)' \
+	    'MODULE_DEPEND(nvidia_uvm_linux, nvidia_uvm, 1, 1, 1)'; do
+		grep -qF -- "$_pat" "$_f" || {
+			echo "    missing: $_pat"
+			_rc=1
+		}
+	done
+	return $_rc
+}
+
+if check_no_linux_dependency "$REPO/sys/uvm_main.c"; then
+	echo "ok   sys/uvm_main.c depends on no Linuxulator module"
+else
+	echo "FAIL sys/uvm_main.c depends on a Linuxulator module"
+	rc=1
+fi
+if check_bridge_present "$REPO/linux/uvm_linux_bridge.c"; then
+	echo "ok   linux/uvm_linux_bridge.c registers the Linux ioctl handler"
+else
+	echo "FAIL linux/uvm_linux_bridge.c does not register the Linux ioctl handler"
+	rc=1
+fi
+# the driver exports the entry point the bridge calls
+if grep -qE '^EXPORT_SYMS=.*uvm_bridge_fd_is_ours' "$REPO/sys/Makefile"; then
+	echo "ok   sys/Makefile exports uvm_bridge_fd_is_ours to the bridge"
+else
+	echo "FAIL sys/Makefile does not export uvm_bridge_fd_is_ours to the bridge"
+	rc=1
+fi
+
 # The frame buffer rules live in sys/uvm_fb_state.h, and the unit test above
 # checks what they decide.  That only protects the module if the kernel code
 # asks the rules instead of deciding on its own, so the two call sites are
@@ -95,7 +148,7 @@ check_gpu_fb_wiring() {
 	for _pat in 'gpu->fb_state = uvm_fb_info_state(status, &gpu->fb);' \
 	    'pma_verdict = uvm_fb_pma_judge(gpu->fb_state, status);' \
 	    'if (pma_verdict.decision == UVM_FB_PMA_FAIL) {' \
-	    'if (pma_verdict.decision == UVM_FB_PMA_ABSENT) {'; do
+	    'if (pma_verdict.decision == UVM_FB_PMA_UNIFIED) {'; do
 		grep -qF -- "$_pat" "$_f" || {
 			echo "    missing: $_pat"
 			_rc=1
@@ -112,7 +165,7 @@ check_channel_fb_wiring() {
 	for _pat in 'sysmem_requested = (uvm.sysmem_gpfifo != 0);' \
 	    'place = uvm_fb_gpfifo_place(sysmem_requested, gpu->fb_state);' \
 	    'mgr->gpfifo_sysmem = uvm_fb_gpfifo_is_sysmem(place);' \
-	    'case UVM_FB_GPFIFO_SYSMEM_NO_VIDEO:'; do
+	    'case UVM_FB_GPFIFO_SYSMEM_UNIFIED:'; do
 		grep -qF -- "$_pat" "$_f" || {
 			echo "    missing: $_pat"
 			_rc=1
@@ -153,23 +206,23 @@ fi
 
 # the unit test must fail when the rules themselves are broken
 mkdir -p "$T/mutant_hdr"
-sed 's/return (UVM_FB_BROKEN);/return (UVM_FB_ABSENT);/' "$REPO/sys/uvm_fb_state.h" \
+sed 's/return (UVM_FB_BROKEN);/return (UVM_FB_UNIFIED);/' "$REPO/sys/uvm_fb_state.h" \
     >"$T/mutant_hdr/uvm_fb_state.h"
 if ! mutant_differs "$REPO/sys/uvm_fb_state.h" "$T/mutant_hdr/uvm_fb_state.h" \
     "the broken-frame-buffer mutant"; then
 	rc=1
 elif ! cc -std=c11 -Wall -Wextra -Werror -I "$T/mutant_hdr" -I "$REPO/sys" \
-    -o "$T/fb_mutant_absent" "$REPO/tests/unit/fb_state_test.c" 2>"$T/mutant_hdr/absent.err"; then
+    -o "$T/fb_mutant_unified" "$REPO/tests/unit/fb_state_test.c" 2>"$T/mutant_hdr/unified.err"; then
 	echo "FAIL the broken-frame-buffer mutant does not compile"
-	cat "$T/mutant_hdr/absent.err"
+	cat "$T/mutant_hdr/unified.err"
 	rc=1
-elif "$T/fb_mutant_absent" >"$T/mutant_hdr/absent.out" 2>&1; then
-	echo "FAIL the fb_state test passes on a mutant that calls broken information absent"
+elif "$T/fb_mutant_unified" >"$T/mutant_hdr/unified.out" 2>&1; then
+	echo "FAIL the fb_state test passes on a mutant that calls broken information unified"
 	rc=1
 else
-	echo "ok   the fb_state test fails on a mutant that calls broken information absent"
+	echo "ok   the fb_state test fails on a mutant that calls broken information unified"
 fi
-sed 's/return (UVM_FB_GPFIFO_SYSMEM_NO_VIDEO);/return (UVM_FB_GPFIFO_VIDEO);/' \
+sed 's/return (UVM_FB_GPFIFO_SYSMEM_UNIFIED);/return (UVM_FB_GPFIFO_DEDICATED);/' \
     "$REPO/sys/uvm_fb_state.h" >"$T/mutant_hdr/uvm_fb_state.h"
 if ! mutant_differs "$REPO/sys/uvm_fb_state.h" "$T/mutant_hdr/uvm_fb_state.h" \
     "the GPFIFO placement mutant"; then
@@ -180,10 +233,10 @@ elif ! cc -std=c11 -Wall -Wextra -Werror -I "$T/mutant_hdr" -I "$REPO/sys" \
 	cat "$T/mutant_hdr/gpfifo.err"
 	rc=1
 elif "$T/fb_mutant_gpfifo" >"$T/mutant_hdr/gpfifo.out" 2>&1; then
-	echo "FAIL the fb_state test passes on a mutant that puts the GPFIFO in video memory without video memory"
+	echo "FAIL the fb_state test passes on a mutant that puts the GPFIFO in dedicated memory on a GPU with unified memory"
 	rc=1
 else
-	echo "ok   the fb_state test fails on a mutant that puts the GPFIFO in video memory without video memory"
+	echo "ok   the fb_state test fails on a mutant that puts the GPFIFO in dedicated memory on a GPU with unified memory"
 fi
 
 # the pins must fail when the call sites ignore the helper result
@@ -220,6 +273,19 @@ elif check_channel_fb_wiring "$T/mutant/uvm_channel.c"; then
 else
 	echo "ok   the GPFIFO pin fails on a mutant that reads the tunable twice"
 fi
+# the Linuxulator pin must fail when the driver takes a dependency on the
+# Linuxulator again
+sed 's/MODULE_DEPEND(nvidia_uvm, nvidia, 2, 2, 2);/MODULE_DEPEND(nvidia_uvm, nvidia, 2, 2, 2);\nMODULE_DEPEND(nvidia_uvm, linux64elf, 1, 1, 1);/' \
+    "$REPO/sys/uvm_main.c" >"$T/mutant/uvm_main.c"
+if ! mutant_differs "$REPO/sys/uvm_main.c" "$T/mutant/uvm_main.c" \
+    "the Linuxulator dependency mutant"; then
+	rc=1
+elif check_no_linux_dependency "$T/mutant/uvm_main.c"; then
+	echo "FAIL the Linuxulator pin passes on a mutant that depends on the Linuxulator"
+	rc=1
+else
+	echo "ok   the Linuxulator pin fails on a mutant that depends on the Linuxulator"
+fi
 if sh "$REPO/tests/stress/uvm_stress.sh" -T >"$T/filter.out" 2>&1; then
 	echo "ok   uvm_stress.sh -T (the kernel log filter)"
 else
@@ -239,6 +305,13 @@ if sh -n "$REPO/tests/stress/uvm_stress.sh"; then
 else
 	echo "FAIL uvm_stress.sh does not parse"
 	rc=1
+fi
+# The static load check of the two modules (Track #2444) needs the built
+# modules: it reads the dependency list and the symbols of the .ko files.
+if [ -f "$REPO/sys/nvidia-uvm.ko" ] && [ -f "$REPO/linux/nvidia_uvm_linux.ko" ]; then
+	if sh "$REPO/tests/kmod_deps_test.sh"; then :; else rc=1; fi
+else
+	echo "skip kmod_deps_test: no built modules (run make build first)"
 fi
 for t in dma_tag_size_test giant_yield_log_test client_owner_pins_test client_owner_glue_test testboot_kit_test makefile_contract_test make_install_test; do
 	if sh "$REPO/tests/$t.sh"; then :; else rc=1; fi

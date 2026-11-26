@@ -1079,9 +1079,10 @@ static void
 uvm_channel_gpfifo_log(struct uvm_gpu *gpu, enum uvm_fb_gpfifo_place place, bool sysmem_requested)
 {
 	switch (place) {
-	case UVM_FB_GPFIFO_SYSMEM_NO_VIDEO:
-		uvm_log("gpu%u: no video memory: the GPFIFO ring and the PUT word go to system memory, "
-		    "hw.nvidia_uvm.sysmem_gpfifo=%d is ignored", gpu->id, sysmem_requested ? 1 : 0);
+	case UVM_FB_GPFIFO_SYSMEM_UNIFIED:
+		uvm_log("gpu%u: unified memory (no dedicated memory): the GPFIFO ring and the PUT word go "
+		    "to system memory, hw.nvidia_uvm.sysmem_gpfifo=%d is ignored", gpu->id,
+		    sysmem_requested ? 1 : 0);
 		break;
 	case UVM_FB_GPFIFO_SYSMEM_UNUSABLE:
 		uvm_log("gpu%u: the frame buffer information is broken: the GPFIFO ring and the PUT word "
@@ -1091,7 +1092,7 @@ uvm_channel_gpfifo_log(struct uvm_gpu *gpu, enum uvm_fb_gpfifo_place place, bool
 		uvm_log("gpu%u: hw.nvidia_uvm.sysmem_gpfifo=%d: the GPFIFO ring and the PUT word go to "
 		    "system memory", gpu->id, sysmem_requested ? 1 : 0);
 		break;
-	case UVM_FB_GPFIFO_VIDEO:
+	case UVM_FB_GPFIFO_DEDICATED:
 		break;
 	}
 }

@@ -35,7 +35,7 @@ for h in opt_global.h opt_acpi.h; do : > "$T/$h"; done
     && awk -f "$SYSDIR/tools/vnode_if.awk" "$SYSDIR/kern/vnode_if.src" -p)
 
 CFLAGS="-target x86_64-unknown-freebsd16.0 -fsyntax-only -O2 -pipe -fno-strict-aliasing -Werror -D_KERNEL \
--DKLD_MODULE -nostdinc -I$T -I$REPO/sys -I$SYSDIR -I$SYSDIR/contrib/ck/include -include $T/opt_global.h \
+-DKLD_MODULE -nostdinc -I$T -I$REPO/sys -I$REPO/linux -I$SYSDIR -I$SYSDIR/contrib/ck/include -include $T/opt_global.h \
 -fno-common -ffreestanding -fwrapv -fstack-protector -mcmodel=kernel -mno-red-zone -mno-mmx -mno-sse \
 -msoft-float -fno-asynchronous-unwind-tables -fno-omit-frame-pointer -mno-omit-leaf-frame-pointer \
 -MD -MF /dev/null -std=gnu17 -Wall -Wextra -Wno-unused-parameter -Wmissing-prototypes -Wstrict-prototypes \
@@ -45,7 +45,7 @@ CFLAGS="-target x86_64-unknown-freebsd16.0 -fsyntax-only -O2 -pipe -fno-strict-a
 -Wno-error=shift-negative-value -Wno-address-of-packed-member -Wno-format-zero-length"
 
 rc=0
-for src in "$REPO"/sys/uvm_*.c "$REPO"/sys/core/*.c; do
+for src in "$REPO"/sys/uvm_*.c "$REPO"/sys/core/*.c "$REPO"/linux/uvm_*.c; do
 	# shellcheck disable=SC2086
 	if cc $CFLAGS "$src" 2> "$T/err"; then
 		echo "ok   amd64: $(basename "$src")"

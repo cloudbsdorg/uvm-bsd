@@ -10,6 +10,19 @@ sys/x86
 sys/*_if.h
 sys/opt_*.h
 sys/nvidia-uvm.kld
+# the same for the optional Linux ioctl bridge module
+linux/*.o
+linux/*.ko
+linux/*.ko.debug
+linux/*.ko.full
+linux/.depend*
+linux/export_syms
+linux/machine
+linux/x86
+linux/i386
+linux/*_if.h
+linux/opt_*.h
+linux/nvidia_uvm_linux.kld
 tests/unit/*_test
 tests/ioctl/uvm_ioctl_test
 sys/vnode_if_*.h

@@ -3,14 +3,16 @@
 # SPDX-License-Identifier: BSD-2-Clause
 #
 # The install/deinstall engine behind the root Makefile.  A root invocation
-# copies the two inputs into a private stage before validating anything; a
+# copies the inputs into a private stage before validating anything; a
 # normal-user invocation is permitted only with an existing DESTDIR.
 #
 # Test seams require UVM_TEST_HOOKS=1, a non-empty DESTDIR and effective uid != 0;
 # they are never honoured by root.  MK_KO names a planted module and skips the
-# build, UVM_TEST_KLDXREF names the kldxref executable, and the hidden
-# _check-dest-owner/_check-destdir-ancestors entries expose read-only checks.
-# MK_SYSDIR is ordinary build configuration, not a test seam.
+# build, MK_KO_LINUX names a planted bridge module (without it the planted
+# driver module stands in for the bridge), UVM_TEST_KLDXREF names the kldxref
+# executable, and the hidden _check-dest-owner/_check-destdir-ancestors entries
+# expose read-only checks.  MK_SYSDIR is ordinary build configuration, not a
+# test seam.
 
 set -eu
 umask 022
@@ -264,7 +266,13 @@ stage_files() {
 }
 
 allowed_path() {
-	[ "$1" = /boot/modules/nvidia-uvm.ko ] || [ "$1" = "$2/share/man/man4/nvidia-uvm.4" ]
+	case $1 in
+	/boot/modules/nvidia-uvm.ko) return 0 ;;
+	/boot/modules/nvidia_uvm_linux.ko) return 0 ;;
+	esac
+	[ "$1" = "$2/share/man/man4/nvidia-uvm.4" ] && return 0
+	[ "$1" = "$2/share/man/man4/nvidia-uvm-linux.4" ] && return 0
+	return 1
 }
 
 manifest_prefix() {
@@ -376,14 +384,18 @@ run_kldxref() {
 	return 0
 }
 
-# install_stage DESTDIR PREFIX user|root KO MAN: validate all destinations
-# before copying either payload, write pending records, then replace atomically.
+# install_stage DESTDIR PREFIX user|root KO MAN [BRIDGE_KO BRIDGE_MAN]: validate
+# all destinations before copying any payload, write pending records, then
+# replace atomically.  Without the bridge the two files of the driver are
+# staged; with it, the two files of the optional bridge module as well.
 install_stage() {
 	_d=$1
 	_pfx=$2
 	_mode=$3
 	_ko_source=$4
 	_man_source=$5
+	_bridge_ko_source=${6:-}
+	_bridge_man_source=${7:-}
 	_manifest=$_d$STATEDIR/installed.manifest
 	[ "$_mode" != root ] || [ "$(id -u)" = 0 ] || die "the root install step was not entered through as_root"
 	check_dest_owner "$_mode"
@@ -414,8 +426,14 @@ $_newdirs"
 	mkdir_p755 "$_s$_pfx/share/man/man4"
 	copy_source "$_ko_source" "$_s/boot/modules/nvidia-uvm.ko" 555 "$_w/input-ko"
 	copy_source "$_man_source" "$_s$_pfx/share/man/man4/nvidia-uvm.4" 444 "$_w/input-man"
+	if [ -n "$_bridge_ko_source" ]; then
+		copy_source "$_bridge_ko_source" "$_s/boot/modules/nvidia_uvm_linux.ko" 555 "$_w/input-bridge-ko"
+		copy_source "$_bridge_man_source" "$_s$_pfx/share/man/man4/nvidia-uvm-linux.4" 444 "$_w/input-bridge-man"
+	fi
 	stage_files "$_s" > "$_w/list"
-	[ "$(wc -l < "$_w/list" | tr -d ' ')" = 2 ] || die "the private stage does not contain exactly two files"
+	_want=2
+	[ -z "$_bridge_ko_source" ] || _want=4
+	[ "$(wc -l < "$_w/list" | tr -d ' ')" = "$_want" ] || die "the private stage does not contain exactly $_want files"
 
 	_prev=$_w/prev
 	: > "$_prev"
@@ -481,31 +499,59 @@ $_dir"
 	run_kldxref install "$_d/boot/modules"
 }
 
+# stale_sources MODULE PATH...: the first source file that is newer than
+# MODULE.  The build products of the module directories are not sources.
+stale_sources() {
+	_m=$1
+	shift
+	find "$@" -type f ! -name '*.o' ! -name '*.ko' ! -name '*.ko.debug' \
+	    ! -name '*.ko.full' ! -name '*.kld' ! -name '.depend*' \
+	    ! -name 'export_syms' ! -name 'opt_*.h' ! -name '*_if.h' \
+	    -newer "$_m" -print -quit 2>/dev/null || true
+}
+
 do_install() {
 	_ko=$repo/sys/nvidia-uvm.ko
+	_bridge_ko=$repo/linux/nvidia_uvm_linux.ko
+	_man=$repo/man/nvidia-uvm.4
+	_bridge_man=$repo/man/nvidia-uvm-linux.4
 	if [ "$(id -u)" = 0 ]; then
 		if [ ! -f "$_ko" ] || [ -L "$_ko" ]; then
 			die "install: run make (as the owner of the checkout) first, then make install"
 		fi
-		_newer=$(find "$repo/sys" "$repo/core" -type f -newer "$_ko" -print -quit) ||
+		if [ ! -f "$_bridge_ko" ] || [ -L "$_bridge_ko" ]; then
+			die "install: run make (as the owner of the checkout) first, then make install"
+		fi
+		[ -z "$(stale_sources "$_ko" "$repo/sys" "$repo/sys/core")" ] ||
 		    die "install: run make (as the owner of the checkout) first, then make install"
-		[ -z "$_newer" ] || die "install: run make (as the owner of the checkout) first, then make install"
+		[ -z "$(stale_sources "$_bridge_ko" "$repo/linux" "$repo/sys/nvidia_uvm_ioctl.h" \
+		    "$repo/sys/uvm_bridge.h")" ] ||
+		    die "install: run make (as the owner of the checkout) first, then make install"
 	elif test_hooks_enabled && [ -n "${MK_KO:-}" ]; then
 		_ko=$MK_KO
+		# the bridge module is a test seam of its own; without it the
+		# planted driver module stands in for the bridge as well
+		_bridge_ko=${MK_KO_LINUX:-$MK_KO}
 	else
 		(cd "$repo/sys" && /usr/bin/make SYSDIR="$SYSDIR") || die "install: building nvidia-uvm.ko failed"
+		(cd "$repo/linux" && /usr/bin/make SYSDIR="$SYSDIR") ||
+		    die "install: building nvidia_uvm_linux.ko failed"
 	fi
 	[ -f "$_ko" ] && [ ! -L "$_ko" ] || die "install: $_ko is not a regular file"
-	_man=$repo/man/nvidia-uvm.4
+	[ -f "$_bridge_ko" ] && [ ! -L "$_bridge_ko" ] || die "install: $_bridge_ko is not a regular file"
 	[ -f "$_man" ] && [ ! -L "$_man" ] || die "install: $_man is not a regular file"
+	[ -f "$_bridge_man" ] && [ ! -L "$_bridge_man" ] || die "install: $_bridge_man is not a regular file"
 	if [ -n "$DESTDIR" ] && [ "$(id -u)" != 0 ]; then
-		ask "Install nvidia-uvm.ko and its man page into $DESTDIR (owned by $(id -un))?" || die "install: nothing installed"
+		ask "Install nvidia-uvm.ko, nvidia_uvm_linux.ko and their man pages into $DESTDIR (owned by $(id -un))?" ||
+		    die "install: nothing installed"
 		validate_paths
-		install_stage "$DESTDIR" "$PREFIX" user "$_ko" "$_man"
+		install_stage "$DESTDIR" "$PREFIX" user "$_ko" "$_man" "$_bridge_ko" "$_bridge_man"
 	else
-		ask "Install nvidia-uvm.ko and its man page as root (owner root:wheel)?" || die "install: nothing installed"
+		ask "Install nvidia-uvm.ko, nvidia_uvm_linux.ko and their man pages as root (owner root:wheel)?" ||
+		    die "install: nothing installed"
 		validate_paths
-		as_root sh "$repo/scripts/make.sh" _install-stage "$DESTDIR" "$PREFIX" root "$_ko" "$_man"
+		as_root sh "$repo/scripts/make.sh" _install-stage "$DESTDIR" "$PREFIX" root \
+		    "$_ko" "$_man" "$_bridge_ko" "$_bridge_man"
 	fi
 	note "install: done; manifest $MANIFEST"
 }
@@ -667,7 +713,7 @@ deinstall)
 	do_deinstall
 	;;
 _install-stage)
-	[ "$#" = 6 ] || die "usage: make.sh _install-stage DESTDIR PREFIX user|root KO MAN"
+	[ "$#" = 6 ] || [ "$#" = 8 ] || die "usage: make.sh _install-stage DESTDIR PREFIX user|root KO MAN [BRIDGE_KO BRIDGE_MAN]"
 	case $4 in
 	user|root) ;;
 	*) printf 'make.sh: invalid install mode: %s\n' "$4" >&2; exit 2 ;;
@@ -677,7 +723,7 @@ _install-stage)
 	PREFIX=$3
 	MANIFEST=$DESTDIR$STATEDIR/installed.manifest
 	validate_paths
-	install_stage "$DESTDIR" "$PREFIX" "$4" "$5" "$6"
+	install_stage "$DESTDIR" "$PREFIX" "$4" "$5" "$6" "${7:-}" "${8:-}"
 	;;
 _deinstall)
 	[ "$#" = 4 ] || die "usage: make.sh _deinstall DESTDIR PREFIX user|root"
